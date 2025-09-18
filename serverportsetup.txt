@@ -1,0 +1,28 @@
+# CtrlSpeak Server Provisioning (Windows PowerShell)
+
+# 1. Copy the release build onto the target PC (example assumes Desktop)
+Copy-Item "C:\Users\<your-user>\PycharmProjects\CtrSpeak\dist\CtrlSpeak-full.exe" "$env:USERPROFILE\Desktop\CtrlSpeak-full.exe"
+
+# 2. Run CtrlSpeak once in auto-setup mode to configure Client+Server and download the Whisper model
+Start-Process -FilePath "$env:USERPROFILE\Desktop\CtrlSpeak-full.exe" -ArgumentList '--auto-setup','client_server' -Wait
+
+# 3. Allow CtrlSpeak ports through Windows Firewall (run in elevated PowerShell)
+#    TCP 65432 – REST API for transcription requests
+#    UDP 54330 – service discovery broadcast/listen
+netsh advfirewall firewall add rule name="CtrlSpeak API" dir=in action=allow protocol=TCP localport=65432 profile=private
+netsh advfirewall firewall add rule name="CtrlSpeak API (Public)" dir=in action=allow protocol=TCP localport=65432 profile=public
+netsh advfirewall firewall add rule name="CtrlSpeak Discovery In" dir=in action=allow protocol=UDP localport=54330 profile=private
+netsh advfirewall firewall add rule name="CtrlSpeak Discovery Out" dir=out action=allow protocol=UDP localport=54330 profile=private
+netsh advfirewall firewall add rule name="CtrlSpeak Discovery In (Public)" dir=in action=allow protocol=UDP localport=54330 profile=public
+netsh advfirewall firewall add rule name="CtrlSpeak Discovery Out (Public)" dir=out action=allow protocol=UDP localport=54330 profile=public
+
+# 4. Verify the server status and start the tray normally (double-click the EXE)
+#    The Manage CtrlSpeak window should show:
+#       Mode: client_server
+#       Server thread: Running
+#       Serving: <server-IP>:65432
+
+# Notes:
+# - Replace <your-user> with the real user profile name when copying the EXE.
+# - Steps 2 and 3 only need to run once per machine.
+# - Re-run '--auto-setup client_server' after updates if you need to refresh the install silently.

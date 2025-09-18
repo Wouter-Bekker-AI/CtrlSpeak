@@ -1,0 +1,11 @@
+ctranslate2
+faster-whisper
+huggingface-hub
+numpy
+pyaudio
+pyautogui
+pystray
+Pillow
+pynput
+tqdm
+pyinstaller

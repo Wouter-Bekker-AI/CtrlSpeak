@@ -1,0 +1,33 @@
+# Python intermediates
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Build artifacts
+build/
+build_client/
+dist/
+dist_client/
+releases/
+*.spec.bak
+
+# Executables and logs
+*.exe
+*.dll
+*.log
+*.tmp
+*.bak
+build_log.txt
+CtrlSpeak-error.log
+client_only.flag
+
+# IDE files
+.idea/
+.vscode/
+
+# Audio test artifacts
+part*.wav
+temp*.wav
+
+# Misc
+Thumbs.db
