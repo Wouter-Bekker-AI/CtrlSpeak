@@ -53,7 +53,7 @@ DEFAULT_SETTINGS = {
     "preferred_server_host": None,
     "preferred_server_port": None,
 }
-APP_VERSION = "0.5.9"
+APP_VERSION = "0.5.10"
 SPLASH_DURATION_MS = 1000
 ERROR_LOG_FILENAME = "CtrlSpeak-error.log"
 LOCK_FILENAME = "CtrlSpeak.lock"
@@ -1512,6 +1512,18 @@ def is_anydesk_window(hwnd: int) -> bool:
     return False
 
 
+def is_console_window(hwnd: int) -> bool:
+    if not sys.platform.startswith("win") or not hwnd:
+        return False
+    class_name = get_class_name(hwnd)
+    if class_name in {"consolewindowclass"}:
+        return True
+    if "cascadia" in class_name:
+        return True
+    process_name = get_window_process_name(hwnd)
+    return process_name in {"conhost.exe", "openconsole.exe", "wt.exe", "windowsterminal.exe", "ubuntu.exe", "wsl.exe"}
+
+
 def try_direct_text_insert(text: str, hwnd: Optional[int] = None) -> bool:
     if not sys.platform.startswith("win"):
         return False
@@ -1528,11 +1540,6 @@ def try_direct_text_insert(text: str, hwnd: Optional[int] = None) -> bool:
         if any(token in class_name for token in ("edit", "richedit", "notepad", "textarea", "tmemo", "scintilla")):
             user32.SendMessageW(hwnd, EM_SETSEL, 0xFFFFFFFF, 0xFFFFFFFF)
             user32.SendMessageW(hwnd, EM_REPLACESEL, True, text)
-            return True
-        existing = get_window_text(hwnd)
-        if existing is not None and len(existing) < 16384 and class_name in {"consolewindowclass"}:
-            combined = existing + text
-            user32.SendMessageW(hwnd, WM_SETTEXT, 0, combined)
             return True
     except Exception:
         return False
@@ -1764,14 +1771,17 @@ def insert_text_into_focus(text: str) -> None:
         pyautogui.write(text)
         return
     hwnd = get_focused_control()
-    if hwnd and (FORCE_SENDINPUT or is_anydesk_window(hwnd)):
+    console_window = False
+    if hwnd:
+        console_window = is_console_window(hwnd)
+    if hwnd and (FORCE_SENDINPUT or is_anydesk_window(hwnd) or console_window):
         if send_unicode_input(text):
             return
         if try_sendinput_paste(text):
             return
-    if try_direct_text_insert(text, hwnd):
+    if not console_window and try_direct_text_insert(text, hwnd):
         return
-    if FORCE_SENDINPUT:
+    if FORCE_SENDINPUT and not console_window:
         if send_unicode_input(text):
             return
     if try_sendinput_paste(text):
