@@ -14,11 +14,14 @@ from utils.system import (
     load_settings,
     settings, settings_lock,
     start_discovery_listener,
+    parse_cli_args, transcribe_cli,
+    CLIENT_ONLY_BUILD,
+    start_server,
     run_tray,
 )
+
 from utils.gui import show_splash_screen, ensure_mode_selected
 from utils.models import initialize_transcriber
-from utils.system import load_settings, parse_cli_args, transcribe_cli, CLIENT_ONLY_BUILD, start_server
 
 
 def main(argv: list[str]) -> int:
@@ -33,46 +36,36 @@ def main(argv: list[str]) -> int:
         from utils.system import set_force_sendinput
         set_force_sendinput(True)
 
-    load_settings()
-
-    if args.auto_setup:
-        from utils.system import apply_auto_setup
-        apply_auto_setup(args.auto_setup)
-
-    cli_mode = args.transcribe is not None
-
+    # Single instance
     if not acquire_single_instance_lock():
-        message = "CtrlSpeak is already running. Please close the existing instance before starting a new one."
-        if cli_mode:
-            print(message, file=sys.stderr)
-        else:
-            notify(message)
+        notify("CtrlSpeak is already running.")
         return 0
 
-    if not cli_mode:
-        show_splash_screen(SPLASH_DURATION_MS)
+    # Load settings early
+    load_settings()
 
-    ensure_mode_selected()
-
-    if cli_mode:
-        start_discovery_listener()
-        with settings_lock:
-            mode = settings.get("mode")
-        if mode == "client_server":
-            initialize_transcriber()
-        elif mode == "client":
-            time.sleep(1.0)
+    # CLI: offline transcription of a file
+    if args.transcribe:
         return transcribe_cli(args.transcribe)
 
-    # Normal (tray) run
+    # Splash
+    show_splash_screen(SPLASH_DURATION_MS)
+
+    # Ensure mode selected (client or client_server)
+    ensure_mode_selected()
+
+    # Start discovery listener for client mode visibility
     start_discovery_listener()
+
+    # Orchestrate engine/server as needed based on mode
     with settings_lock:
         mode = settings.get("mode")
+
     if mode == "client_server":
-        initialize_transcriber()
+        initialize_transcriber()   # warm-up local model
         start_server()
     elif mode == "client":
-        time.sleep(1.0)
+        time.sleep(1.0)  # small delay so discovery has time to populate
 
     run_tray()
     return 0
