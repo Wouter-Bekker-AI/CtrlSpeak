@@ -27,6 +27,24 @@ import pystray
 from PIL import Image
 from pynput import keyboard
 import tkinter as tk
+from collections import deque
+
+# recent mono samples of loading.wav for GUI wiggle
+_proc_vis_lock = threading.Lock()
+_proc_vis_buffers = deque()
+_proc_vis_samples = 0
+_PROC_VIS_MAX_SAMPLES = 4096  # ~0.1–0.25s depending on rate
+
+def get_processing_waveform(n: int = 512) -> np.ndarray:
+    """Return the most recent mono samples of loading.wav in [-1,1]."""
+    with _proc_vis_lock:
+        if not _proc_vis_buffers:
+            return np.zeros(n, dtype=np.float32)
+        data = np.concatenate(list(_proc_vis_buffers)) if len(_proc_vis_buffers) > 1 else _proc_vis_buffers[0]
+    if data.size <= n:
+        out = np.zeros(n, dtype=np.float32); out[-data.size:] = data; return out
+    return data[-n:]
+
 
 # ---------------- Public constants ----------------
 APP_VERSION = "0.6.0"
@@ -187,6 +205,50 @@ FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 44100
 
+# --- Live waveform ring buffer (for overlay) ---
+from collections import deque
+_waveform_lock = threading.Lock()
+_waveform_buffers = deque()
+_waveform_samples = 0
+_WAVEFORM_MAX_SECONDS = 2.0  # keep ~2 seconds of recent audio
+_WAVEFORM_MAX_SAMPLES = int(RATE * _WAVEFORM_MAX_SECONDS)
+
+# live level of the loading.wav while processing
+_processing_level = 0.0
+_processing_level_lock = threading.Lock()
+
+def get_processing_level() -> float:
+    """Smoothed RMS in [0, ~1], read by GUI for pulsing."""
+    with _processing_level_lock:
+        return float(_processing_level)
+
+
+def _push_waveform_bytes(chunk: bytes) -> None:
+    try:
+        arr = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+    except Exception:
+        return
+    global _waveform_samples
+    with _waveform_lock:
+        _waveform_buffers.append(arr)
+        _waveform_samples += arr.size
+        while _waveform_samples > _WAVEFORM_MAX_SAMPLES and _waveform_buffers:
+            popped = _waveform_buffers.popleft()
+            _waveform_samples -= popped.size
+
+def get_recent_waveform(ms: int = 500) -> np.ndarray:
+    """Return last ms of audio as float32 [-1,1] for drawing."""
+    need = int(RATE * ms / 1000.0)
+    with _waveform_lock:
+        if not _waveform_buffers:
+            return np.zeros(need, dtype=np.float32)
+        data = np.concatenate(list(_waveform_buffers)) if len(_waveform_buffers) > 1 else _waveform_buffers[0]
+    if data.size <= need:
+        out = np.zeros(need, dtype=np.float32)
+        out[-data.size:] = data
+        return out
+    return data[-need:]
+
 def generate_fallback_sound():
     duration = 0.5
     t = np.linspace(0.0, duration, int(PROCESSING_SAMPLE_RATE * duration), endpoint=False)
@@ -223,8 +285,47 @@ def _processing_sound_loop():
             rate=settings_audio["rate"],
             output=True,
         )
+
+        # choose a short hop for snappy visuals (~10 ms)
+        bytes_per_sample = settings_audio["width"]
+        channels = settings_audio["channels"]
+        hop_samples = int(settings_audio["rate"] * 0.010)  # 10 ms
+        chunk_bytes = hop_samples * bytes_per_sample * channels
+
+        offset = 0
+        nbytes = len(data)
+
+        alpha = 0.35  # smoothing (higher = more responsive)
+
         while not processing_sound_stop_event.is_set():
-            stream.write(data)
+            if offset + chunk_bytes > nbytes:
+                offset = 0  # loop the sound
+
+            chunk = data[offset:offset + chunk_bytes]
+            offset += chunk_bytes
+
+            stream.write(chunk)
+
+            try:
+                if bytes_per_sample == 2:
+                    arr = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+                    if channels > 1:
+                        arr = arr.reshape(-1, channels).mean(axis=1)
+                    rms = float(np.sqrt(np.mean(arr * arr)))
+                    # update smoothed level
+                    global _processing_level
+                    with _processing_level_lock:
+                        _processing_level = (1.0 - alpha) * _processing_level + alpha * rms
+                    # keep recent mono samples for GUI wiggle
+                    with _proc_vis_lock:
+                        _proc_vis_buffers.append(arr.copy())
+                        _proc_vis_samples += arr.size
+                        while _proc_vis_samples > _PROC_VIS_MAX_SAMPLES and _proc_vis_buffers:
+                            popped = _proc_vis_buffers.popleft()
+                            _proc_vis_samples -= popped.size
+            except Exception:
+                pass
+
     except Exception:
         pass
     finally:
@@ -234,6 +335,7 @@ def _processing_sound_loop():
         except Exception:
             pass
         pa_instance.terminate()
+
 
 def start_processing_feedback():
     global processing_sound_thread
@@ -256,7 +358,10 @@ def record_audio(target_path: Path) -> None:
     frames = []
     try:
         while recording:
-            frames.append(stream.read(CHUNKSIZE))
+            _chunk = stream.read(CHUNKSIZE)
+            frames.append(_chunk)
+            _push_waveform_bytes(_chunk)
+
     finally:
         stream.stop_stream(); stream.close(); pyaudio_instance.terminate()
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -276,6 +381,12 @@ def on_press(key):
         recording_file_path = create_recording_file_path()
         recording_thread = threading.Thread(target=record_audio, args=(recording_file_path,), daemon=True)
         recording_thread.start()
+        try:
+            from utils.gui import show_waveform_overlay
+            enqueue_management_task(show_waveform_overlay, lambda: get_recent_waveform(500))
+        except Exception:
+            pass
+
 
 def on_release(key):
     from utils.models import transcribe_audio
@@ -285,6 +396,17 @@ def on_release(key):
             recording = False
             if recording_thread:
                 recording_thread.join(); recording_thread = None
+            # switch overlay into “processing” mode
+            try:
+                from utils.gui import set_waveform_processing
+                enqueue_management_task(set_waveform_processing, "Processing…")
+            except Exception:
+                pass
+            # START the loading sound so GUI gets live levels + waveform
+            try:
+                start_processing_feedback()
+            except Exception:
+                pass
             path = recording_file_path
             text = None
             try:
@@ -295,6 +417,15 @@ def on_release(key):
             if text:
                 try: insert_text_into_focus(text)
                 except Exception as exc: notify_error("Text insertion failed", format_exception_details(exc))
+            try:
+                stop_processing_feedback()
+            except Exception:
+                pass
+            try:
+                from utils.gui import hide_waveform_overlay
+                enqueue_management_task(hide_waveform_overlay)
+            except Exception:
+                pass
             cleanup_recording_file(path)
             recording_file_path = None
 
@@ -464,6 +595,8 @@ def open_management_dialog(icon, item):
     enqueue_management_task(_show_management_window, icon)
 
 def run_tray():
+    from utils.gui import ensure_management_ui_thread
+    ensure_management_ui_thread()  # make sure tk_root exists for overlay
     start_client_listener()
     with settings_lock:
         mode = settings.get("mode")

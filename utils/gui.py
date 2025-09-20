@@ -10,6 +10,8 @@ from queue import Empty
 import tkinter as tk
 from tkinter import ttk, messagebox
 import pystray
+import numpy as np
+
 
 # ---- System-layer pieces (lifecycle, discovery, status) ----
 from utils.system import (
@@ -40,6 +42,213 @@ from utils.models import (
 # Shared UI thread root + instance ref (imported by utils.system.schedule_management_refresh)
 tk_root: Optional[tk.Tk] = None
 management_window: Optional["ManagementWindow"] = None
+
+# -------- Voice Waveform Overlay --------
+_waveform_win: Optional[tk.Toplevel] = None
+_waveform_canvas: Optional[tk.Canvas] = None
+_waveform_job: Optional[str] = None
+_waveform_provider: Optional[Callable[[], "np.ndarray"]] = None
+
+# NEW: simple state for live vs processing
+_waveform_mode: str = "live"         # "live" | "processing"
+_waveform_msg: str = "Processing…"
+_pulse_phase: float = 0.0            # animation phase
+_waveform_closing: bool = False
+
+
+def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
+    global _waveform_win, _waveform_canvas, _waveform_job, _waveform_provider, _waveform_mode, _waveform_closing
+    _waveform_provider = provider
+    _waveform_mode = "live"
+    try:
+        if tk_root is None or not tk_root.winfo_exists():
+            return
+        if _waveform_win and _waveform_win.winfo_exists():
+            return
+        _waveform_win = tk.Toplevel(tk_root)
+        _waveform_win.overrideredirect(True)
+        _waveform_win.attributes("-topmost", True)
+        try:
+            _waveform_win.attributes("-alpha", 0.92)  # translucent
+        except Exception:
+            pass
+
+        # Position: top half center
+        try:
+            sw, sh = tk_root.winfo_screenwidth(), tk_root.winfo_screenheight()
+        except Exception:
+            sw, sh = 1200, 800
+        target_w = int(sw * 0.4)
+        target_h = int(sh * 0.25)
+        x = (sw - target_w) // 2
+        y = int(sh * 0.05)
+        _waveform_win.geometry(f"{target_w}x{target_h}+{x}+{y}")
+
+        _waveform_canvas = tk.Canvas(_waveform_win, bg="#141414", highlightthickness=0)
+        _waveform_canvas.pack(fill=tk.BOTH, expand=True)
+        _waveform_closing = False
+
+        def _tick():
+            """Redraw the overlay every ~33 ms.
+            - LIVE mode: polyline waveform from recent audio samples.
+            - PROCESSING mode: pulsing circular ring with 'Processing…' label.
+            """
+            global _pulse_phase
+            if _waveform_win is None or not _waveform_win.winfo_exists():
+                return
+            if _waveform_canvas is None:
+                return
+
+            try:
+                w = max(1, _waveform_canvas.winfo_width())
+                h = max(1, _waveform_canvas.winfo_height())
+
+                _waveform_canvas.delete("all")
+                # background panel
+                _waveform_canvas.create_rectangle(12, 12, w - 12, h - 12, fill="#202020", outline="#333333")
+
+                if _waveform_mode == "live":
+                    if _waveform_provider is not None:
+                        data = _waveform_provider()
+                        if data is not None and getattr(data, "size", 0) > 0:
+                            # DYNAMIC SCALE WITH UPPER CAP
+                            # Aim to keep the current frame’s peak around ~0.9, but never amplify above 8x.
+                            TARGET_PEAK = 0.90
+                            MAX_GAIN = 8.0
+
+                            m = float(np.max(np.abs(data))) if getattr(data, "size", 0) else 0.0
+                            if m > 1e-6:
+                                dyn_gain = min(MAX_GAIN, TARGET_PEAK / m)
+                            else:
+                                dyn_gain = 1.0  # silence; no crazy boost
+
+                            arr = np.clip(data * dyn_gain, -1.0, 1.0)
+
+                            # downsample to ~canvas width
+                            count = max(2, w - 40)
+                            idxs = np.linspace(0, arr.size - 1, num=count).astype(int)
+                            ys = arr[idxs]
+                            mid = h / 2.0
+                            amp = (h - 48) / 2.0
+
+                            last_x, last_y = None, None
+                            for i, v in enumerate(ys):
+                                X = 20 + i
+                                Y = int(mid - v * amp)
+                                if last_x is not None:
+                                    _waveform_canvas.create_line(last_x, last_y, X, Y, fill="#6ee7ff", width=2)
+                                last_x, last_y = X, Y
+
+                else:
+                    # PROCESSING — audio-driven radius + circular wiggle
+                    _pulse_phase = (_pulse_phase + 0.06) % (2 * np.pi)  # subtle motion only
+                    # 1) Read the current amplitude + recent waveform of loading.wav
+
+                    try:
+                        level = float(sysmod.get_processing_level())
+                        proc_wave = sysmod.get_processing_waveform(720)  # resolution around the ring
+                    except Exception:
+                        level = 0.0
+                        proc_wave = np.zeros(720, dtype=np.float32)
+
+                    # Normalize/soft-clip the ring waveform
+                    if proc_wave.size:
+                        m = float(np.max(np.abs(proc_wave))) or 1.0
+                        ring_wave = np.clip(proc_wave / m, -1.0, 1.0)
+                    else:
+                        ring_wave = np.zeros(720, dtype=np.float32)
+
+                    # 2) Map amplitude to base radius scaling (more “one-to-one” feel)
+                    #    Increase LEVEL_GAIN to make size swings stronger (try 0.6–1.0)
+                    LEVEL_GAIN = 0.75
+                    pulse = 1.0 + LEVEL_GAIN * level
+
+                    # 3) Wiggle strength around the ring (how spiky the line looks)
+                    #    Try 0.20–0.40 for pronounced wiggle
+                    WIGGLE_GAIN = 0.30
+                    w = max(1, _waveform_canvas.winfo_width())
+                    h = max(1, _waveform_canvas.winfo_height())
+                    cx, cy = w // 2, h // 2
+                    base_r = int(min(w, h) * 0.20)
+                    ring_thickness = 8
+
+                    # Base radius from amplitude
+                    R = int(base_r * pulse * 1.06)
+                    # 4) Build a closed polyline around the circle with radius modulation
+                    #    by the audio waveform (and a tiny phase spin so it feels alive)
+                    N = ring_wave.size
+
+                    points = []
+
+                    for i in range(N):
+                        a = (2 * np.pi * i) / N + _pulse_phase * 0.5
+                        # radius wiggle from waveform
+                        r = R + int(WIGGLE_GAIN * base_r * ring_wave[i])
+                        x = cx + int(np.cos(a) * r)
+                        y = cy + int(np.sin(a) * r)
+                        points.append((x, y))
+
+                    # Draw the wiggly ring
+                    for i in range(1, len(points)):
+                        x0, y0 = points[i - 1]
+                        x1, y1 = points[i]
+                        _waveform_canvas.create_line(x0, y0, x1, y1, fill="#6ee7ff", width=2)
+
+                    # close the loop
+                    if len(points) > 2:
+                        _waveform_canvas.create_line(points[-1][0], points[-1][1], points[0][0], points[0][1],
+                                                     fill="#6ee7ff", width=2)
+
+                    # (Optional) inner glow ring following the same R for body
+
+                    r_inner = max(4, R - ring_thickness)
+                    _waveform_canvas.create_oval(cx - r_inner, cy - r_inner, cx + r_inner, cy + r_inner,
+                                                 outline="#6ee7ff", width=1)
+                    # label
+                    _waveform_canvas.create_text(cx, cy, text=_waveform_msg, fill="#d9fbff",
+                                                 font=("Segoe UI", 16, "bold"))
+
+                if not _waveform_closing and _waveform_win and _waveform_win.winfo_exists():
+                    _waveform_job = _waveform_canvas.after(33, _tick)
+
+            except Exception:
+                if not _waveform_closing and _waveform_win and _waveform_win.winfo_exists():
+                    _waveform_job = _waveform_canvas.after(33, _tick)
+
+        _tick()
+    except Exception:
+        pass
+
+def set_waveform_processing(message: str = "Processing…") -> None:
+    global _waveform_mode, _waveform_msg, _pulse_phase
+    _waveform_mode = "processing"
+    _waveform_msg = message
+    _pulse_phase = 0.0   # ← new
+
+def hide_waveform_overlay() -> None:
+    global _waveform_win, _waveform_canvas, _waveform_job, _waveform_provider
+    global _waveform_mode, _waveform_msg, _waveform_closing
+    try:
+        _waveform_closing = True
+        if _waveform_canvas and _waveform_job:
+            try:
+                _waveform_canvas.after_cancel(_waveform_job)
+            except Exception:
+                pass
+        if _waveform_win and _waveform_win.winfo_exists():
+            try:
+                _waveform_win.withdraw()
+            except Exception:
+                pass
+            # destroy shortly after to let any in-flight callbacks finish
+            _waveform_win.after(10, _waveform_win.destroy)
+    finally:
+        _waveform_win = None
+        _waveform_canvas = None
+        _waveform_job = None
+        _waveform_provider = None
+        _waveform_mode = "live"
+        _waveform_msg = "Processing…"
 
 # ---------------- Splash (1s) ----------------
 def show_splash_screen(duration_ms: int) -> None:
