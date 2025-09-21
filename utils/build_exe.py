@@ -1,7 +1,8 @@
 """Helper script to build the CtrlSpeak executable with PyInstaller.
 
-The resulting bundle lives in dist/CtrlSpeak/. Run with:
-    python build_exe.py
+The resulting bundle lives in ``dist/CtrlSpeak/``. From the project root run::
+
+    python -m utils.build_exe
 """
 from __future__ import annotations
 
@@ -18,8 +19,8 @@ except ImportError as exc:  # pragma: no cover - developer convenience
 
 
 def build() -> None:
-    root = Path(__file__).resolve().parent
-    assets_dir = root / "assets"
+    project_root = Path(__file__).resolve().parent.parent
+    assets_dir = project_root / "assets"
     icon_path = assets_dir / "icon.ico"
     audio_path = assets_dir / "loading.wav"
 
@@ -35,7 +36,7 @@ def build() -> None:
     ]
 
     args = [
-        str(root / "main.py"),
+        str(project_root / "main.py"),
         "--noconfirm",
         "--clean",
         "--windowed",

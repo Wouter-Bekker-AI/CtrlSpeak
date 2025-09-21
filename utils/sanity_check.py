@@ -1,4 +1,9 @@
-# sanity_check.py
+"""Quick developer smoke test for CtrlSpeak subsystems.
+
+Run from the project root with::
+
+    python -m utils.sanity_check
+"""
 from __future__ import annotations
 import json
 import time
