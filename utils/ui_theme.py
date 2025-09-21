@@ -13,6 +13,7 @@ from tkinter import ttk
 # explicitly bracing the family portion we keep the value intact and prevent
 # "expected integer but got 'UI'" crashes when creating themed widgets.
 
+
 # Core palette
 BACKGROUND = "#040913"
 SURFACE = "#0d1a2b"
@@ -45,6 +46,7 @@ def apply_modern_theme(root: tk.Misc) -> ttk.Style:
     if isinstance(root, tk.Tk) or isinstance(root, tk.Toplevel):
         root.configure(bg=BACKGROUND)
     try:
+
         root.option_add("*Font", "{Segoe UI} 10")
         root.option_add("*Label.Font", "{Segoe UI} 10")
         root.option_add("*Background", BACKGROUND)
@@ -78,6 +80,7 @@ def apply_modern_theme(root: tk.Misc) -> ttk.Style:
                     font=("{Segoe UI Semibold}", 9), padding=(12, 4))
     style.configure("PillMuted.TLabel", background="#0d1828", foreground=TEXT_SECONDARY,
                     font=("{Segoe UI}", 9), padding=(12, 4))
+
 
     # Buttons
     style.configure("Accent.TButton", background=ACCENT, foreground=BACKGROUND,
@@ -127,6 +130,7 @@ def apply_modern_theme(root: tk.Misc) -> ttk.Style:
     style.configure("Modern.TEntry", fieldbackground=ELEVATED_SURFACE, foreground=TEXT_PRIMARY,
                     background=ELEVATED_SURFACE, bordercolor=OUTLINE, lightcolor=ELEVATED_SURFACE,
                     darkcolor=ELEVATED_SURFACE, insertcolor=ACCENT)
+
 
     # Progressbar and separators
     style.configure("Modern.Horizontal.TProgressbar", troughcolor=MUTED_BUTTON_DISABLED,
