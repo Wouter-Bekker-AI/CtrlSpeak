@@ -62,7 +62,7 @@ def main(argv: list[str]) -> int:
         mode = settings.get("mode")
 
     if mode == "client_server":
-        initialize_transcriber()   # warm-up local model
+        initialize_transcriber(interactive=False)   # warm-up local model when assets are ready
         start_server()
     elif mode == "client":
         time.sleep(1.0)  # small delay so discovery has time to populate

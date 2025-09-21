@@ -8,7 +8,7 @@ import threading
 import subprocess
 from pathlib import Path
 from queue import Queue, Empty
-from typing import Optional, List
+from typing import Optional, List, Set
 
 import ctypes
 import ctranslate2
@@ -29,8 +29,8 @@ from utils.system import get_best_server, CLIENT_ONLY_BUILD
 
 # ---------------- Env / defaults ----------------
 # These are *defaults*. Active choices come from settings via getters below.
-ENV_DEFAULT_MODEL = os.environ.get("CTRLSPEAK_MODEL", "large-v3")
-ENV_DEVICE_PREF   = os.environ.get("CTRLSPEAK_DEVICE", "auto").lower()
+ENV_DEFAULT_MODEL = os.environ.get("CTRLSPEAK_MODEL", "small")
+ENV_DEVICE_PREF   = os.environ.get("CTRLSPEAK_DEVICE", "cpu").lower()
 COMPUTE_TYPE_OVERRIDE = os.environ.get("CTRLSPEAK_COMPUTE_TYPE")
 MODEL_REPO_OVERRIDE   = os.environ.get("CTRLSPEAK_MODEL_REPO")
 
@@ -216,7 +216,7 @@ class DownloadDialog:
 
         self.root = tk.Tk()
         self.root.title("CtrlSpeak Setup")
-        self.root.geometry("420x220")
+        self.root.geometry("440x230")
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
 
@@ -230,6 +230,9 @@ class DownloadDialog:
         self.stage_var = tk.StringVar(value="Preparing download...")
         tk.Label(self.root, textvariable=self.stage_var, font=("Segoe UI", 10)).pack(pady=(0, 4))
 
+        self.item_var = tk.StringVar(value=f"Downloading: {model_name}")
+        tk.Label(self.root, textvariable=self.item_var, font=("Segoe UI", 9, "italic")).pack(pady=(0, 2))
+
         self.progress = ttk.Progressbar(self.root, length=360, mode="determinate", maximum=100)
         self.progress.pack(pady=(0, 4))
 
@@ -240,6 +243,9 @@ class DownloadDialog:
         self.cancel_button.pack()
 
         self.root.protocol("WM_DELETE_WINDOW", self.cancel)
+        self._start_time = time.time()
+        self._last_bytes = 0.0
+        self._last_update = self._start_time
 
     def cancel(self) -> None:
         if self.result is None:
@@ -257,12 +263,26 @@ class DownloadDialog:
             self.progress.config(maximum=total)
             self.progress["value"] = current
             percent = min(max(int((current / total) * 100), 0), 100)
-            self.status_var.set(f"{percent}%  ({format_bytes(current)} / {format_bytes(total)})")
+            now = time.time()
+            elapsed = max(now - self._start_time, 1e-6)
+            window_elapsed = max(now - self._last_update, 1e-6)
+            avg_speed = current / elapsed
+            inst_speed = (current - self._last_bytes) / window_elapsed
+            speed = inst_speed if window_elapsed >= 0.5 else avg_speed
+            self.status_var.set(
+                f"{percent}%  ({format_bytes(current)} / {format_bytes(total)})"
+                f"  •  {format_bytes(speed)}/s"
+            )
+            self._last_bytes = current
+            self._last_update = now
         else:
             if self.progress["mode"] != "indeterminate":
                 self.progress.config(mode="indeterminate")
                 self.progress.start(10)
-            self.status_var.set(f"{format_bytes(current)} downloaded")
+            now = time.time()
+            elapsed = max(now - self._start_time, 1e-6)
+            speed = current / elapsed
+            self.status_var.set(f"{format_bytes(current)} downloaded  •  {format_bytes(speed)}/s")
 
     def _process_queue(self) -> None:
         try:
@@ -376,6 +396,7 @@ model_lock = threading.Lock()
 whisper_model: Optional[WhisperModel] = None
 model_ready = threading.Event()
 warned_cuda_unavailable = False
+_missing_model_notified: Set[str] = set()
 
 def _force_cpu_env() -> None:
     """
@@ -414,7 +435,7 @@ def unload_transcriber() -> None:
 
 
 
-def _ensure_model_available_active() -> bool:
+def _ensure_model_available_active(interactive: bool = True) -> bool:
     """Checks/installs the model selected in settings."""
     name = get_current_model_name()
     store = model_store_path_for(name)
@@ -422,6 +443,17 @@ def _ensure_model_available_active() -> bool:
     if model_ready.is_set() and model_files_present(store):
         return True
     if not model_files_present(store) or not marker.exists():
+        if not interactive:
+            if name not in _missing_model_notified:
+                notify(
+                    (
+                        f"The Whisper model '{name}' is not installed. "
+                        "Right-click the CtrlSpeak tray icon and choose 'Manage CtrlSpeak' "
+                        "to download it."
+                    )
+                )
+                _missing_model_notified.add(name)
+            return False
         if not _prompt_for_model_install(name):
             notify("CtrlSpeak cannot transcribe without the Whisper model. You can install it next time you start the app.")
             return False
@@ -457,7 +489,12 @@ def resolve_compute_type(device: str) -> str:
     return "int8_float16"
 
 
-def initialize_transcriber(force: bool = False, allow_client: bool = False, preferred_device: Optional[str] = None) -> Optional[WhisperModel]:
+def initialize_transcriber(
+    force: bool = False,
+    allow_client: bool = False,
+    preferred_device: Optional[str] = None,
+    interactive: bool = True,
+) -> Optional[WhisperModel]:
     """
     Loads the Whisper model selected in settings into faster-whisper with the active device choice.
     """
@@ -469,12 +506,20 @@ def initialize_transcriber(force: bool = False, allow_client: bool = False, pref
             mode = settings.get("mode")
         if not allow_client and mode != "client_server":
             return None
-        if not _ensure_model_available_active():
+        if not _ensure_model_available_active(interactive=interactive):
             return None
 
         device = preferred_device or resolve_device()
-        if device == "cpu" and get_device_preference() in {"auto", "cuda"} and not warned_cuda_unavailable and preferred_device is None:
-            notify("CUDA dependencies were not detected. CtrlSpeak will run Whisper on the CPU instead.")
+        if (
+            device == "cpu"
+            and get_device_preference() in {"auto", "cuda"}
+            and not warned_cuda_unavailable
+            and preferred_device is None
+        ):
+            notify(
+                "CUDA dependencies were not detected. CtrlSpeak will run Whisper on the CPU instead. "
+                "Open the CtrlSpeak management window from the system tray to install GPU support."
+            )
             warned_cuda_unavailable = True
 
         compute_type = resolve_compute_type(device)

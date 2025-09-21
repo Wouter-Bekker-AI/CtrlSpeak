@@ -298,8 +298,6 @@ def prompt_initial_mode() -> Optional[str]:
 
     root = tk.Tk()
     root.title("Welcome to CtrlSpeak")
-    root.geometry("480x300")
-    root.minsize(440, 260)
     root.resizable(True, True)
     root.attributes("-topmost", True)
 
@@ -319,7 +317,7 @@ def prompt_initial_mode() -> Optional[str]:
         frame.pack(padx=8, pady=6, fill=tk.X)
         tk.Label(frame, text=text, font=("Segoe UI", 11, "bold")).pack(anchor=tk.W, padx=8, pady=(6, 0))
         tk.Message(frame, text=desc, width=360).pack(anchor=tk.W, padx=8)
-        tk.Button(frame, text="Select", command=lambda: choose(mode_value)).pack(padx=8, pady=(0, 8), anchor=tk.E)
+        tk.Button(frame, text="Select", command=lambda value=mode_value: choose(value)).pack(padx=8, pady=(0, 8), anchor=tk.E)
 
     make_button("Client + Server",
                 "Use this computer for local transcription and share it with other CtrlSpeak clients on the network.",
@@ -331,6 +329,12 @@ def prompt_initial_mode() -> Optional[str]:
     def cancel() -> None: root.destroy()
     tk.Button(root, text="Quit", command=cancel).pack(pady=(0, 12))
     root.protocol("WM_DELETE_WINDOW", cancel)
+    root.update_idletasks()
+    req_w = root.winfo_reqwidth()
+    req_h = root.winfo_reqheight()
+    root.geometry(f"{req_w}x{req_h}")
+    root.minsize(req_w, req_h)
+    root.after(200, lambda: root.attributes("-topmost", False))
     root.mainloop()
     return result["mode"]
 
@@ -593,6 +597,15 @@ class ManagementWindow:
         if name not in {"small", "large-v3"}:
             name = "large-v3"
         set_current_model_name(name)
+
+        if not model_files_present(model_store_path_for(name)):
+            messagebox.showinfo(
+                "Model",
+                "Model files are not installed yet. Use Download/Update… to fetch them before switching.",
+                parent=self.window,
+            )
+            self.refresh_status()
+            return
 
         # Force unload + reload the new model
         unload_transcriber()
