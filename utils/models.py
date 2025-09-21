@@ -138,10 +138,10 @@ def configure_cuda_paths() -> None:
     cuda_paths_initialized = True
 
 
-def cuda_runtime_ready() -> bool:
+def cuda_runtime_ready(*, ignore_preference: bool = False) -> bool:
     # ⬅️ New: never probe CUDA when the user picked CPU — avoids native crash
     try:
-        if get_device_preference() == "cpu":
+        if not ignore_preference and get_device_preference() == "cpu":
             return False
     except Exception:
         logger.exception("Failed to read device preference while checking CUDA readiness")
@@ -202,7 +202,7 @@ def install_cuda_runtime_with_progress(parent=None) -> bool:
         return False
     # refresh DLL search path + verify
     time.sleep(0.5)
-    return cuda_runtime_ready()
+    return cuda_runtime_ready(ignore_preference=True)
 
 
 # ---------------- Download dialog (GUI) ----------------
