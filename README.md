@@ -1,25 +1,24 @@
 # CtrlSpeak
 
-CtrlSpeak is a Windows speech-to-text assistant that records speech while the right `Ctrl` key is held down and injects the transcription into the active text control. It supports two deployment flavours:
+CtrlSpeak is a Windows speech-to-text assistant that records speech while the right `Ctrl` key is held down and injects the transcription into the active text control. It can run as a self-contained **Client + Server** bundle with Whisper hosted locally or as a lightweight **Client Only** build that discovers a LAN server.
 
-- **Full (Client + Server)**: runs Whisper locally (GPU with CPU fallback) and serves other machines on the LAN.
-- **Client Only**: lightweight build that discovers a LAN server and falls back to CPU transcription when none is available.
-
-Both builds support Windows 10 and 11, single-instance enforcement, tray-based control, configurable sound cues, and AnyDesk-aware text injection.
+Both flavours support Windows 10/11, enforce a single running instance, expose a tray UI for mode switching, and include AnyDesk-aware text injection with optional audio cues.
 
 ## Repository Layout
 
 - `main.py` – application entry point.
-- `build_exe.py` – helper script that runs PyInstaller with the correct data files.
+- `utils/` – implementation modules plus developer helpers:
+  - `build_exe.py` – PyInstaller wrapper for creating a distributable executable.
+  - `sanity_check.py` – quick smoke test for the settings, discovery and server subsystems.
 - `assets/` – static resources such as the tray icon (`icon.ico`) and processing chime (`loading.wav`).
-- `utils/` – implementation modules (GUI, models, networking, configuration helpers, etc.).
-- `serverportsetup.txt` – Windows PowerShell commands to open discovery/API firewall ports.
+- `packaging/` – legacy `.spec` file and documentation for alternative build flows.
+- `requirements.txt` – runtime and build-time Python dependencies.
 
-The `dist`, `build`, and other generated folders are ignored from version control.
+Generated folders such as `dist/` and `build/` are ignored via `.gitignore`.
 
-## Python Requirements
+## Environment Setup
 
-Install the runtime dependencies inside a virtual environment:
+Create an isolated environment and install the dependencies:
 
 ```powershell
 python -m venv .venv
@@ -27,7 +26,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-See `requirements.txt` for the package list (GPU acceleration requires NVIDIA CUDA-capable hardware and compatible drivers).
+GPU acceleration requires an NVIDIA CUDA-capable GPU with compatible drivers. Whisper models are downloaded on demand when the application starts in server mode.
 
 ## Running from Source
 
@@ -39,22 +38,31 @@ On first launch you will be prompted to choose between **Client + Server** or **
 
 ### Command-line Flags
 
-- `--force-sendinput` - force the AnyDesk-compatible synthetic keystroke path.
-- `--transcribe <wav>` - batch process an audio file without the hotkey workflow.
-- `--uninstall` - remove the application data and executable (used by the packaged build).
+- `--force-sendinput` – force the AnyDesk-compatible synthetic keystroke path.
+- `--transcribe <wav>` – batch process an audio file without the hotkey workflow.
+- `--uninstall` – remove the application data and executable (used by the packaged build).
 
 Run `python main.py --help` for the full list.
 
-## Building Executables
+## Packaging with PyInstaller
 
-This project ships with a small helper that wraps PyInstaller with the correct options and assets. The generated build lives in `dist/CtrlSpeak/`.
+Use the helper module to build a distributable executable under `dist/CtrlSpeak/`:
 
 ```powershell
-# From the project root
-python build_exe.py
+python -m utils.build_exe
 ```
 
-The script produces a windowed build that embeds `assets/icon.ico` as the executable icon and bundles both `assets/icon.ico` and `assets/loading.wav` as application data inside the package. CUDA runtime files or Whisper model weights are **not** bundled – they are downloaded by the running application if the user opts in.
+The script embeds the tray icon and audio assets, enables clean builds, and collects required dependencies. CUDA runtime files or Whisper model weights are **not** bundled – they are downloaded by the running application if the user opts in.
+
+## Developer Smoke Test
+
+Before committing larger changes you can exercise the main subsystems locally:
+
+```powershell
+python -m utils.sanity_check
+```
+
+The script round-trips the settings file, validates temp file cleanup, ensures service discovery helpers execute, and starts the built-in HTTP server long enough to check its `/ping` endpoint.
 
 ## Manual Model Download
 
@@ -67,12 +75,36 @@ huggingface-cli download Systran/faster-whisper-small --local-dir $target --loca
 New-Item -ItemType File (Join-Path $target '.installed') -Force | Out-Null
 ```
 
-- You can substitute a different `repo/model` name if you use another Whisper checkpoint.
+- Substitute a different `repo/model` name if you prefer another Whisper checkpoint.
 - To point CtrlSpeak at a custom directory, set the `CTRLSPEAK_MODEL_DIR` environment variable to the parent folder that contains the models (defaults to `%APPDATA%\CtrlSpeak\models`).
 
-## LAN Server Setup
+## Windows Server Provisioning
 
-After packaging the full build and copying it to a host machine, run the PowerShell commands in `serverportsetup.txt` (once, as Administrator) to open the discovery (UDP 54330) and API (TCP 65432) ports for the local network. Client machines can then find the server via the tray UI (**Refresh Servers**).
+When deploying the combined Client + Server build to a dedicated host, run the following elevated PowerShell commands once per machine:
+
+1. Copy the packaged executable onto the target PC (example assumes the Desktop):
+   ```powershell
+   Copy-Item "C:\Users\<user>\PycharmProjects\CtrlSpeak\dist\CtrlSpeak-full.exe" "$env:USERPROFILE\Desktop\CtrlSpeak-full.exe"
+   ```
+2. Prime the installation and download the Whisper model by running auto-setup mode:
+   ```powershell
+   Start-Process -FilePath "$env:USERPROFILE\Desktop\CtrlSpeak-full.exe" -ArgumentList '--auto-setup','client_server' -Wait
+   ```
+3. Allow the discovery and API ports through Windows Firewall (adjust the profile if you need different scopes):
+   ```powershell
+   netsh advfirewall firewall add rule name="CtrlSpeak API" dir=in action=allow protocol=TCP localport=65432 profile=private
+   netsh advfirewall firewall add rule name="CtrlSpeak API (Public)" dir=in action=allow protocol=TCP localport=65432 profile=public
+   netsh advfirewall firewall add rule name="CtrlSpeak Discovery In" dir=in action=allow protocol=UDP localport=54330 profile=private
+   netsh advfirewall firewall add rule name="CtrlSpeak Discovery Out" dir=out action=allow protocol=UDP localport=54330 profile=private
+   netsh advfirewall firewall add rule name="CtrlSpeak Discovery In (Public)" dir=in action=allow protocol=UDP localport=54330 profile=public
+   netsh advfirewall firewall add rule name="CtrlSpeak Discovery Out (Public)" dir=out action=allow protocol=UDP localport=54330 profile=public
+   ```
+4. Launch CtrlSpeak normally (double-click the EXE) and confirm the **Manage CtrlSpeak** window reports:
+   - Mode: `client_server`
+   - Server thread: `Running`
+   - Serving: `<server-IP>:65432`
+
+After updates you can re-run `--auto-setup client_server` to refresh the installation silently.
 
 ## Development Notes
 
