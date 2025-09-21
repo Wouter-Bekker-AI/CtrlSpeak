@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import os
 import sys
 import time
 import threading
@@ -14,6 +13,11 @@ from typing import Optional, List, Set
 import ctypes
 import ctranslate2
 from faster_whisper import WhisperModel
+try:  # pragma: no cover - optional dependency rarely installed
+    import hf_xet  # type: ignore  # noqa: F401
+except ImportError:
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
 from huggingface_hub import snapshot_download
 from tqdm import tqdm
 import tkinter as tk
@@ -27,6 +31,7 @@ from utils.system import (
 )
 from utils.system import get_best_server, CLIENT_ONLY_BUILD
 from utils.ui_theme import apply_modern_theme
+from utils.config_paths import get_logger
 
 
 # ---------------- Env / defaults ----------------
@@ -41,6 +46,8 @@ MODEL_ROOT_PATH = get_config_dir() / "models"
 
 # CUDA search: also look in %APPDATA%/CtrlSpeak/cuda
 cuda_paths_initialized = False
+
+logger = get_logger(__name__)
 
 
 # ---------------- Settings-backed getters/setters ----------------
@@ -123,33 +130,35 @@ def configure_cuda_paths() -> None:
             dir_str = str(dll_dir)
             try:
                 os.add_dll_directory(dir_str)
-            except (AttributeError, FileNotFoundError, OSError):
-                pass
+            except (AttributeError, FileNotFoundError, OSError) as exc:
+                logger.warning("Unable to add CUDA DLL directory %s: %s", dir_str, exc)
             if dir_str not in path_var:
                 path_var = dir_str + os.pathsep + path_var
     os.environ["PATH"] = path_var
     cuda_paths_initialized = True
 
 
-def cuda_runtime_ready() -> bool:
+def cuda_runtime_ready(*, ignore_preference: bool = False) -> bool:
     # ⬅️ New: never probe CUDA when the user picked CPU — avoids native crash
     try:
-        if get_device_preference() == "cpu":
+        if not ignore_preference and get_device_preference() == "cpu":
             return False
     except Exception:
+        logger.exception("Failed to read device preference while checking CUDA readiness")
         # If settings aren't ready yet, fall through safely.
-        pass
     configure_cuda_paths()
     try:
         if ctranslate2.get_cuda_device_count() <= 0:
             return False
     except Exception:
+        logger.exception("CUDA device probe failed")
         return False
     if sys.platform.startswith("win"):
         for dll in ("cudnn_ops64_9.dll", "cublas64_12.dll"):
             try:
                 ctypes.windll.LoadLibrary(dll)
-            except OSError:
+            except OSError as exc:
+                logger.warning("Failed to load CUDA DLL %s: %s", dll, exc)
                 return False
     return True
 
@@ -171,6 +180,7 @@ def _run_cmd_stream(cmd: List[str], timeout: int | None = None) -> int:
     except FileNotFoundError:
         return 127
     except Exception:
+        logger.exception("Command execution failed: %s", " ".join(cmd))
         return 1
 
 
@@ -192,7 +202,7 @@ def install_cuda_runtime_with_progress(parent=None) -> bool:
         return False
     # refresh DLL search path + verify
     time.sleep(0.5)
-    return cuda_runtime_ready()
+    return cuda_runtime_ready(ignore_preference=True)
 
 
 # ---------------- Download dialog (GUI) ----------------
@@ -301,28 +311,28 @@ class DownloadDialog:
             self.status_var.set(f"{format_bytes(current)} downloaded  •  {format_bytes(speed)}/s")
 
     def _process_queue(self) -> None:
-        try:
-            while True:
+        while True:
+            try:
                 message = self.progress_queue.get_nowait()
-                message_type = message[0]
-                if message_type == "progress":
-                    _, desc, current, total = message
-                    self._update_progress(desc, current, total)
-                elif message_type == "stage":
-                    _, desc = message
-                    self.stage_var.set(desc)
-                elif message_type == "error":
-                    _, error_text = message
-                    self.result = "error"
-                    self.status_var.set(error_text)
-                elif message_type == "done":
-                    self.result = "success"
-                    self.status_var.set("Download completed.")
-                elif message_type == "cancelled":
-                    self.result = "cancelled"
-                    self.status_var.set("Download cancelled.")
-        except Empty:
-            pass
+            except Empty:
+                break
+            message_type = message[0]
+            if message_type == "progress":
+                _, desc, current, total = message
+                self._update_progress(desc, current, total)
+            elif message_type == "stage":
+                _, desc = message
+                self.stage_var.set(desc)
+            elif message_type == "error":
+                _, error_text = message
+                self.result = "error"
+                self.status_var.set(error_text)
+            elif message_type == "done":
+                self.result = "success"
+                self.status_var.set("Download completed.")
+            elif message_type == "cancelled":
+                self.result = "cancelled"
+                self.status_var.set("Download cancelled.")
 
         if self.result is None:
             self.root.after(100, self._process_queue)
@@ -345,7 +355,7 @@ def make_tqdm_class(callback, cancel_event):
             try:
                 callback(self_inner.desc or "", float(self_inner.n), float(self_inner.total or 0))
             except Exception:
-                pass
+                logger.exception("Progress callback failed")
             if cancel_event.is_set():
                 raise CancelledDownload()
     return GuiTqdm
@@ -359,6 +369,7 @@ def _prompt_for_model_install(model_name: str) -> bool:
         import pyautogui
         choice = pyautogui.confirm(text=prompt, title="CtrlSpeak Setup", buttons=["Install Now", "Quit"])
     except Exception:
+        logger.exception("Failed to display model installation prompt via GUI")
         print(prompt)
         choice = "Install Now"
     return choice == "Install Now"
@@ -399,6 +410,7 @@ def download_model_with_gui(model_short: Optional[str] = None) -> bool:
             progress_queue.put(("cancelled",))
         except Exception as exc:
             progress_queue.put(("error", f"Failed: {exc}"))
+            logger.exception("Model download failed")
 
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
@@ -437,7 +449,7 @@ def unload_transcriber() -> None:
             try:
                 del whisper_model
             except Exception:
-                pass
+                logger.exception("Failed to delete whisper model instance")
             whisper_model = None
         model_ready.clear()
     # Encourage fast cleanup for large model memory and CUDA contexts
@@ -445,7 +457,7 @@ def unload_transcriber() -> None:
         import gc
         gc.collect()
     except Exception:
-        pass
+        logger.exception("Garbage collection after unloading model failed")
     # tiny delay helps native libs tear down cleanly before re-init
     time.sleep(0.15)
 
@@ -556,6 +568,7 @@ def initialize_transcriber(
             return whisper_model
         except Exception as exc:
             print(f"Failed to load model on {device}: {exc}")
+            logger.exception("Failed to load Whisper model on %s", device)
             if device != "cpu":
                 try:
                     whisper_model = WhisperModel(
@@ -569,6 +582,7 @@ def initialize_transcriber(
                     return whisper_model
                 except Exception as cpu_exc:
                     print(f"CPU fallback failed: {cpu_exc}")
+                    logger.exception("CPU fallback model load failed")
             notify("Unable to initialize the transcription model. Please check your installation and try again.")
             whisper_model = None
             return None
@@ -626,6 +640,7 @@ def handle_missing_server(file_path: str, play_feedback: bool) -> Optional[str]:
             buttons=["Install Server", "Cancel"],
         )
     except Exception:
+        logger.exception("Failed to prompt for enabling local server")
         print("Enable local server?"); choice = "Install Server"
     if choice != "Install Server":
         notify("No CtrlSpeak server is available, and the recording was not transcribed.")
@@ -676,7 +691,7 @@ def transcribe_remote(file_path: str, play_feedback: bool = True) -> Optional[st
             try:
                 conn.close()
             except Exception:
-                pass
+                logger.exception("Failed to close HTTP connection after remote transcription")
 
 
 def transcribe_audio(file_path: str, play_feedback: bool = True) -> Optional[str]:

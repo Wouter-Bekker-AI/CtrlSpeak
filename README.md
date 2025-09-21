@@ -11,8 +11,7 @@ Both builds support Windows 10 and 11, single-instance enforcement, tray-based c
 
 - `main.py` – application entry point.
 - `build_exe.py` – helper script that runs PyInstaller with the correct data files.
-- `icon.ico` – tray/taskbar icon bundled into the executable.
-- `loading.wav` – chime played while transcription is running and for the waveform visualiser.
+- `assets/` – static resources such as the tray icon (`icon.ico`) and processing chime (`loading.wav`).
 - `utils/` – implementation modules (GUI, models, networking, configuration helpers, etc.).
 - `serverportsetup.txt` – Windows PowerShell commands to open discovery/API firewall ports.
 
@@ -55,7 +54,7 @@ This project ships with a small helper that wraps PyInstaller with the correct o
 python build_exe.py
 ```
 
-The script produces a windowed build that embeds `icon.ico` as the executable icon and bundles both `icon.ico` and `loading.wav` as application data inside the package. CUDA runtime files or Whisper model weights are **not** bundled – they are downloaded by the running application if the user opts in.
+The script produces a windowed build that embeds `assets/icon.ico` as the executable icon and bundles both `assets/icon.ico` and `assets/loading.wav` as application data inside the package. CUDA runtime files or Whisper model weights are **not** bundled – they are downloaded by the running application if the user opts in.
 
 ## Manual Model Download
 

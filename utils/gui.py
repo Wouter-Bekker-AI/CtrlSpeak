@@ -23,7 +23,6 @@ from utils.system import (
     manual_discovery_refresh,
     schedule_management_refresh, enqueue_management_task,
     shutdown_server, initiate_self_uninstall,
-    resource_path,
 )
 # IMPORTANT: import the module so we always see the *current* values
 from utils import system as sysmod
@@ -46,9 +45,13 @@ from utils.ui_theme import (
     BACKGROUND,
 )
 
+from utils.config_paths import asset_path, get_logger
+
 # Shared UI thread root + instance ref (imported by utils.system.schedule_management_refresh)
 tk_root: Optional[tk.Tk] = None
 management_window: Optional["ManagementWindow"] = None
+
+logger = get_logger(__name__)
 
 # -------- Voice Waveform Overlay --------
 _waveform_win: Optional[tk.Toplevel] = None
@@ -78,12 +81,13 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
         try:
             _waveform_win.attributes("-alpha", 0.92)  # translucent
         except Exception:
-            pass
+            logger.exception("Failed to set waveform window transparency")
 
         # Position: top half center
         try:
             sw, sh = tk_root.winfo_screenwidth(), tk_root.winfo_screenheight()
         except Exception:
+            logger.exception("Failed to query screen dimensions for waveform overlay")
             sw, sh = 1200, 800
         target_w = int(sw * 0.4)
         target_h = int(sh * 0.25)
@@ -95,7 +99,10 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
         _waveform_canvas.pack(fill=tk.BOTH, expand=True)
         _waveform_closing = False
 
+        processing_error_logged = False
+
         def _tick():
+            nonlocal processing_error_logged
             """Redraw the overlay every ~33 ms.
             - LIVE mode: polyline waveform from recent audio samples.
             - PROCESSING mode: pulsing circular ring with 'Processing…' label.
@@ -155,6 +162,9 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
                         level = float(sysmod.get_processing_level())
                         proc_wave = sysmod.get_processing_waveform(720)  # resolution around the ring
                     except Exception:
+                        if not processing_error_logged:
+                            logger.exception("Failed to obtain processing waveform data")
+                            processing_error_logged = True
                         level = 0.0
                         proc_wave = np.zeros(720, dtype=np.float32)
 
@@ -219,12 +229,13 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
                     _waveform_job = _waveform_canvas.after(33, _tick)
 
             except Exception:
+                logger.exception("Waveform overlay tick failed")
                 if not _waveform_closing and _waveform_win and _waveform_win.winfo_exists():
                     _waveform_job = _waveform_canvas.after(33, _tick)
 
         _tick()
     except Exception:
-        pass
+        logger.exception("Failed to open waveform overlay window")
 
 def set_waveform_processing(message: str = "Processing…") -> None:
     global _waveform_mode, _waveform_msg, _pulse_phase
@@ -241,12 +252,12 @@ def hide_waveform_overlay() -> None:
             try:
                 _waveform_canvas.after_cancel(_waveform_job)
             except Exception:
-                pass
+                logger.exception("Failed to cancel waveform overlay job")
         if _waveform_win and _waveform_win.winfo_exists():
             try:
                 _waveform_win.withdraw()
             except Exception:
-                pass
+                logger.exception("Failed to withdraw waveform window")
             # destroy shortly after to let any in-flight callbacks finish
             _waveform_win.after(10, _waveform_win.destroy)
     finally:
@@ -272,6 +283,7 @@ def show_splash_screen(duration_ms: int) -> None:
         screen_w = root.winfo_screenwidth()
         screen_h = root.winfo_screenheight()
     except Exception:
+        logger.exception("Failed to query screen dimensions for splash screen")
         screen_w, screen_h = 800, 600
     pos_x = int((screen_w - width) / 2); pos_y = int((screen_h - height) / 2)
     root.geometry(f"{width}x{height}+{pos_x}+{pos_y}")
@@ -293,7 +305,7 @@ def show_splash_screen(duration_ms: int) -> None:
     icon_added = False
     try:
         from PIL import Image, ImageTk
-        icon_path = resource_path("icon.ico")
+        icon_path = asset_path("icon.ico")
         image = Image.open(icon_path)
         image.thumbnail((160, 160), Image.LANCZOS)
         photo = ImageTk.PhotoImage(image)
@@ -302,7 +314,7 @@ def show_splash_screen(duration_ms: int) -> None:
         label.pack(pady=(18, 12))
         icon_added = True
     except Exception:
-        pass
+        logger.exception("Failed to load splash icon")
 
     title_pad = (12, 4) if icon_added else (28, 8)
     ttk.Label(content, text="CtrlSpeak", style="Title.TLabel").pack(pady=title_pad)
@@ -318,7 +330,7 @@ def show_splash_screen(duration_ms: int) -> None:
     try:
         progress.start(10)
     except Exception:
-        pass
+        logger.exception("Failed to start splash progress animation")
 
     root.after(duration_ms, root.destroy)
     root.mainloop()
@@ -455,8 +467,7 @@ def ensure_management_ui_thread() -> None:
                 try:
                     func(*args, **kwargs)
                 except Exception:
-                    import traceback
-                    traceback.print_exc()
+                    logger.exception("Management UI task failed")
             if tk_root is not None:
                 tk_root.after(120, process_queue)
 
@@ -513,9 +524,13 @@ class ManagementWindow:
         self.window.bind("<Escape>", lambda _e: self.close())
         apply_modern_theme(self.window)
         try:
-            self.window.iconbitmap(resource_path("icon.ico"))
+            self.window.iconbitmap(str(asset_path("icon.ico")))
         except Exception:
-            pass
+            logger.exception("Failed to set management window icon")
+
+        # Track asynchronous activation to keep status text stable while the worker runs.
+        self._activation_busy = False
+        self._activation_status_var: Optional[tk.StringVar] = None
 
         container = ttk.Frame(self.window, style="Modern.TFrame", padding=(30, 26))
         container.pack(fill=tk.BOTH, expand=True)
@@ -679,10 +694,12 @@ class ManagementWindow:
         ]
         self.status_var.set("\n".join(status_parts))
         self.server_status_var.set(f"Network: {describe_server_status()}")
-        self.cuda_status.set("CUDA runtime ready." if cuda_ok else "CUDA runtime not detected.")
-        self.model_status.set(
-            "Model installed locally." if present else "Model download required before use."
-        )
+        if not (self._activation_busy and self._activation_status_var is self.cuda_status):
+            self.cuda_status.set("CUDA runtime ready." if cuda_ok else "CUDA runtime not detected.")
+        if not (self._activation_busy and self._activation_status_var is self.model_status):
+            self.model_status.set(
+                "Model installed locally." if present else "Model download required before use."
+            )
         self.device_var.set(device_pref)
         self.model_var.set(model_name)
 
@@ -691,9 +708,97 @@ class ManagementWindow:
         else:
             self.start_button.state(["!disabled"]); self.stop_button.state(["disabled"])
 
+    def _reload_transcriber_async(
+        self,
+        *,
+        progress_message: str,
+        status_var: Optional[tk.StringVar],
+        notify_context: str,
+        success_callback: Optional[Callable[[], None]] = None,
+    ) -> None:
+        if not self.is_open():
+            return
+
+        from utils.models import unload_transcriber, initialize_transcriber
+
+        buttons = [
+            getattr(self, "apply_model_btn", None),
+            getattr(self, "download_model_btn", None),
+            getattr(self, "apply_device_btn", None),
+            getattr(self, "install_cuda_btn", None),
+        ]
+
+        for button in buttons:
+            if button is None:
+                continue
+            try:
+                button.state(["disabled"])
+            except Exception:
+                logger.exception("Failed to disable button during %s", notify_context)
+
+        previous_text = status_var.get() if status_var is not None else ""
+        if status_var is not None:
+            try:
+                status_var.set(progress_message)
+            except Exception:
+                logger.exception("Failed to update status text for %s", notify_context)
+
+        self._activation_busy = True
+        self._activation_status_var = status_var
+
+        def worker() -> None:
+            success = False
+            error: Optional[Exception] = None
+            try:
+                unload_transcriber()
+                success = initialize_transcriber(force=True, allow_client=True) is not None
+            except Exception as exc:
+                error = exc
+                logger.exception("Transcriber initialization failed while handling %s", notify_context)
+
+            def finish() -> None:
+                self._activation_busy = False
+                self._activation_status_var = None
+
+                if not self.is_open():
+                    return
+
+                for button in buttons:
+                    if button is None:
+                        continue
+                    try:
+                        button.state(["!disabled"])
+                    except Exception:
+                        logger.exception("Failed to re-enable button after %s", notify_context)
+
+                if success:
+                    if success_callback is not None:
+                        try:
+                            success_callback()
+                        except Exception:
+                            logger.exception("Activation success handler failed for %s", notify_context)
+                else:
+                    if status_var is not None:
+                        try:
+                            status_var.set(previous_text)
+                        except Exception:
+                            logger.exception("Failed to restore status text after %s", notify_context)
+                    details = sysmod.format_exception_details(error) if error else "Initialization returned no model"
+                    sysmod.notify_error(notify_context, details)
+                    messagebox.showerror(notify_context, "See the CtrlSpeak log folder for details.", parent=self.window)
+
+                self.refresh_status()
+
+            if self.window and self.window.winfo_exists():
+                self.window.after(0, finish)
+            else:
+                finish()
+
+        threading.Thread(target=worker, daemon=True).start()
+
     # --- device actions ---
     def _apply_device(self):
-        from utils.models import set_device_preference, unload_transcriber, initialize_transcriber
+        from utils.models import set_device_preference
         choice = self.device_var.get()
         if choice not in {"cpu", "cuda", "auto"}:
             choice = "auto"
@@ -711,11 +816,12 @@ class ManagementWindow:
                 else:
                     messagebox.showwarning("CUDA", "Failed to prepare CUDA. Staying on CPU.", parent=self.window)
 
-        # Force a reload with the new device
-        unload_transcriber()
-        initialize_transcriber(force=True, allow_client=True)
-
-        self.refresh_status()
+        # Reload the model with the new device without blocking the UI
+        self._reload_transcriber_async(
+            progress_message="Applying device preference…",
+            status_var=self.cuda_status,
+            notify_context="Device activation failed",
+        )
 
     def _install_cuda(self):
         if install_cuda_runtime_with_progress(self.window):
@@ -726,7 +832,7 @@ class ManagementWindow:
 
     # --- model actions ---
     def _apply_model(self):
-        from utils.models import set_current_model_name, unload_transcriber, initialize_transcriber
+        from utils.models import set_current_model_name
         name = self.model_var.get()
         if name not in {"small", "large-v3"}:
             name = "large-v3"
@@ -741,12 +847,15 @@ class ManagementWindow:
             self.refresh_status()
             return
 
-        # Force unload + reload the new model
-        unload_transcriber()
-        initialize_transcriber(force=True, allow_client=True)
+        def on_success() -> None:
+            messagebox.showinfo("Model", f"Active model set to {name}.", parent=self.window)
 
-        messagebox.showinfo("Model", f"Active model set to {name}.", parent=self.window)
-        self.refresh_status()
+        self._reload_transcriber_async(
+            progress_message="Activating model…",
+            status_var=self.model_status,
+            notify_context="Model activation failed",
+            success_callback=on_success,
+        )
 
     def _download_model(self):
         name = self.model_var.get()
