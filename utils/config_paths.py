@@ -17,6 +17,8 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "discovery_port": 54330,
     "preferred_server_host": None,
     "preferred_server_port": None,
+    "device_preference": "cpu",
+    "model_name": "small",
 }
 
 settings_lock = threading.RLock()

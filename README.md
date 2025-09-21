@@ -9,11 +9,12 @@ Both builds support Windows 10 and 11, single-instance enforcement, tray-based c
 
 ## Repository Layout
 
-- `CtrlSpeak.py` - main application code.
-- `CtrlSpeak.spec` - PyInstaller spec used for the full (client + server) build.
-- `build_client/CtrlSpeak.spec` - PyInstaller spec for the client-only build.
-- `loading.wav` - chime played while transcription is running.
-- `serverportsetup.txt` - Windows PowerShell commands to open discovery/API firewall ports.
+- `main.py` – application entry point.
+- `build_exe.py` – helper script that runs PyInstaller with the correct data files.
+- `icon.ico` – tray/taskbar icon bundled into the executable.
+- `loading.wav` – chime played while transcription is running and for the waveform visualiser.
+- `utils/` – implementation modules (GUI, models, networking, configuration helpers, etc.).
+- `serverportsetup.txt` – Windows PowerShell commands to open discovery/API firewall ports.
 
 The `dist`, `build`, and other generated folders are ignored from version control.
 
@@ -32,10 +33,10 @@ See `requirements.txt` for the package list (GPU acceleration requires NVIDIA CU
 ## Running from Source
 
 ```powershell
-python CtrlSpeak.py
+python main.py
 ```
 
-On first launch you will be prompted to choose between **Client + Server** or **Client Only** modes. Settings, models, and logs live under `%APPDATA%\CtrlSpeak`.
+On first launch you will be prompted to choose between **Client + Server** or **Client Only** modes. Settings, models, and logs live under `%APPDATA%\CtrlSpeak` (the folder is created automatically).
 
 ### Command-line Flags
 
@@ -43,41 +44,27 @@ On first launch you will be prompted to choose between **Client + Server** or **
 - `--transcribe <wav>` - batch process an audio file without the hotkey workflow.
 - `--uninstall` - remove the application data and executable (used by the packaged build).
 
-Run `python CtrlSpeak.py --help` for the full list.
+Run `python main.py --help` for the full list.
 
 ## Building Executables
 
-This project uses PyInstaller. Builds store mode metadata by dropping a `client_only.flag` file next to the executable before packaging.
-
-> **Versioning note:** After making code or asset changes and before producing a new release, bump `APP_VERSION` in `CtrlSpeak.py`. The initial packaging of an unchanged revision does not require a version increment.
-
-### Full (Client + Server) build
+This project ships with a small helper that wraps PyInstaller with the correct options and assets. The generated build lives in `dist/CtrlSpeak/`.
 
 ```powershell
 # From the project root
-Remove-Item client_only.flag -ErrorAction SilentlyContinue
-pyinstaller CtrlSpeak.spec --clean --noconfirm
+python build_exe.py
 ```
 
-### Client Only build
-
-```powershell
-# From the project root
-New-Item client_only.flag -ItemType File -Force | Out-Null
-pyinstaller build_client/CtrlSpeak.spec --clean --noconfirm
-Remove-Item client_only.flag
-```
-
-Generated binaries appear in `dist/`.
+The script produces a windowed build that embeds `icon.ico` as the executable icon and bundles both `icon.ico` and `loading.wav` as application data inside the package. CUDA runtime files or Whisper model weights are **not** bundled – they are downloaded by the running application if the user opts in.
 
 ## Manual Model Download
 
-CtrlSpeak caches Whisper model weights under `%APPDATA%\CtrlSpeak\models`. If you need to preload the default `large-v3` model without running the application, use the Hugging Face CLI:
+CtrlSpeak caches Whisper model weights under `%APPDATA%\CtrlSpeak\models`. The default configuration selects the lightweight `small` Whisper checkpoint and runs on the CPU. If you want to preload the model without launching the GUI, use the Hugging Face CLI:
 
 ```powershell
 pip install huggingface_hub
-$target = Join-Path $env:APPDATA 'CtrlSpeak\models\large-v3'
-huggingface-cli download openai/whisper-large-v3 --local-dir $target --local-dir-use-symlinks False
+$target = Join-Path $env:APPDATA 'CtrlSpeak\models\small'
+huggingface-cli download Systran/faster-whisper-small --local-dir $target --local-dir-use-symlinks False
 New-Item -ItemType File (Join-Path $target '.installed') -Force | Out-Null
 ```
 

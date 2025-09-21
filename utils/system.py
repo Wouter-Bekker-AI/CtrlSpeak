@@ -29,11 +29,54 @@ from pynput import keyboard
 import tkinter as tk
 from collections import deque
 
+from utils.config_paths import (
+    settings, settings_lock, load_settings, save_settings,
+    get_config_dir, get_config_file_path, get_temp_dir,
+    create_recording_file_path, cleanup_recording_file, resource_path,
+)
+
+
+def _bootstrap_runtime_environment() -> None:
+    """
+    Ensure third-party services can establish HTTPS connections when running
+    from a PyInstaller bundle by pointing to the embedded certifi bundle and by
+    keeping all Hugging Face caches inside the CtrlSpeak config directory.
+    """
+    try:
+        cfg = get_config_dir()
+        hf_root = cfg / "hf-cache"
+        hf_root.mkdir(parents=True, exist_ok=True)
+        (hf_root / "hub").mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("HF_HOME", str(hf_root))
+        os.environ.setdefault("HF_HUB_CACHE", str(hf_root / "hub"))
+        os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+        os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+    except Exception:
+        pass
+
+    try:
+        import certifi  # type: ignore
+    except Exception:
+        return
+
+    cert_path = Path(certifi.where())
+    if not cert_path.exists():
+        return
+
+    for env_name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        current = os.environ.get(env_name)
+        if not current or not Path(current).exists():
+            os.environ[env_name] = str(cert_path)
+
+
+_bootstrap_runtime_environment()
+
 # recent mono samples of loading.wav for GUI wiggle
 _proc_vis_lock = threading.Lock()
 _proc_vis_buffers = deque()
 _proc_vis_samples = 0
 _PROC_VIS_MAX_SAMPLES = 4096  # ~0.1–0.25s depending on rate
+
 
 def get_processing_waveform(n: int = 512) -> np.ndarray:
     """Return the most recent mono samples of loading.wav in [-1,1]."""
@@ -92,12 +135,6 @@ tk_root: Optional[tk.Tk] = None
 management_window: Optional["ManagementWindow"] = None  # created in utils.gui
 
 # ---------------- IMPORTS from new split modules (and re-exports) ----------------
-# Paths & settings
-from utils.config_paths import (
-    settings, settings_lock, load_settings, save_settings,
-    get_config_dir, get_config_file_path, get_temp_dir,
-    create_recording_file_path, cleanup_recording_file, resource_path,
-)
 
 # Win32 text insertion / clipboard
 from utils.winio import (
