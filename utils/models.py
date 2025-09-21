@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import os
 import sys
 import time
 import threading
@@ -228,6 +229,11 @@ class DownloadDialog:
         card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
         card.pack(fill=tk.BOTH, expand=True)
         ttk.Label(card, text="Install speech model", style="Title.TLabel").pack(anchor=tk.W)
+        model_tag = ttk.Label(card, text=f"MODEL · {model_name.upper()}", style="PillMuted.TLabel")
+        model_tag.pack(anchor=tk.W, pady=(10, 0))
+        accent = ttk.Frame(card, style="AccentLine.TFrame")
+        accent.configure(height=2)
+        accent.pack(fill=tk.X, pady=(12, 16))
 
         info_text = (
             "CtrlSpeak needs to download the Whisper model '"

@@ -26,6 +26,7 @@ OUTLINE = "#1b2c44"
 DANGER = "#ff4d6d"
 DANGER_HOVER = "#ff6f88"
 DANGER_PRESSED = "#f03a5a"
+SUCCESS = "#5cf7c7"
 MUTED_BUTTON = "#162a43"
 MUTED_BUTTON_HOVER = "#1f3554"
 MUTED_BUTTON_DISABLED = "#0f1b2c"
@@ -71,6 +72,12 @@ def apply_modern_theme(root: tk.Misc) -> ttk.Style:
                     font=("{Segoe UI Semibold}", 12))
     style.configure("Caption.TLabel", background=ELEVATED_SURFACE, foreground=TEXT_SECONDARY,
                     font=("{Segoe UI}", 9))
+    style.configure("PillAccent.TLabel", background="#10273b", foreground=ACCENT,
+                    font=("{Segoe UI Semibold}", 9), padding=(12, 4))
+    style.configure("PillDanger.TLabel", background="#34131f", foreground=DANGER,
+                    font=("{Segoe UI Semibold}", 9), padding=(12, 4))
+    style.configure("PillMuted.TLabel", background="#0d1828", foreground=TEXT_SECONDARY,
+                    font=("{Segoe UI}", 9), padding=(12, 4))
 
     # Buttons
     style.configure("Accent.TButton", background=ACCENT, foreground=BACKGROUND,
@@ -116,6 +123,10 @@ def apply_modern_theme(root: tk.Misc) -> ttk.Style:
     style.map("Modern.TCombobox",
               fieldbackground=[("readonly", ELEVATED_SURFACE)],
               foreground=[("disabled", TEXT_SECONDARY)])
+
+    style.configure("Modern.TEntry", fieldbackground=ELEVATED_SURFACE, foreground=TEXT_PRIMARY,
+                    background=ELEVATED_SURFACE, bordercolor=OUTLINE, lightcolor=ELEVATED_SURFACE,
+                    darkcolor=ELEVATED_SURFACE, insertcolor=ACCENT)
 
     # Progressbar and separators
     style.configure("Modern.Horizontal.TProgressbar", troughcolor=MUTED_BUTTON_DISABLED,

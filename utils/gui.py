@@ -43,6 +43,7 @@ from utils.ui_theme import (
     apply_modern_theme,
     ELEVATED_SURFACE,
     ACCENT,
+    BACKGROUND,
 )
 
 # Shared UI thread root + instance ref (imported by utils.system.schedule_management_refresh)
@@ -275,7 +276,11 @@ def show_splash_screen(duration_ms: int) -> None:
     pos_x = int((screen_w - width) / 2); pos_y = int((screen_h - height) / 2)
     root.geometry(f"{width}x{height}+{pos_x}+{pos_y}")
 
-    container = tk.Frame(root, bg=ELEVATED_SURFACE, bd=0, highlightthickness=0)
+    shell = tk.Frame(root, bg=BACKGROUND, bd=0, highlightthickness=0)
+    shell.pack(fill=tk.BOTH, expand=True, padx=18, pady=18)
+
+    container = tk.Frame(shell, bg=ELEVATED_SURFACE, bd=0,
+                         highlightbackground=ACCENT, highlightcolor=ACCENT, highlightthickness=1)
     container.pack(fill=tk.BOTH, expand=True)
 
     accent_bar = tk.Frame(container, bg=ACCENT, height=4, bd=0, highlightthickness=0)
@@ -301,6 +306,9 @@ def show_splash_screen(duration_ms: int) -> None:
 
     title_pad = (12, 4) if icon_added else (28, 8)
     ttk.Label(content, text="CtrlSpeak", style="Title.TLabel").pack(pady=title_pad)
+    accent = ttk.Frame(content, style="AccentLine.TFrame")
+    accent.configure(height=2)
+    accent.pack(fill=tk.X, pady=(8, 16))
     ttk.Label(content, text="Initializing voice systems…", style="Subtitle.TLabel",
               wraplength=240, justify=tk.CENTER).pack(pady=(0, 16))
 
@@ -346,7 +354,9 @@ def prompt_initial_mode() -> Optional[str]:
     )
     ttk.Label(intro, text=message, style="Body.TLabel", wraplength=460,
               justify=tk.LEFT).pack(anchor=tk.W, pady=(12, 0))
-    ttk.Separator(intro, style="Modern.Horizontal.TSeparator").pack(fill=tk.X, pady=(18, 4))
+    accent = ttk.Frame(intro, style="AccentLine.TFrame")
+    accent.configure(height=2)
+    accent.pack(fill=tk.X, pady=(18, 8))
 
     cards = ttk.Frame(container, style="Modern.TFrame")
     cards.pack(fill=tk.BOTH, expand=True, pady=(18, 12))
@@ -354,6 +364,11 @@ def prompt_initial_mode() -> Optional[str]:
     def make_card(title: str, desc: str, mode_value: str, primary: bool) -> None:
         card = ttk.Frame(cards, style="ModernCard.TFrame", padding=(22, 20))
         card.pack(fill=tk.X, pady=8)
+        label_text = f"MODE · {mode_value.replace('_', ' ').upper()}"
+        ttk.Label(card, text=label_text, style="PillMuted.TLabel").pack(anchor=tk.W)
+        accent_inner = ttk.Frame(card, style="AccentLine.TFrame")
+        accent_inner.configure(height=2)
+        accent_inner.pack(fill=tk.X, pady=(10, 14))
         ttk.Label(card, text=title, style="SectionHeading.TLabel").pack(anchor=tk.W)
         ttk.Label(card, text=desc, style="Body.TLabel", wraplength=460,
                   justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 16))
@@ -504,12 +519,23 @@ class ManagementWindow:
         ttk.Label(header, text="CtrlSpeak Control", style="Title.TLabel").pack(anchor=tk.W)
         build_label = "Client Only" if CLIENT_ONLY_BUILD else "Client + Server"
         ttk.Label(header, text=f"Build {APP_VERSION} · {build_label}", style="Subtitle.TLabel").pack(anchor=tk.W, pady=(10, 0))
-        ttk.Separator(header, style="Modern.Horizontal.TSeparator").pack(fill=tk.X, pady=(18, 0))
+        header_accent = ttk.Frame(header, style="AccentLine.TFrame")
+        header_accent.configure(height=2)
+        header_accent.pack(fill=tk.X, pady=(18, 0))
 
         # Status overview
         status_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
         status_card.pack(fill=tk.X, pady=(18, 12))
         ttk.Label(status_card, text="System status", style="SectionHeading.TLabel").pack(anchor=tk.W)
+        status_accent = ttk.Frame(status_card, style="AccentLine.TFrame")
+        status_accent.configure(height=2)
+        status_accent.pack(fill=tk.X, pady=(12, 12))
+        badges = ttk.Frame(status_card, style="ModernCardInner.TFrame")
+        badges.pack(fill=tk.X)
+        self.mode_badge = ttk.Label(badges, text="", style="PillMuted.TLabel")
+        self.mode_badge.pack(side=tk.LEFT)
+        self.network_badge = ttk.Label(badges, text="", style="PillMuted.TLabel")
+        self.network_badge.pack(side=tk.LEFT, padx=(12, 0))
         self.status_var = tk.StringVar()
         self.server_status_var = tk.StringVar()
         ttk.Label(status_card, textvariable=self.status_var, style="Body.TLabel",
@@ -521,6 +547,9 @@ class ManagementWindow:
         device_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
         device_card.pack(fill=tk.X, pady=(0, 12))
         ttk.Label(device_card, text="Device preference", style="SectionHeading.TLabel").pack(anchor=tk.W)
+        device_accent = ttk.Frame(device_card, style="AccentLine.TFrame")
+        device_accent.configure(height=2)
+        device_accent.pack(fill=tk.X, pady=(10, 12))
         self.device_var = tk.StringVar(value=get_device_preference())
         device_row = ttk.Frame(device_card, style="ModernCardInner.TFrame")
         device_row.pack(fill=tk.X, pady=(14, 10))
@@ -543,6 +572,9 @@ class ManagementWindow:
         model_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
         model_card.pack(fill=tk.X, pady=(0, 12))
         ttk.Label(model_card, text="Speech model", style="SectionHeading.TLabel").pack(anchor=tk.W)
+        model_accent = ttk.Frame(model_card, style="AccentLine.TFrame")
+        model_accent.configure(height=2)
+        model_accent.pack(fill=tk.X, pady=(10, 12))
         self.model_var = tk.StringVar(value=get_current_model_name())
         model_row = ttk.Frame(model_card, style="ModernCardInner.TFrame")
         model_row.pack(fill=tk.X, pady=(14, 12))
@@ -564,6 +596,9 @@ class ManagementWindow:
         control_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
         control_card.pack(fill=tk.BOTH, expand=True)
         ttk.Label(control_card, text="Client & server", style="SectionHeading.TLabel").pack(anchor=tk.W)
+        control_accent = ttk.Frame(control_card, style="AccentLine.TFrame")
+        control_accent.configure(height=2)
+        control_accent.pack(fill=tk.X, pady=(10, 12))
         controls = ttk.Frame(control_card, style="ModernCardInner.TFrame")
         controls.pack(fill=tk.X, pady=(14, 0))
         self.start_button = ttk.Button(controls, text="Start client", style="Accent.TButton",
@@ -616,6 +651,21 @@ class ManagementWindow:
         cuda_ok = cuda_runtime_ready()
         model_name = get_current_model_name()
         present = model_files_present(model_store_path_for(model_name))
+        self.mode_badge.configure(text=f"MODE · {mode.upper()}", style="PillAccent.TLabel")
+        network_label = describe_server_status()
+        if "Not connected" in network_label:
+            badge_style = "PillDanger.TLabel"
+            badge_text = "NETWORK · OFFLINE"
+        elif network_label.startswith("Serving"):
+            badge_style = "PillAccent.TLabel"
+            badge_text = "SERVER · ONLINE"
+        elif network_label.startswith("Connected") or network_label.startswith("Discovered"):
+            badge_style = "PillAccent.TLabel"
+            badge_text = "NETWORK · LINKED"
+        else:
+            badge_style = "PillMuted.TLabel"
+            badge_text = "NETWORK · READY"
+        self.network_badge.configure(text=badge_text, style=badge_style)
         status_parts = [
             f"• Mode: {mode}",
             f"• Client: {'active' if sysmod.client_enabled else 'stopped'}",
