@@ -8,7 +8,9 @@ import threading
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
-from utils.config_paths import settings, settings_lock, save_settings
+from utils.config_paths import settings, settings_lock, save_settings, get_logger
+
+logger = get_logger(__name__)
 
 DISCOVERY_INTERVAL_SECONDS = 5.0
 DISCOVERY_ENTRY_TTL = 15.0
@@ -77,7 +79,7 @@ class DiscoveryListener(threading.Thread):
         try:
             self.sock.close()
         except Exception:
-            pass
+            logger.exception("Failed to close discovery listener socket")
 
 
 def get_preferred_server_settings() -> tuple[Optional[str], Optional[int]]:
@@ -140,13 +142,14 @@ def probe_server(host: str, port: int, timeout: float = 2.0) -> bool:
         response = conn.getresponse(); response.read()
         return response.status == 200
     except Exception:
+        logger.exception("Failed to probe server %s:%s", host, port)
         return False
     finally:
         if conn is not None:
             try:
                 conn.close()
             except Exception:
-                pass
+                logger.exception("Failed to close probe connection to %s:%s", host, port)
 
 
 def register_manual_server(host: str, port: int, update_preference: bool = True) -> ServerInfo:
@@ -178,12 +181,12 @@ def send_discovery_query(timeout: float = 1.0) -> None:
         message = f"{SERVER_BROADCAST_SIGNATURE}_QUERY".encode("utf-8")
         sock.sendto(message, ("255.255.255.255", port))
     except Exception:
-        pass
+        logger.exception("Failed to broadcast discovery query on port %s", port)
     finally:
         try:
             sock.close()
         except Exception:
-            pass
+            logger.exception("Failed to close discovery query socket")
 
 
 def manual_discovery_refresh(discovery_listener=None, wait_time: float = 1.5) -> Optional[ServerInfo]:
@@ -218,6 +221,7 @@ def get_advertised_host_ip() -> str:
             tmp.connect(("8.8.8.8", 80))
             return tmp.getsockname()[0]
     except Exception:
+        logger.exception("Failed to determine advertised host IP")
         return "127.0.0.1"
 
 
@@ -231,7 +235,7 @@ def manage_discovery_broadcast(stop_event: threading.Event, port: int, server_po
             try:
                 sock.sendto(message, ("255.255.255.255", port))
             except Exception:
-                pass
+                logger.exception("Failed to send discovery broadcast from %s:%s", host_ip, port)
             stop_event.wait(DISCOVERY_INTERVAL_SECONDS)
     finally:
         sock.close()
@@ -241,8 +245,8 @@ def listen_for_discovery_queries(stop_event: threading.Event, port: int, server_
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    except OSError:
-        pass
+    except OSError as exc:
+        logger.warning("Failed to enable SO_REUSEADDR on discovery query listener: %s", exc)
     try:
         sock.bind(("", port)); sock.settimeout(1.0)
     except OSError:
@@ -266,9 +270,9 @@ def listen_for_discovery_queries(stop_event: threading.Event, port: int, server_
             try:
                 sock.sendto(response, addr)
             except Exception:
-                pass
+                logger.exception("Failed to send discovery response to %s", addr)
     finally:
         try:
             sock.close()
         except Exception:
-            pass
+            logger.exception("Failed to close discovery query listener socket")

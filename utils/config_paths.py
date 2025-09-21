@@ -2,15 +2,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import uuid
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, Optional
 import tempfile
 import threading
 
 CONFIG_FILENAME = "settings.json"
+LOG_DIR_NAME = "logs"
+ASSETS_DIR_NAME = "assets"
+
 DEFAULT_SETTINGS: Dict[str, object] = {
     "mode": None,                    # "client" | "client_server"
     "server_port": 65432,
@@ -38,9 +43,20 @@ def get_config_dir() -> Path:
         base_dir = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     config_dir = base_dir / "CtrlSpeak"
     config_dir.mkdir(parents=True, exist_ok=True)
-    for sub in ("models", "cuda", "temp"):
+    for sub in ("models", "cuda", "temp", LOG_DIR_NAME):
         (config_dir / sub).mkdir(parents=True, exist_ok=True)
     return config_dir
+
+
+def get_logs_dir() -> Path:
+    logs_dir = get_config_dir() / LOG_DIR_NAME
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    return logs_dir
+
+
+def get_assets_dir() -> Path:
+    base_dir = get_app_base_dir()
+    return base_dir / ASSETS_DIR_NAME
 
 def get_config_file_path() -> Path:
     return get_config_dir() / CONFIG_FILENAME
@@ -59,7 +75,8 @@ def cleanup_recording_file(path: Optional[Path]) -> None:
     try:
         path.unlink(missing_ok=True)
     except Exception:
-        pass
+        logger = get_logger()
+        logger.exception("Failed to remove temporary recording file: %s", path)
 
 def load_settings() -> Dict[str, object]:
     path = get_config_file_path()
@@ -68,7 +85,7 @@ def load_settings() -> Dict[str, object]:
         try:
             loaded = json.loads(path.read_text("utf-8-sig"))
         except Exception:
-            pass
+            get_logger().exception("Unable to read settings from %s", path)
     with settings_lock:
         settings.clear()
         settings.update(DEFAULT_SETTINGS)
@@ -82,11 +99,55 @@ def save_settings() -> None:
     try:
         path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
     except Exception:
-        pass
+        get_logger().exception("Unable to save settings to %s", path)
+
+
+def get_app_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        # Running from a bundled executable (PyInstaller)
+        base_path = getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent)
+        return Path(base_path)
+    return Path(__file__).resolve().parent.parent
+
 
 def resource_path(relative_path: str) -> str:
-    try:
-        base_path = sys._MEIPASS  # pyinstaller
-    except AttributeError:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
+    return str(get_app_base_dir() / relative_path)
+
+
+def asset_path(relative_name: str) -> Path:
+    return get_assets_dir() / relative_name
+
+
+LOGGER_NAME = "ctrlspeak"
+
+
+def _configure_logging() -> logging.Logger:
+    logger = logging.getLogger(LOGGER_NAME)
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(logging.INFO)
+    logs_dir = get_logs_dir()
+    handler = RotatingFileHandler(
+        logs_dir / "ctrlspeak.log",
+        maxBytes=1_048_576,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.propagate = False
+
+    logging.captureWarnings(True)
+    return logger
+
+
+_CONFIGURED_LOGGER = _configure_logging()
+
+
+def get_logger(name: str = LOGGER_NAME) -> logging.Logger:
+    if name == LOGGER_NAME:
+        return _CONFIGURED_LOGGER
+    _configure_logging()
+    return logging.getLogger(name)
