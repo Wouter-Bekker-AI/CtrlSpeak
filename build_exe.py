@@ -41,7 +41,7 @@ def build() -> None:
         "--name=CtrlSpeak",
         f"--icon={icon_path}",
         "--collect-all=certifi",
-        "--collect-submodules=huggingface_hub",
+        "--collect-submodules=huggingface_hub"
     ]
     args.extend(f"--add-data={entry}" for entry in datas)
 
