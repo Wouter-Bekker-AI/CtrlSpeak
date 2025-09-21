@@ -10,6 +10,10 @@ from typing import Optional
 
 import pyautogui
 
+from utils.config_paths import get_logger
+
+logger = get_logger(__name__)
+
 # Windows GUI helpers
 user32 = ctypes.windll.user32 if sys.platform.startswith("win") else None
 kernel32 = ctypes.windll.kernel32 if sys.platform.startswith("win") else None
@@ -103,6 +107,7 @@ def get_focused_control() -> Optional[int]:
             user32.AttachThreadInput(current_thread_id, thread_id, False)
         return hwnd_focus or foreground
     except Exception:
+        logger.exception("Failed to query focused control")
         return None
 
 
@@ -114,6 +119,7 @@ def get_class_name(hwnd: int) -> str:
         if user32.GetClassNameW(hwnd, buffer, len(buffer)) == 0:
             return ""
     except Exception:
+        logger.exception("Failed to determine window class name for hwnd=%s", hwnd)
         return ""
     return buffer.value.lower()
 
@@ -145,6 +151,7 @@ def get_window_process_name(hwnd: int) -> str:
             return ""
         return Path(buffer.value).name.lower()
     except Exception:
+        logger.exception("Failed to resolve process name for hwnd=%s", hwnd)
         return ""
     finally:
         kernel32.CloseHandle(process_handle)
@@ -183,6 +190,7 @@ def is_remote_host_window(hwnd: int) -> bool:
         proc = (get_window_process_name(hwnd) or "").lower()
         return proc in _REMOTE_HOST_PROCESSES
     except Exception:
+        logger.exception("Failed to detect remote host window for hwnd=%s", hwnd)
         return False
 
 
@@ -318,7 +326,7 @@ def ensure_foreground(hwnd: int) -> None:
             if attached:
                 user32.AttachThreadInput(current_thread_id, thread_id, False)
     except Exception:
-        pass
+        logger.exception("Failed to bring window %s to foreground", hwnd)
 
 
 def send_unicode_input(text: str) -> bool:
@@ -390,6 +398,7 @@ def try_direct_text_insert(text: str, hwnd: Optional[int] = None) -> bool:
             user32.SendMessageW(hwnd, EM_REPLACESEL, True, text)
             return True
     except Exception:
+        logger.exception("Direct text insertion failed for hwnd=%s", hwnd)
         return False
     return False
 

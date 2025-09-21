@@ -3,6 +3,10 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
+from utils.config_paths import get_logger
+
+logger = get_logger(__name__)
+
 # NOTE ABOUT FONTS
 # -----------------
 # Windows parses Tk font descriptors token-by-token, so multi-word font
@@ -40,7 +44,7 @@ def apply_modern_theme(root: tk.Misc) -> ttk.Style:
         style.theme_use("clam")
     except Exception:
         # Fall back silently if the theme isn't available
-        pass
+        logger.exception("Failed to apply Tk 'clam' theme")
 
     # Global widget defaults
     if isinstance(root, tk.Tk) or isinstance(root, tk.Toplevel):
@@ -57,7 +61,7 @@ def apply_modern_theme(root: tk.Misc) -> ttk.Style:
         root.option_add("*TCombobox*Listbox*Background", ELEVATED_SURFACE)
         root.option_add("*TCombobox*Listbox*Foreground", TEXT_PRIMARY)
     except Exception:
-        pass
+        logger.exception("Failed to apply global Tk style options")
 
     # Base frames/labels
     style.configure("Modern.TFrame", background=BACKGROUND)

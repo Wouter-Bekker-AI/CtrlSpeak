@@ -19,8 +19,9 @@ except ImportError as exc:  # pragma: no cover - developer convenience
 
 def build() -> None:
     root = Path(__file__).resolve().parent
-    icon_path = root / "icon.ico"
-    audio_path = root / "loading.wav"
+    assets_dir = root / "assets"
+    icon_path = assets_dir / "icon.ico"
+    audio_path = assets_dir / "loading.wav"
 
     if not icon_path.exists():
         raise SystemExit(f"Missing icon at {icon_path}")
@@ -29,8 +30,8 @@ def build() -> None:
 
     data_sep = ";" if os.name == "nt" else ":"
     datas = [
-        f"{icon_path}{data_sep}.",
-        f"{audio_path}{data_sep}.",
+        f"{icon_path}{data_sep}assets",
+        f"{audio_path}{data_sep}assets",
     ]
 
     args = [

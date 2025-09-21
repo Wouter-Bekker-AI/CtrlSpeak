@@ -23,7 +23,6 @@ from utils.system import (
     manual_discovery_refresh,
     schedule_management_refresh, enqueue_management_task,
     shutdown_server, initiate_self_uninstall,
-    resource_path,
 )
 # IMPORTANT: import the module so we always see the *current* values
 from utils import system as sysmod
@@ -46,9 +45,13 @@ from utils.ui_theme import (
     BACKGROUND,
 )
 
+from utils.config_paths import asset_path, get_logger
+
 # Shared UI thread root + instance ref (imported by utils.system.schedule_management_refresh)
 tk_root: Optional[tk.Tk] = None
 management_window: Optional["ManagementWindow"] = None
+
+logger = get_logger(__name__)
 
 # -------- Voice Waveform Overlay --------
 _waveform_win: Optional[tk.Toplevel] = None
@@ -78,12 +81,13 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
         try:
             _waveform_win.attributes("-alpha", 0.92)  # translucent
         except Exception:
-            pass
+            logger.exception("Failed to set waveform window transparency")
 
         # Position: top half center
         try:
             sw, sh = tk_root.winfo_screenwidth(), tk_root.winfo_screenheight()
         except Exception:
+            logger.exception("Failed to query screen dimensions for waveform overlay")
             sw, sh = 1200, 800
         target_w = int(sw * 0.4)
         target_h = int(sh * 0.25)
@@ -95,7 +99,10 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
         _waveform_canvas.pack(fill=tk.BOTH, expand=True)
         _waveform_closing = False
 
+        processing_error_logged = False
+
         def _tick():
+            nonlocal processing_error_logged
             """Redraw the overlay every ~33 ms.
             - LIVE mode: polyline waveform from recent audio samples.
             - PROCESSING mode: pulsing circular ring with 'Processing…' label.
@@ -155,6 +162,9 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
                         level = float(sysmod.get_processing_level())
                         proc_wave = sysmod.get_processing_waveform(720)  # resolution around the ring
                     except Exception:
+                        if not processing_error_logged:
+                            logger.exception("Failed to obtain processing waveform data")
+                            processing_error_logged = True
                         level = 0.0
                         proc_wave = np.zeros(720, dtype=np.float32)
 
@@ -219,12 +229,13 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
                     _waveform_job = _waveform_canvas.after(33, _tick)
 
             except Exception:
+                logger.exception("Waveform overlay tick failed")
                 if not _waveform_closing and _waveform_win and _waveform_win.winfo_exists():
                     _waveform_job = _waveform_canvas.after(33, _tick)
 
         _tick()
     except Exception:
-        pass
+        logger.exception("Failed to open waveform overlay window")
 
 def set_waveform_processing(message: str = "Processing…") -> None:
     global _waveform_mode, _waveform_msg, _pulse_phase
@@ -241,12 +252,12 @@ def hide_waveform_overlay() -> None:
             try:
                 _waveform_canvas.after_cancel(_waveform_job)
             except Exception:
-                pass
+                logger.exception("Failed to cancel waveform overlay job")
         if _waveform_win and _waveform_win.winfo_exists():
             try:
                 _waveform_win.withdraw()
             except Exception:
-                pass
+                logger.exception("Failed to withdraw waveform window")
             # destroy shortly after to let any in-flight callbacks finish
             _waveform_win.after(10, _waveform_win.destroy)
     finally:
@@ -272,6 +283,7 @@ def show_splash_screen(duration_ms: int) -> None:
         screen_w = root.winfo_screenwidth()
         screen_h = root.winfo_screenheight()
     except Exception:
+        logger.exception("Failed to query screen dimensions for splash screen")
         screen_w, screen_h = 800, 600
     pos_x = int((screen_w - width) / 2); pos_y = int((screen_h - height) / 2)
     root.geometry(f"{width}x{height}+{pos_x}+{pos_y}")
@@ -293,7 +305,7 @@ def show_splash_screen(duration_ms: int) -> None:
     icon_added = False
     try:
         from PIL import Image, ImageTk
-        icon_path = resource_path("icon.ico")
+        icon_path = asset_path("icon.ico")
         image = Image.open(icon_path)
         image.thumbnail((160, 160), Image.LANCZOS)
         photo = ImageTk.PhotoImage(image)
@@ -302,7 +314,7 @@ def show_splash_screen(duration_ms: int) -> None:
         label.pack(pady=(18, 12))
         icon_added = True
     except Exception:
-        pass
+        logger.exception("Failed to load splash icon")
 
     title_pad = (12, 4) if icon_added else (28, 8)
     ttk.Label(content, text="CtrlSpeak", style="Title.TLabel").pack(pady=title_pad)
@@ -318,7 +330,7 @@ def show_splash_screen(duration_ms: int) -> None:
     try:
         progress.start(10)
     except Exception:
-        pass
+        logger.exception("Failed to start splash progress animation")
 
     root.after(duration_ms, root.destroy)
     root.mainloop()
@@ -455,8 +467,7 @@ def ensure_management_ui_thread() -> None:
                 try:
                     func(*args, **kwargs)
                 except Exception:
-                    import traceback
-                    traceback.print_exc()
+                    logger.exception("Management UI task failed")
             if tk_root is not None:
                 tk_root.after(120, process_queue)
 
@@ -513,9 +524,9 @@ class ManagementWindow:
         self.window.bind("<Escape>", lambda _e: self.close())
         apply_modern_theme(self.window)
         try:
-            self.window.iconbitmap(resource_path("icon.ico"))
+            self.window.iconbitmap(str(asset_path("icon.ico")))
         except Exception:
-            pass
+            logger.exception("Failed to set management window icon")
 
         container = ttk.Frame(self.window, style="Modern.TFrame", padding=(30, 26))
         container.pack(fill=tk.BOTH, expand=True)

@@ -12,8 +12,8 @@ a = Analysis(
     pathex=['..'],          # add project root to search path
     binaries=[],
     datas=fw_datas + [
-        ('..\\icon.ico', '.'),
-        ('..\\loading.wav', '.'),
+        ('..\\assets\\icon.ico', 'assets'),
+        ('..\\assets\\loading.wav', 'assets'),
     ],
     hiddenimports=[],
     hookspath=[],
@@ -43,6 +43,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['..\\icon.ico'],         # app icon
+    icon=['..\\assets\\icon.ico'],         # app icon
     onefile=True,
 )
