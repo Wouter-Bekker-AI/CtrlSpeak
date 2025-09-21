@@ -33,7 +33,11 @@ from utils.config_paths import (
     settings, settings_lock, load_settings, save_settings,
     get_config_dir, get_config_file_path, get_temp_dir,
     create_recording_file_path, cleanup_recording_file, resource_path,
+    asset_path, get_logger, get_logs_dir,
 )
+
+
+logger = get_logger(__name__)
 
 
 def _bootstrap_runtime_environment() -> None:
@@ -52,11 +56,12 @@ def _bootstrap_runtime_environment() -> None:
         os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
         os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
     except Exception:
-        pass
+        logger.exception("Failed to prepare Hugging Face cache directories")
 
     try:
         import certifi  # type: ignore
     except Exception:
+        logger.warning("certifi is unavailable; HTTPS certificate bundle not configured")
         return
 
     cert_path = Path(certifi.where())
@@ -105,7 +110,7 @@ def detect_client_only_build() -> bool:
         if (base_dir / 'client_only.flag').exists():
             return True
     except Exception:
-        pass
+        logger.exception("Failed to detect client-only build flag")
     return os.environ.get('CTRLSPEAK_CLIENT_ONLY', '0') == '1'
 
 CLIENT_ONLY_BUILD = detect_client_only_build()
@@ -172,28 +177,29 @@ def notify(message: str, title: str = "CtrlSpeak") -> None:
     try:
         print(f"{title}: {message}")
     except Exception:
-        pass
+        logger.exception("Failed to display notification '%s': %s", title, message)
 
 def format_exception_details(exc: Exception) -> str:
     return "".join(traceback.format_exception_only(type(exc), exc)).strip()
 
 def write_error_log(context: str, details: str) -> None:
     try:
-        log_path = get_config_dir() / ERROR_LOG_FILENAME
+        log_path = get_logs_dir() / ERROR_LOG_FILENAME
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         cleaned = (details or "").strip() or "Unknown error"
         entry = "[{}] {}\n{}\n{}\n".format(timestamp, context, cleaned, "-" * 60)
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(entry)
+        logger.error("%s | %s", context, cleaned)
     except Exception:
-        pass
+        logger.exception("Failed to write error log entry for %s", context)
 
 def copy_to_clipboard(text: str) -> None:
     try:
         root = tk.Tk(); root.withdraw()
         root.clipboard_clear(); root.clipboard_append(text); root.update(); root.destroy()
     except Exception:
-        pass
+        logger.exception("Failed to copy text to clipboard")
 
 def notify_error(context: str, details: str) -> None:
     snippet = (details or "").strip() or "Unknown error"
@@ -204,7 +210,7 @@ def notify_error(context: str, details: str) -> None:
 
 # ---------------- Resource helpers ----------------
 def create_icon_image():
-    icon_path = resource_path("icon.ico")
+    icon_path = asset_path("icon.ico")
     return Image.open(icon_path)
 
 # ---------------- Management UI pump (GUI thread lives in utils.gui) ----------------
@@ -212,7 +218,7 @@ def enqueue_management_task(func: Callable[..., None], *args, **kwargs) -> None:
     try:
         management_ui_queue.put_nowait((func, args, kwargs))
     except Exception:
-        pass
+        logger.exception("Failed to enqueue management task %s", getattr(func, "__name__", str(func)))
 
 def schedule_management_refresh(delay_ms: int = 0) -> None:
     # utils.gui sets tk_root and management_window; import FRESH on each call
@@ -264,6 +270,7 @@ def _push_waveform_bytes(chunk: bytes) -> None:
     try:
         arr = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
     except Exception:
+        logger.exception("Failed to push waveform chunk of size %d", len(chunk))
         return
     global _waveform_samples
     with _waveform_lock:
@@ -300,12 +307,12 @@ def load_processing_sound():
     if processing_sound_data is not None and processing_sound_settings is not None:
         return processing_sound_data, processing_sound_settings
     try:
-        base_dir = Path(sys.executable if getattr(sys, "frozen", False) else sys.argv[0]).resolve().parent
-        sound_path = base_dir / "loading.wav"
+        sound_path = asset_path("loading.wav")
         with wave.open(str(sound_path), "rb") as wav_file:
             frames = wav_file.readframes(wav_file.getnframes())
             settings_audio = {"channels": wav_file.getnchannels(), "rate": wav_file.getframerate(), "width": wav_file.getsampwidth()}
     except Exception:
+        logger.exception("Failed to load processing sound from %s; using fallback tone", asset_path("loading.wav"))
         frames, settings_audio = generate_fallback_sound()
     processing_sound_data = frames
     processing_sound_settings = settings_audio
@@ -361,16 +368,16 @@ def _processing_sound_loop():
                             popped = _proc_vis_buffers.popleft()
                             _proc_vis_samples -= popped.size
             except Exception:
-                pass
+                logger.exception("Failed to update processing waveform metrics")
 
     except Exception:
-        pass
+        logger.exception("Processing feedback loop crashed")
     finally:
         try:
             if stream is not None:
                 stream.stop_stream(); stream.close()
         except Exception:
-            pass
+            logger.exception("Failed to close processing audio stream cleanly")
         pa_instance.terminate()
 
 
@@ -422,7 +429,7 @@ def on_press(key):
             from utils.gui import show_waveform_overlay
             enqueue_management_task(show_waveform_overlay, lambda: get_recent_waveform(500))
         except Exception:
-            pass
+            logger.exception("Failed to show waveform overlay while recording")
 
 
 def on_release(key):
@@ -438,12 +445,12 @@ def on_release(key):
                 from utils.gui import set_waveform_processing
                 enqueue_management_task(set_waveform_processing, "Processing…")
             except Exception:
-                pass
+                logger.exception("Failed to switch waveform overlay to processing mode")
             # START the loading sound so GUI gets live levels + waveform
             try:
                 start_processing_feedback()
             except Exception:
-                pass
+                logger.exception("Failed to start processing feedback loop")
             path = recording_file_path
             text = None
             try:
@@ -457,12 +464,12 @@ def on_release(key):
             try:
                 stop_processing_feedback()
             except Exception:
-                pass
+                logger.exception("Failed to stop processing feedback loop")
             try:
                 from utils.gui import hide_waveform_overlay
                 enqueue_management_task(hide_waveform_overlay)
             except Exception:
-                pass
+                logger.exception("Failed to hide waveform overlay")
             cleanup_recording_file(path)
             recording_file_path = None
 
@@ -539,8 +546,10 @@ class TranscriptionRequestHandler(BaseHTTPRequestHandler):
             os.remove(temp_path); self.send_error(400, "Empty audio payload"); return
         start_time = time.time()
         text = transcribe_local(temp_path, play_feedback=False)
-        try: os.remove(temp_path)
-        except Exception: pass
+        try:
+            os.remove(temp_path)
+        except Exception:
+            logger.exception("Failed to remove temporary transcription upload %s", temp_path)
         if text is None:
             self.send_error(500, "Transcription failed"); return
         payload = json.dumps({"text": text, "elapsed": time.time() - start_time}).encode("utf-8")
@@ -594,8 +603,10 @@ def shutdown_server() -> None:
     if discovery_query_listener and discovery_query_listener.is_alive(): discovery_query_listener.join(timeout=1.0)
     discovery_query_listener = None
     if server_httpd is not None:
-        try: server_httpd.shutdown(); server_httpd.server_close()
-        except Exception: pass
+        try:
+            server_httpd.shutdown(); server_httpd.server_close()
+        except Exception:
+            logger.exception("Failed to shut down server HTTP listener cleanly")
     server_httpd = None
     if server_thread and server_thread.is_alive(): server_thread.join(timeout=1.0)
     server_thread = None
@@ -615,7 +626,7 @@ def register_manual_server(host: str, port: int, update_preference: bool = True)
         if discovery_listener is not None:
             discovery_listener.registry[(server_info.host, server_info.port)] = server_info
     except Exception:
-        pass
+        logger.exception("Failed to update discovery registry with manual server %s:%s", server_info.host, server_info.port)
 
     # Original behavior: set last_connected_server and refresh UI
     last_connected_server = server_info
@@ -648,8 +659,10 @@ def run_tray():
 def acquire_single_instance_lock() -> bool:
     global instance_lock_handle
     lock_path = get_config_dir() / LOCK_FILENAME
-    try: lock_path.parent.mkdir(parents=True, exist_ok=True)
-    except Exception: pass
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        logger.exception("Failed to create directory for instance lock at %s", lock_path.parent)
     try:
         handle = open(lock_path, 'a+')
     except OSError as exc:
@@ -670,8 +683,10 @@ def acquire_single_instance_lock() -> bool:
         instance_lock_handle = handle; return True
     except Exception as exc:
         print(f'Unable to acquire single-instance lock: {exc}')
-        try: handle.close()
-        except Exception: pass
+        try:
+            handle.close()
+        except Exception:
+            logger.exception("Failed to close lock file handle after acquisition error")
         return False
 
 def release_single_instance_lock() -> None:
@@ -682,17 +697,25 @@ def release_single_instance_lock() -> None:
     try:
         if sys.platform.startswith('win'):
             import msvcrt
-            try: handle.seek(0); msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            except Exception: pass
+            try:
+                handle.seek(0); msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            except Exception:
+                logger.exception("Failed to release Windows file lock for CtrlSpeak instance")
         else:
             import fcntl
-            try: fcntl.lockf(handle.fileno(), fcntl.LOCK_UN)
-            except Exception: pass
+            try:
+                fcntl.lockf(handle.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                logger.exception("Failed to release POSIX file lock for CtrlSpeak instance")
     finally:
-        try: handle.close()
-        except Exception: pass
-        try: (get_config_dir() / LOCK_FILENAME).unlink(missing_ok=True)
-        except Exception: pass
+        try:
+            handle.close()
+        except Exception:
+            logger.exception("Failed to close instance lock file handle")
+        try:
+            (get_config_dir() / LOCK_FILENAME).unlink(missing_ok=True)
+        except Exception:
+            logger.exception("Failed to remove instance lock file")
 
 # ---------------- Uninstall ----------------
 def build_uninstall_script(executable: Path, config_dir: Path) -> Path:
@@ -720,8 +743,10 @@ def initiate_self_uninstall(icon: Optional[pystray.Icon]) -> None:
         notify_error("Uninstall failed", format_exception_details(exc)); return
     stop_client_listener(); shutdown_server()
     if icon is not None:
-        try: icon.stop()
-        except Exception: pass
+        try:
+            icon.stop()
+        except Exception:
+            logger.exception("Failed to stop tray icon during uninstall")
     os._exit(0)
 
 # ---------------- Lifecycle helpers ----------------
@@ -736,7 +761,7 @@ def shutdown_all():
     try:
         if discovery_listener: discovery_listener.stop()
     except Exception:
-        pass
+        logger.exception("Failed to stop discovery listener during shutdown")
 
 # ---------------- CLI ----------------
 def parse_cli_args(argv: list[str]) -> argparse.Namespace:
