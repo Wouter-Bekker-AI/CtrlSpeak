@@ -39,6 +39,12 @@ from utils.models import (
     format_bytes,                         # optional pretty bytes
 )
 
+from utils.ui_theme import (
+    apply_modern_theme,
+    ELEVATED_SURFACE,
+    ACCENT,
+)
+
 # Shared UI thread root + instance ref (imported by utils.system.schedule_management_refresh)
 tk_root: Optional[tk.Tk] = None
 management_window: Optional["ManagementWindow"] = None
@@ -256,10 +262,11 @@ def show_splash_screen(duration_ms: int) -> None:
         root = tk.Tk()
     except tk.TclError:
         return
+    apply_modern_theme(root)
     root.overrideredirect(True)
     root.attributes("-topmost", True)
-    root.configure(background="#1a1a1a")
-    width, height = 260, 240
+
+    width, height = 320, 340
     try:
         screen_w = root.winfo_screenwidth()
         screen_h = root.winfo_screenheight()
@@ -268,20 +275,43 @@ def show_splash_screen(duration_ms: int) -> None:
     pos_x = int((screen_w - width) / 2); pos_y = int((screen_h - height) / 2)
     root.geometry(f"{width}x{height}+{pos_x}+{pos_y}")
 
+    container = tk.Frame(root, bg=ELEVATED_SURFACE, bd=0, highlightthickness=0)
+    container.pack(fill=tk.BOTH, expand=True)
+
+    accent_bar = tk.Frame(container, bg=ACCENT, height=4, bd=0, highlightthickness=0)
+    accent_bar.pack(fill=tk.X, side=tk.TOP)
+
+    content = ttk.Frame(container, style="ModernCard.TFrame", padding=(28, 30))
+    content.pack(fill=tk.BOTH, expand=True)
+    content.pack_propagate(False)
+
+    icon_added = False
     try:
         from PIL import Image, ImageTk
         icon_path = resource_path("icon.ico")
         image = Image.open(icon_path)
         image.thumbnail((160, 160), Image.LANCZOS)
         photo = ImageTk.PhotoImage(image)
-        label = tk.Label(root, image=photo, background="#1a1a1a")
+        label = tk.Label(content, image=photo, background=ELEVATED_SURFACE, bd=0)
         label.image = photo
-        label.pack(pady=(32, 12))
+        label.pack(pady=(18, 12))
+        icon_added = True
     except Exception:
-        tk.Label(root, text="CtrlSpeak", font=("Segoe UI", 18, "bold"),
-                 fg="#ffffff", bg="#1a1a1a").pack(pady=(40, 20))
-    tk.Label(root, text="Loading...", font=("Segoe UI", 11),
-             fg="#dddddd", bg="#1a1a1a").pack()
+        pass
+
+    title_pad = (12, 4) if icon_added else (28, 8)
+    ttk.Label(content, text="CtrlSpeak", style="Title.TLabel").pack(pady=title_pad)
+    ttk.Label(content, text="Initializing voice systems…", style="Subtitle.TLabel",
+              wraplength=240, justify=tk.CENTER).pack(pady=(0, 16))
+
+    progress = ttk.Progressbar(content, mode="indeterminate", length=220,
+                               style="Modern.Horizontal.TProgressbar")
+    progress.pack(fill=tk.X)
+    try:
+        progress.start(10)
+    except Exception:
+        pass
+
     root.after(duration_ms, root.destroy)
     root.mainloop()
 
@@ -297,39 +327,59 @@ def prompt_initial_mode() -> Optional[str]:
         root.destroy()
 
     root = tk.Tk()
+    apply_modern_theme(root)
     root.title("Welcome to CtrlSpeak")
-    root.geometry("480x300")
-    root.minsize(440, 260)
+    root.geometry("560x420")
+    root.minsize(520, 360)
     root.resizable(True, True)
     root.attributes("-topmost", True)
 
-    tk.Label(root, text="Welcome to CtrlSpeak",
-             font=("Segoe UI", 14, "bold")).pack(pady=(18, 8))
+    container = ttk.Frame(root, style="Modern.TFrame", padding=(28, 26))
+    container.pack(fill=tk.BOTH, expand=True)
+
+    intro = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
+    intro.pack(fill=tk.X)
+    ttk.Label(intro, text="Welcome to CtrlSpeak", style="Title.TLabel").pack(anchor=tk.W)
     message = (
-        "It looks like this is the first time CtrlSpeak is running on this computer.\n\n"
+        "It looks like this is the first time CtrlSpeak is running on this computer. "
         "Choose how you would like to use it:"
     )
-    tk.Message(root, text=message, width=420, font=("Segoe UI", 10)).pack(pady=(0, 12))
+    ttk.Label(intro, text=message, style="Body.TLabel", wraplength=460,
+              justify=tk.LEFT).pack(anchor=tk.W, pady=(12, 0))
+    ttk.Separator(intro, style="Modern.Horizontal.TSeparator").pack(fill=tk.X, pady=(18, 4))
 
-    button_frame = tk.Frame(root)
-    button_frame.pack(pady=(0, 12), fill=tk.X, padx=16)
+    cards = ttk.Frame(container, style="Modern.TFrame")
+    cards.pack(fill=tk.BOTH, expand=True, pady=(18, 12))
 
-    def make_button(text: str, desc: str, mode_value: str) -> None:
-        frame = tk.Frame(button_frame, relief=tk.RIDGE, borderwidth=1)
-        frame.pack(padx=8, pady=6, fill=tk.X)
-        tk.Label(frame, text=text, font=("Segoe UI", 11, "bold")).pack(anchor=tk.W, padx=8, pady=(6, 0))
-        tk.Message(frame, text=desc, width=360).pack(anchor=tk.W, padx=8)
-        tk.Button(frame, text="Select", command=lambda: choose(mode_value)).pack(padx=8, pady=(0, 8), anchor=tk.E)
+    def make_card(title: str, desc: str, mode_value: str, primary: bool) -> None:
+        card = ttk.Frame(cards, style="ModernCard.TFrame", padding=(22, 20))
+        card.pack(fill=tk.X, pady=8)
+        ttk.Label(card, text=title, style="SectionHeading.TLabel").pack(anchor=tk.W)
+        ttk.Label(card, text=desc, style="Body.TLabel", wraplength=460,
+                  justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 16))
+        btn_style = "Accent.TButton" if primary else "Subtle.TButton"
+        ttk.Button(card, text="Use this mode", style=btn_style,
+                   command=lambda: choose(mode_value)).pack(anchor=tk.E)
 
-    make_button("Client + Server",
-                "Use this computer for local transcription and share it with other CtrlSpeak clients on the network.",
-                "client_server")
-    make_button("Client Only",
-                "Send recordings to another CtrlSpeak server on your local network for transcription.",
-                "client")
+    make_card(
+        "Client + Server",
+        "Use this computer for local transcription and optionally share it with other CtrlSpeak clients on "
+        "your network.",
+        "client_server",
+        True,
+    )
+    make_card(
+        "Client Only",
+        "Connect to another CtrlSpeak server on your network and send recordings there for transcription.",
+        "client",
+        False,
+    )
 
-    def cancel() -> None: root.destroy()
-    tk.Button(root, text="Quit", command=cancel).pack(pady=(0, 12))
+    def cancel() -> None:
+        root.destroy()
+
+    ttk.Button(container, text="Quit Setup", style="Subtle.TButton",
+               command=cancel).pack(fill=tk.X, pady=(8, 0))
     root.protocol("WM_DELETE_WINDOW", cancel)
     root.mainloop()
     return result["mode"]
@@ -371,6 +421,7 @@ def ensure_management_ui_thread() -> None:
     def _loop():
         global tk_root
         tk_root = tk.Tk()
+        apply_modern_theme(tk_root)
         tk_root.withdraw()
 
         def process_queue() -> None:
@@ -434,83 +485,115 @@ class ManagementWindow:
         self._icon = icon
         self.window = tk.Toplevel(tk_root)
         self.window.title(f"CtrlSpeak Control v{APP_VERSION}")
-        self.window.geometry("560x520")
-        self.window.minsize(520, 480)
+        self.window.geometry("640x620")
+        self.window.minsize(580, 560)
         self.window.resizable(True, True)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.window.bind("<Escape>", lambda _e: self.close())
+        apply_modern_theme(self.window)
         try:
             self.window.iconbitmap(resource_path("icon.ico"))
         except Exception:
             pass
 
-        wrap = ttk.Frame(self.window, padding=(16, 14)); wrap.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(wrap, text="CtrlSpeak Control", font=("Segoe UI", 14, "bold")).pack(anchor="w")
-        build_label = "Client Only" if CLIENT_ONLY_BUILD else "Client + Server"
-        ttk.Label(wrap, text=f"Build {APP_VERSION} - {build_label}", font=("Segoe UI", 9)).pack(anchor="w", pady=(2, 10))
+        container = ttk.Frame(self.window, style="Modern.TFrame", padding=(30, 26))
+        container.pack(fill=tk.BOTH, expand=True)
 
-        # Status
+        header = ttk.Frame(container, style="ModernCard.TFrame", padding=(26, 24))
+        header.pack(fill=tk.X)
+        ttk.Label(header, text="CtrlSpeak Control", style="Title.TLabel").pack(anchor=tk.W)
+        build_label = "Client Only" if CLIENT_ONLY_BUILD else "Client + Server"
+        ttk.Label(header, text=f"Build {APP_VERSION} · {build_label}", style="Subtitle.TLabel").pack(anchor=tk.W, pady=(10, 0))
+        ttk.Separator(header, style="Modern.Horizontal.TSeparator").pack(fill=tk.X, pady=(18, 0))
+
+        # Status overview
+        status_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
+        status_card.pack(fill=tk.X, pady=(18, 12))
+        ttk.Label(status_card, text="System status", style="SectionHeading.TLabel").pack(anchor=tk.W)
         self.status_var = tk.StringVar()
         self.server_status_var = tk.StringVar()
-        ttk.Label(wrap, textvariable=self.status_var, justify=tk.LEFT, anchor="w").pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(wrap, textvariable=self.server_status_var, font=("Segoe UI", 10, "italic"),
-                  justify=tk.LEFT, anchor="w").pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(status_card, textvariable=self.status_var, style="Body.TLabel",
+                  justify=tk.LEFT).pack(fill=tk.X, pady=(12, 10))
+        ttk.Label(status_card, textvariable=self.server_status_var, style="Caption.TLabel",
+                  justify=tk.LEFT).pack(anchor=tk.W)
 
-        # Device (CPU/GPU)
-        device_frame = ttk.LabelFrame(wrap, text="Device")
-        device_frame.pack(fill=tk.X, pady=(0, 10))
+        # Device preferences
+        device_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
+        device_card.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(device_card, text="Device preference", style="SectionHeading.TLabel").pack(anchor=tk.W)
         self.device_var = tk.StringVar(value=get_device_preference())
-        row = ttk.Frame(device_frame); row.pack(fill=tk.X, padx=6, pady=6)
-        ttk.Radiobutton(row, text="CPU", variable=self.device_var, value="cpu").pack(side=tk.LEFT, padx=(0,12))
-        ttk.Radiobutton(row, text="GPU (CUDA)", variable=self.device_var, value="cuda").pack(side=tk.LEFT)
+        device_row = ttk.Frame(device_card, style="ModernCardInner.TFrame")
+        device_row.pack(fill=tk.X, pady=(14, 10))
+        ttk.Radiobutton(device_row, text="CPU", variable=self.device_var, value="cpu",
+                        style="Modern.TRadiobutton").pack(side=tk.LEFT, padx=(0, 18))
+        ttk.Radiobutton(device_row, text="GPU (CUDA)", variable=self.device_var, value="cuda",
+                        style="Modern.TRadiobutton").pack(side=tk.LEFT)
         self.cuda_status = tk.StringVar()
-        ttk.Label(device_frame, textvariable=self.cuda_status).pack(anchor="w", padx=6, pady=(2,8))
-        btns_dev = ttk.Frame(device_frame); btns_dev.pack(fill=tk.X, padx=6, pady=(0,10))
-        self.apply_device_btn = ttk.Button(btns_dev, text="Apply Device", command=self._apply_device)
+        ttk.Label(device_card, textvariable=self.cuda_status, style="Caption.TLabel").pack(anchor=tk.W, pady=(4, 0))
+        device_buttons = ttk.Frame(device_card, style="ModernCardInner.TFrame")
+        device_buttons.pack(fill=tk.X, pady=(16, 0))
+        self.apply_device_btn = ttk.Button(device_buttons, text="Apply device", style="Accent.TButton",
+                                           command=self._apply_device)
         self.apply_device_btn.pack(side=tk.LEFT)
-        self.install_cuda_btn = ttk.Button(btns_dev, text="Install/Repair CUDA…", command=self._install_cuda)
-        self.install_cuda_btn.pack(side=tk.LEFT, padx=(8,0))
+        self.install_cuda_btn = ttk.Button(device_buttons, text="Install or repair CUDA", style="Subtle.TButton",
+                                           command=self._install_cuda)
+        self.install_cuda_btn.pack(side=tk.LEFT, padx=(12, 0))
 
-        # Model selector
-        model_frame = ttk.LabelFrame(wrap, text="Model")
-        model_frame.pack(fill=tk.X, pady=(0, 10))
+        # Model selection
+        model_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
+        model_card.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(model_card, text="Speech model", style="SectionHeading.TLabel").pack(anchor=tk.W)
         self.model_var = tk.StringVar(value=get_current_model_name())
-        rowm = ttk.Frame(model_frame); rowm.pack(fill=tk.X, padx=6, pady=6)
-        ttk.Label(rowm, text="Whisper model:").pack(side=tk.LEFT)
-        ttk.Combobox(rowm, textvariable=self.model_var, values=["small", "large-v3"],
-                     state="readonly", width=18).pack(side=tk.LEFT, padx=(8,0))
-        btns_m = ttk.Frame(model_frame); btns_m.pack(fill=tk.X, padx=6, pady=(6,10))
-        self.apply_model_btn = ttk.Button(btns_m, text="Set Model", command=self._apply_model)
+        model_row = ttk.Frame(model_card, style="ModernCardInner.TFrame")
+        model_row.pack(fill=tk.X, pady=(14, 12))
+        ttk.Label(model_row, text="Whisper model", style="Body.TLabel").pack(side=tk.LEFT)
+        ttk.Combobox(model_row, textvariable=self.model_var, values=["small", "large-v3"],
+                     state="readonly", width=18, style="Modern.TCombobox").pack(side=tk.LEFT, padx=(12, 0))
+        model_buttons = ttk.Frame(model_card, style="ModernCardInner.TFrame")
+        model_buttons.pack(fill=tk.X, pady=(4, 0))
+        self.apply_model_btn = ttk.Button(model_buttons, text="Activate model", style="Accent.TButton",
+                                          command=self._apply_model)
         self.apply_model_btn.pack(side=tk.LEFT)
-        self.download_model_btn = ttk.Button(btns_m, text="Download/Update…", command=self._download_model)
-        self.download_model_btn.pack(side=tk.LEFT, padx=(8,0))
+        self.download_model_btn = ttk.Button(model_buttons, text="Download or update", style="Subtle.TButton",
+                                             command=self._download_model)
+        self.download_model_btn.pack(side=tk.LEFT, padx=(12, 0))
         self.model_status = tk.StringVar()
-        ttk.Label(model_frame, textvariable=self.model_status).pack(anchor="w", padx=6, pady=(4,0))
+        ttk.Label(model_card, textvariable=self.model_status, style="Caption.TLabel").pack(anchor=tk.W, pady=(10, 0))
 
-        # Client/Server controls
-        ctrl = ttk.LabelFrame(wrap, text="Client & Server")
-        ctrl.pack(fill=tk.X, pady=(0,10))
-        self.stop_button = ttk.Button(ctrl, text="Stop Client", command=self.stop_client); self.stop_button.pack(fill=tk.X, pady=2, padx=6)
-        self.start_button = ttk.Button(ctrl, text="Start Client", command=self.start_client); self.start_button.pack(fill=tk.X, pady=2, padx=6)
-        self.refresh_button = ttk.Button(ctrl, text="Refresh Servers", command=self.refresh_servers); self.refresh_button.pack(fill=tk.X, pady=2, padx=6)
-        exit_label = "Exit CtrlSpeak" if CLIENT_ONLY_BUILD else "Stop Everything"
-        self.stop_all_button = ttk.Button(ctrl, text=exit_label, command=self.stop_everything)
-        self.stop_all_button.pack(fill=tk.X, pady=(8, 6), padx=6)
+        # Client/server controls
+        control_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
+        control_card.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(control_card, text="Client & server", style="SectionHeading.TLabel").pack(anchor=tk.W)
+        controls = ttk.Frame(control_card, style="ModernCardInner.TFrame")
+        controls.pack(fill=tk.X, pady=(14, 0))
+        self.start_button = ttk.Button(controls, text="Start client", style="Accent.TButton",
+                                       command=self.start_client)
+        self.start_button.pack(fill=tk.X, pady=4)
+        self.stop_button = ttk.Button(controls, text="Stop client", style="Danger.TButton",
+                                      command=self.stop_client)
+        self.stop_button.pack(fill=tk.X, pady=4)
+        self.refresh_button = ttk.Button(controls, text="Refresh servers", style="Subtle.TButton",
+                                         command=self.refresh_servers)
+        self.refresh_button.pack(fill=tk.X, pady=4)
+        exit_label = "Exit CtrlSpeak" if CLIENT_ONLY_BUILD else "Stop everything"
+        self.stop_all_button = ttk.Button(controls, text=exit_label, style="Danger.TButton",
+                                          command=self.stop_everything)
+        self.stop_all_button.pack(fill=tk.X, pady=(12, 4))
 
-        ttk.Separator(wrap).pack(fill=tk.X, pady=(8, 10))
-        ttk.Button(wrap, text="Close", command=self.close).pack(fill=tk.X)
-        delete_btn = tk.Button(wrap, text="Delete CtrlSpeak", command=self.delete_ctrlspeak,
-                               bg="#d32f2f", fg="white", activebackground="#b71c1c", activeforeground="white")
-        delete_btn.pack(fill=tk.X, pady=(6,0))
+        # Footer actions
+        footer = ttk.Frame(container, style="Modern.TFrame")
+        footer.pack(fill=tk.X, pady=(18, 0))
+        ttk.Button(footer, text="Close control center", style="Accent.TButton",
+                   command=self.close).pack(fill=tk.X)
+        ttk.Button(footer, text="Delete CtrlSpeak", style="Danger.TButton",
+                   command=self.delete_ctrlspeak).pack(fill=tk.X, pady=(10, 0))
 
         self.window.after(120, self.refresh_status)
 
         # --- Auto-size window to fit content once everything is laid out ---
-        self.window.update_idletasks()  # compute requested size
-        req_w = self.window.winfo_reqwidth()
-        req_h = self.window.winfo_reqheight()
-        # Don’t let geometry be smaller than required; also set minsize to prevent clipping
-        self.window.geometry(f"{req_w}x{req_h}")
+        self.window.update_idletasks()
+        req_w = max(self.window.winfo_reqwidth(), 580)
+        req_h = max(self.window.winfo_reqheight(), 560)
         self.window.minsize(req_w, req_h)
 
         self.bring_to_front()
@@ -534,19 +617,18 @@ class ManagementWindow:
         model_name = get_current_model_name()
         present = model_files_present(model_store_path_for(model_name))
         status_parts = [
-            f"Mode: {mode}",
-            "Client Only build" if CLIENT_ONLY_BUILD else "Full build",
-            f"Client: {'Active' if sysmod.client_enabled else 'Stopped'}",
-            f"Device preference: {device_pref.upper()}  •  CUDA ready: {'Yes' if cuda_ok else 'No'}",
-            f"Model: {model_name}  •  Installed: {'Yes' if present else 'No'}",
+            f"• Mode: {mode}",
+            f"• Client: {'active' if sysmod.client_enabled else 'stopped'}",
+            f"• Server thread: {'running' if sysmod.server_thread and sysmod.server_thread.is_alive() else 'not running'}",
         ]
-        running = bool(sysmod.server_thread and sysmod.server_thread.is_alive())
-        status_parts.append(f"Server thread: {'Running' if running else 'Not running'}")
-
         self.status_var.set("\n".join(status_parts))
-        self.server_status_var.set(describe_server_status())
-        self.cuda_status.set("CUDA runtime is available." if cuda_ok else "CUDA runtime not detected.")
-        self.model_status.set("Model is installed." if present else "Model not installed.")
+        self.server_status_var.set(f"Network: {describe_server_status()}")
+        self.cuda_status.set("CUDA runtime ready." if cuda_ok else "CUDA runtime not detected.")
+        self.model_status.set(
+            "Model installed locally." if present else "Model download required before use."
+        )
+        self.device_var.set(device_pref)
+        self.model_var.set(model_name)
 
         if sysmod.client_enabled:
             self.start_button.state(["disabled"]); self.stop_button.state(["!disabled"])
