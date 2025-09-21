@@ -417,9 +417,16 @@ def record_audio(target_path: Path) -> None:
 
 # ---------------- Client keyboard listener ----------------
 def on_press(key):
-    from utils.models import transcribe_audio  # imported on-demand to avoid circulars
+    from utils.models import describe_activation_block, is_activation_in_progress  # on-demand to avoid circulars
     global recording, recording_thread, recording_file_path
     if not client_enabled: return
+    if is_activation_in_progress():
+        message = describe_activation_block()
+        if message:
+            notify(message)
+        else:
+            notify("CtrlSpeak is busy preparing resources. Please wait before using the hotkey again.")
+        return
     if key == keyboard.Key.ctrl_r and not recording:
         recording = True
         recording_file_path = create_recording_file_path()
@@ -433,13 +440,30 @@ def on_press(key):
 
 
 def on_release(key):
-    from utils.models import transcribe_audio
+    from utils.models import describe_activation_block, is_activation_in_progress, transcribe_audio
     global recording, recording_thread, recording_file_path
     if key == keyboard.Key.ctrl_r:
         if recording:
             recording = False
             if recording_thread:
                 recording_thread.join(); recording_thread = None
+            path = recording_file_path
+            block_message = None
+            try:
+                if is_activation_in_progress():
+                    block_message = describe_activation_block()
+            except Exception:
+                logger.exception("Failed to check activation status before transcription")
+            if block_message:
+                notify(block_message)
+                try:
+                    from utils.gui import hide_waveform_overlay
+                    enqueue_management_task(hide_waveform_overlay)
+                except Exception:
+                    logger.exception("Failed to hide waveform overlay after activation block")
+                cleanup_recording_file(path)
+                recording_file_path = None
+                return
             # switch overlay into “processing” mode
             try:
                 from utils.gui import set_waveform_processing
@@ -451,7 +475,6 @@ def on_release(key):
                 start_processing_feedback()
             except Exception:
                 logger.exception("Failed to start processing feedback loop")
-            path = recording_file_path
             text = None
             try:
                 if path and path.exists() and path.stat().st_size > 0:

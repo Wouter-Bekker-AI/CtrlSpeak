@@ -6,6 +6,7 @@ import sys
 import time
 import threading
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 from queue import Queue, Empty
 from typing import Optional, List, Set
@@ -196,13 +197,14 @@ def install_cuda_runtime_with_progress(parent=None) -> bool:
         "--extra-index-url", "https://pypi.nvidia.com",
         *pkgs
     ]
-    rc = _run_cmd_stream(cmd, timeout=600)
-    if rc != 0:
-        notify("CUDA runtime installation failed (pip returned non-zero).")
-        return False
-    # refresh DLL search path + verify
-    time.sleep(0.5)
-    return cuda_runtime_ready(ignore_preference=True)
+    with activation_guard("installing CUDA runtime components"):
+        rc = _run_cmd_stream(cmd, timeout=600)
+        if rc != 0:
+            notify("CUDA runtime installation failed (pip returned non-zero).")
+            return False
+        # refresh DLL search path + verify
+        time.sleep(0.5)
+        return cuda_runtime_ready(ignore_preference=True)
 
 
 # ---------------- Download dialog (GUI) ----------------
@@ -426,6 +428,51 @@ model_ready = threading.Event()
 warned_cuda_unavailable = False
 _missing_model_notified: Set[str] = set()
 
+# Track long-running activation/installation work so the hotkey can be gated.
+_activation_event = threading.Event()
+_activation_lock = threading.Lock()
+_activation_reasons: list[str] = []
+
+
+def _begin_activation(reason: str) -> None:
+    with _activation_lock:
+        _activation_reasons.append(reason)
+        _activation_event.set()
+
+
+def _end_activation() -> None:
+    with _activation_lock:
+        if _activation_reasons:
+            _activation_reasons.pop()
+        if not _activation_reasons:
+            _activation_event.clear()
+
+
+@contextmanager
+def activation_guard(reason: str):
+    _begin_activation(reason)
+    try:
+        yield
+    finally:
+        _end_activation()
+
+
+def is_activation_in_progress() -> bool:
+    return _activation_event.is_set()
+
+
+def describe_activation_block() -> Optional[str]:
+    if not _activation_event.is_set():
+        return None
+    with _activation_lock:
+        reason = _activation_reasons[-1] if _activation_reasons else None
+    if reason:
+        return (
+            "CtrlSpeak is busy: "
+            f"{reason}. Please wait for this to finish before using CtrlSpeak."
+        )
+    return "CtrlSpeak is preparing resources. Please wait before using the app."
+
 def _force_cpu_env() -> None:
     """
     Make absolutely sure CUDA paths/devices are ignored when we want CPU.
@@ -553,39 +600,39 @@ def initialize_transcriber(
         compute_type = resolve_compute_type(device)
         model_name = get_current_model_name()
 
-        # >>> add this guard <<<
-        if device == "cpu":
-            _force_cpu_env()
+        with activation_guard("activating the Whisper model"):
+            if device == "cpu":
+                _force_cpu_env()
 
-        try:
-            whisper_model = WhisperModel(
-                model_name,
-                device=device,
-                compute_type=compute_type,
-                download_root=str(MODEL_ROOT_PATH),
-            )
-            print(f"Whisper model '{model_name}' ready on {device} ({compute_type})")
-            return whisper_model
-        except Exception as exc:
-            print(f"Failed to load model on {device}: {exc}")
-            logger.exception("Failed to load Whisper model on %s", device)
-            if device != "cpu":
-                try:
-                    whisper_model = WhisperModel(
-                        model_name,
-                        device="cpu",
-                        compute_type="int8",
-                        download_root=str(MODEL_ROOT_PATH),
-                    )
-                    notify("Running CtrlSpeak transcription on CPU fallback. Set CTRLSPEAK_DEVICE=cpu to suppress this message.")
-                    warned_cuda_unavailable = True
-                    return whisper_model
-                except Exception as cpu_exc:
-                    print(f"CPU fallback failed: {cpu_exc}")
-                    logger.exception("CPU fallback model load failed")
-            notify("Unable to initialize the transcription model. Please check your installation and try again.")
-            whisper_model = None
-            return None
+            try:
+                whisper_model = WhisperModel(
+                    model_name,
+                    device=device,
+                    compute_type=compute_type,
+                    download_root=str(MODEL_ROOT_PATH),
+                )
+                print(f"Whisper model '{model_name}' ready on {device} ({compute_type})")
+                return whisper_model
+            except Exception as exc:
+                print(f"Failed to load model on {device}: {exc}")
+                logger.exception("Failed to load Whisper model on %s", device)
+                if device != "cpu":
+                    try:
+                        whisper_model = WhisperModel(
+                            model_name,
+                            device="cpu",
+                            compute_type="int8",
+                            download_root=str(MODEL_ROOT_PATH),
+                        )
+                        notify("Running CtrlSpeak transcription on CPU fallback. Set CTRLSPEAK_DEVICE=cpu to suppress this message.")
+                        warned_cuda_unavailable = True
+                        return whisper_model
+                    except Exception as cpu_exc:
+                        print(f"CPU fallback failed: {cpu_exc}")
+                        logger.exception("CPU fallback model load failed")
+                notify("Unable to initialize the transcription model. Please check your installation and try again.")
+                whisper_model = None
+                return None
 
 
 # ---------------- Transcription API ----------------
