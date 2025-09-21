@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import os
 import sys
 import time
 import threading
@@ -25,6 +26,7 @@ from utils.system import (
     start_processing_feedback, stop_processing_feedback,
 )
 from utils.system import get_best_server, CLIENT_ONLY_BUILD
+from utils.ui_theme import apply_modern_theme
 
 
 # ---------------- Env / defaults ----------------
@@ -216,31 +218,45 @@ class DownloadDialog:
 
         self.root = tk.Tk()
         self.root.title("CtrlSpeak Setup")
-        self.root.geometry("440x230")
+        self.root.geometry("480x260")
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
+        apply_modern_theme(self.root)
 
-        title = tk.Label(self.root, text="Install Speech Model", font=("Segoe UI", 12, "bold"))
-        title.pack(pady=(12, 4))
+        container = ttk.Frame(self.root, style="Modern.TFrame", padding=(26, 24))
+        container.pack(fill=tk.BOTH, expand=True)
 
-        info_text = ("CtrlSpeak needs to download the Whisper model '"
-                     f"{model_name}' the first time it runs on this PC.")
-        tk.Message(self.root, text=info_text, width=380).pack(pady=(0, 6))
+        card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
+        card.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(card, text="Install speech model", style="Title.TLabel").pack(anchor=tk.W)
+        model_tag = ttk.Label(card, text=f"MODEL · {model_name.upper()}", style="PillMuted.TLabel")
+        model_tag.pack(anchor=tk.W, pady=(10, 0))
+        accent = ttk.Frame(card, style="AccentLine.TFrame")
+        accent.configure(height=2)
+        accent.pack(fill=tk.X, pady=(12, 16))
 
-        self.stage_var = tk.StringVar(value="Preparing download...")
-        tk.Label(self.root, textvariable=self.stage_var, font=("Segoe UI", 10)).pack(pady=(0, 4))
+        info_text = (
+            "CtrlSpeak needs to download the Whisper model '"
+            f"{model_name}' the first time it runs on this PC."
+        )
+        ttk.Label(card, text=info_text, style="Body.TLabel", wraplength=380,
+                  justify=tk.LEFT).pack(anchor=tk.W, pady=(12, 16))
 
-        self.item_var = tk.StringVar(value=f"Downloading: {model_name}")
-        tk.Label(self.root, textvariable=self.item_var, font=("Segoe UI", 9, "italic")).pack(pady=(0, 2))
+        self.stage_var = tk.StringVar(value="Preparing download…")
+        ttk.Label(card, textvariable=self.stage_var, style="SectionHeading.TLabel").pack(anchor=tk.W)
 
-        self.progress = ttk.Progressbar(self.root, length=360, mode="determinate", maximum=100)
-        self.progress.pack(pady=(0, 4))
+        self.progress = ttk.Progressbar(card, length=360, mode="determinate", maximum=100,
+                                        style="Modern.Horizontal.TProgressbar")
+        self.progress.pack(fill=tk.X, pady=(12, 8))
 
         self.status_var = tk.StringVar(value="")
-        tk.Label(self.root, textvariable=self.status_var, font=("Segoe UI", 9)).pack(pady=(0, 8))
+        ttk.Label(card, textvariable=self.status_var, style="Caption.TLabel").pack(anchor=tk.W)
 
-        self.cancel_button = ttk.Button(self.root, text="Cancel", command=self.cancel)
-        self.cancel_button.pack()
+        actions = ttk.Frame(card, style="ModernCardInner.TFrame")
+        actions.pack(fill=tk.X, pady=(20, 0))
+        self.cancel_button = ttk.Button(actions, text="Cancel download", style="Danger.TButton",
+                                        command=self.cancel)
+        self.cancel_button.pack(side=tk.RIGHT)
 
         self.root.protocol("WM_DELETE_WINDOW", self.cancel)
         self._start_time = time.time()
