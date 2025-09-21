@@ -19,8 +19,8 @@ except ImportError as exc:  # pragma: no cover - developer convenience
 
 
 def build() -> None:
-    project_root = Path(__file__).resolve().parent.parent
-    assets_dir = project_root / "assets"
+    root = Path(__file__).resolve().parent
+    assets_dir = root / "assets"
     icon_path = assets_dir / "icon.ico"
     audio_path = assets_dir / "loading.wav"
 

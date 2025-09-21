@@ -7,12 +7,10 @@ Both flavours support Windows 10/11, enforce a single running instance, expose a
 ## Repository Layout
 
 - `main.py` – application entry point.
-- `utils/` – implementation modules plus developer helpers:
-  - `build_exe.py` – PyInstaller wrapper for creating a distributable executable.
-  - `sanity_check.py` – quick smoke test for the settings, discovery and server subsystems.
+- `build_exe.py` – helper script that runs PyInstaller with the correct data files.
 - `assets/` – static resources such as the tray icon (`icon.ico`) and processing chime (`loading.wav`).
-- `packaging/` – legacy `.spec` file and documentation for alternative build flows.
-- `requirements.txt` – runtime and build-time Python dependencies.
+- `utils/` – implementation modules (GUI, models, networking, configuration helpers, etc.).
+- `serverportsetup.txt` – Windows PowerShell commands to open discovery/API firewall ports.
 
 Generated folders such as `dist/` and `build/` are ignored via `.gitignore`.
 
@@ -52,17 +50,7 @@ Use the helper module to build a distributable executable under `dist/CtrlSpeak/
 python -m utils.build_exe
 ```
 
-The script embeds the tray icon and audio assets, enables clean builds, and collects required dependencies. CUDA runtime files or Whisper model weights are **not** bundled – they are downloaded by the running application if the user opts in.
-
-## Developer Smoke Test
-
-Before committing larger changes you can exercise the main subsystems locally:
-
-```powershell
-python -m utils.sanity_check
-```
-
-The script round-trips the settings file, validates temp file cleanup, ensures service discovery helpers execute, and starts the built-in HTTP server long enough to check its `/ping` endpoint.
+The script produces a windowed build that embeds `assets/icon.ico` as the executable icon and bundles both `assets/icon.ico` and `assets/loading.wav` as application data inside the package. CUDA runtime files or Whisper model weights are **not** bundled – they are downloaded by the running application if the user opts in.
 
 ## Manual Model Download
 
