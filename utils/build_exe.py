@@ -16,11 +16,11 @@ except ImportError as exc:  # pragma: no cover - developer convenience
         "PyInstaller is required to build the executable. "
         "Install it with 'pip install pyinstaller'."
     ) from exc
+project_root = Path(__file__).resolve().parent.parent
 
 
 def build() -> None:
-    root = Path(__file__).resolve().parent
-    assets_dir = root / "assets"
+    assets_dir = project_root / "assets"
     icon_path = assets_dir / "icon.ico"
     audio_path = assets_dir / "loading.wav"
 
