@@ -350,7 +350,7 @@ def _processing_sound_loop():
                         arr = arr.reshape(-1, channels).mean(axis=1)
                     rms = float(np.sqrt(np.mean(arr * arr)))
                     # update smoothed level
-                    global _processing_level
+                    global _processing_level, _proc_vis_samples
                     with _processing_level_lock:
                         _processing_level = (1.0 - alpha) * _processing_level + alpha * rms
                     # keep recent mono samples for GUI wiggle
