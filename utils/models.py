@@ -13,6 +13,11 @@ from typing import Optional, List, Set
 import ctypes
 import ctranslate2
 from faster_whisper import WhisperModel
+try:  # pragma: no cover - optional dependency rarely installed
+    import hf_xet  # type: ignore  # noqa: F401
+except ImportError:
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
 from huggingface_hub import snapshot_download
 from tqdm import tqdm
 import tkinter as tk
