@@ -628,6 +628,11 @@ def download_model_with_gui(
             store_path = model_store_path_for(model_name)
             store_path.mkdir(parents=True, exist_ok=True)
             expected_total = EXPECTED_MODEL_BYTES.get(model_name)
+            activation_cache_path = _model_activation_cache_path(model_name)
+            try:
+                activation_cache_path.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                logger.debug("Unable to ensure activation cache path %s exists", activation_cache_path)
 
             cache_root_env = os.environ.get("HF_HUB_CACHE")
             if cache_root_env:
@@ -641,13 +646,16 @@ def download_model_with_gui(
                 logger.debug("Unable to ensure cache path %s exists", cache_path)
             baseline_store = float(_measure_directory_size(store_path))
             baseline_cache = float(_measure_directory_size(cache_path))
+            baseline_activation_cache = float(_measure_directory_size(activation_cache_path))
+            starting_bytes = max(baseline_store, baseline_cache, baseline_activation_cache)
 
             def monitor_download() -> None:
-                # NOTE: The only trustworthy signal of download progress is how
-                # much data Hugging Face has staged in its cache directory.
-                # Please do not reintroduce tqdm-driven byte counters – they
-                # stay frozen until Explorer probes the folder, which makes the
-                # GUI look broken.
+                # NOTE: The only trustworthy signals of download progress are the
+                # bytes that have landed on disk in Hugging Face's cache and the
+                # activation cache directory that faster-whisper uses. Please do
+                # not reintroduce tqdm-driven byte counters – they stay frozen
+                # until Explorer probes the folder, which makes the GUI look
+                # broken.
                 last_reported = -1.0
                 last_emitted = 0.0
                 total_value = float(expected_total) if expected_total else 0.0
@@ -660,8 +668,11 @@ def download_model_with_gui(
                         cache_size = float(_measure_directory_size(cache_path))
                     except Exception:
                         cache_size = 0.0
-                    cache_progress = baseline_store + max(cache_size - baseline_cache, 0.0)
-                    current_size = max(store_size, cache_progress)
+                    try:
+                        activation_cache_size = float(_measure_directory_size(activation_cache_path))
+                    except Exception:
+                        activation_cache_size = 0.0
+                    current_size = max(store_size, cache_size, activation_cache_size, starting_bytes)
                     if expected_total:
                         current_size = min(current_size, float(expected_total))
                     now = time.monotonic()
@@ -680,7 +691,11 @@ def download_model_with_gui(
                     final_cache = float(_measure_directory_size(cache_path))
                 except Exception:
                     final_cache = 0.0
-                final_size = max(final_store, baseline_store + max(final_cache - baseline_cache, 0.0))
+                try:
+                    final_activation_cache = float(_measure_directory_size(activation_cache_path))
+                except Exception:
+                    final_activation_cache = 0.0
+                final_size = max(final_store, final_cache, final_activation_cache, starting_bytes)
                 if expected_total:
                     final_size = min(final_size, float(expected_total))
                 if final_size != last_reported:
@@ -833,24 +848,25 @@ class ActivationProgressMonitor:
         self._last_percent: Optional[float] = None
         self._baseline_cache_bytes = 0.0
         self._baseline_store_bytes = 0.0
+        self._baseline_combined_bytes = 0.0
         self._determinate_started = False
 
     def start(self) -> None:
         self._start_time = time.time()
         self._baseline_store_bytes = float(_measure_directory_size(self._store_path))
         self._baseline_cache_bytes = float(_measure_directory_size(self._cache_path))
-        self._goal_bytes = max(self._expected_bytes, self._baseline_store_bytes, self._baseline_cache_bytes)
-        self._determinate_started = False
+        self._baseline_combined_bytes = max(self._baseline_store_bytes, self._baseline_cache_bytes)
+        self._goal_bytes = max(self._expected_bytes, self._baseline_combined_bytes)
+        self._determinate_started = self._goal_bytes > 0.0
         try:
             ui_remind_activation_popup()
         except Exception:
             logger.exception("Failed to bring activation popup to foreground")
-        if self._goal_bytes > 0.0:
-            if self._baseline_cache_bytes >= self._goal_bytes * 0.98:
-                self._determinate_started = True
-                initial_percent = 100.0
-            else:
-                initial_percent = None
+        if self._determinate_started and self._goal_bytes > 0.0:
+            initial_percent = max(
+                0.0,
+                min((self._baseline_combined_bytes / self._goal_bytes) * 100.0, 100.0),
+            )
         else:
             initial_percent = None
         try:
@@ -868,26 +884,21 @@ class ActivationProgressMonitor:
 
     def _calculate_progress(
         self,
-        cache_bytes: float,
+        current_bytes: float,
         elapsed: float,
     ) -> tuple[Optional[float], Optional[float]]:
         goal = max(self._goal_bytes, 0.0)
         if goal <= 0.0:
             return None, None
 
-        added_bytes = max(cache_bytes - self._baseline_cache_bytes, 0.0)
-        growth_threshold = max(goal * 0.02, 8.0 * (1024 ** 2))
         if not self._determinate_started:
-            if cache_bytes >= goal * 0.98 or added_bytes >= growth_threshold:
-                self._determinate_started = True
-            else:
-                return None, None
+            return None, None
 
-        capped_cache = min(max(cache_bytes, 0.0), goal)
-        percent = max(0.0, min((capped_cache / goal) * 100.0, 100.0))
-        effective_added = max(capped_cache - self._baseline_cache_bytes, 0.0)
+        capped_bytes = min(max(current_bytes, 0.0), goal)
+        percent = max(0.0, min((capped_bytes / goal) * 100.0, 100.0))
+        effective_added = max(capped_bytes - self._baseline_combined_bytes, 0.0)
         speed = effective_added / elapsed if elapsed > 0.0 else 0.0
-        remaining = max(goal - capped_cache, 0.0)
+        remaining = max(goal - capped_bytes, 0.0)
         eta = (remaining / speed) if speed > 0.0 else None
         return percent, eta
 
@@ -903,9 +914,18 @@ class ActivationProgressMonitor:
             except Exception:
                 logger.exception("Failed to measure activation store size")
                 store_bytes = self._baseline_store_bytes
-            self._goal_bytes = max(self._goal_bytes, store_bytes, self._expected_bytes, self._baseline_cache_bytes)
+            current_bytes = max(cache_bytes, store_bytes, self._baseline_combined_bytes)
+            self._goal_bytes = max(
+                self._goal_bytes,
+                store_bytes,
+                cache_bytes,
+                self._expected_bytes,
+                self._baseline_combined_bytes,
+            )
+            if self._goal_bytes > 0.0:
+                self._determinate_started = True
             elapsed = max(time.time() - self._start_time, 0.0)
-            percent, eta = self._calculate_progress(cache_bytes, elapsed)
+            percent, eta = self._calculate_progress(current_bytes, elapsed)
             try:
                 ui_update_activation_progress(percent, elapsed, eta)
             except Exception:
@@ -928,8 +948,23 @@ class ActivationProgressMonitor:
             cache_bytes = self._current_cache_bytes()
         except Exception:
             cache_bytes = self._baseline_cache_bytes
-        self._goal_bytes = max(self._goal_bytes, self._expected_bytes, self._baseline_store_bytes, self._baseline_cache_bytes)
-        percent, eta = self._calculate_progress(cache_bytes, elapsed)
+        try:
+            store_bytes = self._current_store_bytes()
+        except Exception:
+            store_bytes = self._baseline_store_bytes
+        current_bytes = max(cache_bytes, store_bytes, self._baseline_combined_bytes)
+        self._goal_bytes = max(
+            self._goal_bytes,
+            self._expected_bytes,
+            self._baseline_store_bytes,
+            self._baseline_cache_bytes,
+            self._baseline_combined_bytes,
+            store_bytes,
+            cache_bytes,
+        )
+        if self._goal_bytes > 0.0:
+            self._determinate_started = True
+        percent, eta = self._calculate_progress(current_bytes, elapsed)
         if success:
             percent = 100.0
             eta = 0.0
