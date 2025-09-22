@@ -767,7 +767,13 @@ def register_manual_server(host: str, port: int, update_preference: bool = True)
 
 # ---------------- Tray ----------------
 def on_exit(icon, item):
-    stop_client_listener(); shutdown_server(); icon.stop()
+    stop_client_listener(); shutdown_server()
+    try:
+        from utils.gui import request_management_ui_shutdown
+        request_management_ui_shutdown()
+    except Exception:
+        logger.exception("Failed to request management UI shutdown during exit")
+    icon.stop()
 
 def open_management_dialog(icon, item):
     from utils.gui import ensure_management_ui_thread, _show_management_window
@@ -775,7 +781,7 @@ def open_management_dialog(icon, item):
     enqueue_management_task(_show_management_window, icon)
 
 def run_tray():
-    from utils.gui import ensure_management_ui_thread
+    from utils.gui import ensure_management_ui_thread, run_management_ui_loop, request_management_ui_shutdown
     ensure_management_ui_thread()  # make sure tk_root exists for overlay
     start_client_listener()
     with settings_lock:
@@ -785,7 +791,30 @@ def run_tray():
         pystray.MenuItem("Quit", on_exit),
     ]
     icon = pystray.Icon("CtrlSpeak", create_icon_image(), f"CtrlSpeak ({mode})", menu=pystray.Menu(*menu_items))
-    icon.run()
+    def _run_icon() -> None:
+        try:
+            icon.run()
+        finally:
+            try:
+                request_management_ui_shutdown()
+            except Exception:
+                logger.exception("Failed to shut down management UI after tray loop exited")
+
+    thread = threading.Thread(target=_run_icon, name="CtrlSpeakTray", daemon=True)
+    thread.start()
+
+    try:
+        run_management_ui_loop()
+    finally:
+        try:
+            request_management_ui_shutdown()
+        except Exception:
+            logger.exception("Failed to request management UI shutdown while leaving tray loop")
+        try:
+            icon.stop()
+        except Exception:
+            logger.exception("Failed to stop tray icon")
+        thread.join(timeout=2.0)
 
 # ---------------- Startup / single-instance ----------------
 def acquire_single_instance_lock() -> bool:
@@ -907,6 +936,11 @@ def shutdown_all():
         stop_discovery_listener()
     except Exception:
         logger.exception("Failed to stop discovery listener during shutdown")
+    try:
+        from utils.gui import request_management_ui_shutdown
+        request_management_ui_shutdown()
+    except Exception:
+        logger.exception("Failed to shut down management UI during shutdown")
 
 # ---------------- CLI ----------------
 def parse_cli_args(argv: list[str]) -> argparse.Namespace:

@@ -55,6 +55,7 @@ management_window: Optional["ManagementWindow"] = None
 _management_thread_ident: Optional[int] = None
 _management_thread_lock = threading.Lock()
 _management_thread_ready = threading.Event()
+_management_queue_job: Optional[str] = None
 
 logger = get_logger(__name__)
 
@@ -103,6 +104,22 @@ def _destroy_busy_popup() -> None:
     _busy_popup_progress_mode = "indeterminate"
 
 
+def _call_on_management_ui(callback: Callable[[], None], *, log_message: str) -> None:
+    """Execute *callback* on the management UI thread."""
+
+    root = tk_root
+    if root is None or not root.winfo_exists():
+        return
+
+    try:
+        if is_management_ui_thread():
+            callback()
+        else:
+            root.after(0, callback)
+    except Exception:
+        logger.exception(log_message)
+
+
 def _set_busy_popup_text(message: str) -> None:
     """Update the activation popup message safely from any thread."""
 
@@ -110,16 +127,7 @@ def _set_busy_popup_text(message: str) -> None:
         if _busy_popup_label is not None and _busy_popup_label.winfo_exists():
             _busy_popup_label.configure(text=message)
 
-    try:
-        _apply()
-    except RuntimeError:
-        if tk_root is not None:
-            try:
-                tk_root.after(0, _apply)
-            except Exception:
-                logger.exception("Failed to schedule activation popup message update")
-    except Exception:
-        logger.exception("Failed to update activation popup message text")
+    _call_on_management_ui(_apply, log_message="Failed to update activation popup message text")
 
 
 def _format_duration(seconds: Optional[float]) -> str:
@@ -285,16 +293,7 @@ def update_activation_progress(
             except Exception:
                 logger.exception("Failed to update activation popup status text")
 
-    try:
-        _apply()
-    except RuntimeError:
-        if tk_root is not None:
-            try:
-                tk_root.after(0, _apply)
-            except Exception:
-                logger.exception("Failed to schedule activation progress update")
-    except Exception:
-        logger.exception("Failed to update activation popup progress")
+    _call_on_management_ui(_apply, log_message="Failed to update activation popup progress")
 
 
 def focus_activation_popup(message: Optional[str] = None) -> None:
@@ -747,66 +746,140 @@ def ensure_mode_selected() -> None:
     save_settings()
 
 # ---------------- UI loop pump (for async updates) ----------------
+def _process_management_queue() -> None:
+    """Process any pending management UI tasks."""
+
+    global _management_queue_job
+
+    while True:
+        try:
+            func, args, kwargs = sysmod.management_ui_queue.get_nowait()
+        except Empty:
+            break
+        try:
+            func(*args, **kwargs)
+        except Exception:
+            logger.exception("Management UI task failed")
+
+    root = tk_root
+    if root is None or not root.winfo_exists():
+        _management_queue_job = None
+        return
+
+    try:
+        _management_queue_job = root.after(120, _process_management_queue)
+    except Exception:
+        logger.exception("Failed to reschedule management UI queue processing")
+        _management_queue_job = None
+
+
+def _initialize_management_ui_on_main_thread() -> None:
+    """Create the hidden Tk root on the main thread."""
+
+    global tk_root, _management_thread_ident, _management_queue_job
+
+    if tk_root is not None and tk_root.winfo_exists():
+        return
+
+    sysmod.management_ui_thread = None
+
+    try:
+        root = tk.Tk()
+    except Exception:
+        logger.exception("Failed to initialize management UI root")
+        _management_thread_ready.set()
+        return
+
+    tk_root = root
+    apply_modern_theme(root)
+    try:
+        root.withdraw()
+    except Exception:
+        logger.exception("Failed to withdraw management UI root window")
+
+    _management_thread_ident = threading.get_ident()
+    _management_thread_ready.set()
+    sysmod.management_ui_thread = threading.current_thread()
+
+    try:
+        _management_queue_job = root.after(80, _process_management_queue)
+    except Exception:
+        logger.exception("Failed to schedule initial management UI queue processing")
+        _management_queue_job = None
+
+
 def ensure_management_ui_thread() -> None:
-    """Ensure the background Tk UI thread is running and ready."""
+    """Ensure the management UI root exists on the main thread."""
 
-    def _spawn_thread() -> None:
-        def _loop() -> None:
-            global tk_root, _management_thread_ident
-            try:
-                _management_thread_ident = threading.get_ident()
-                tk_root = tk.Tk()
-            except Exception:
-                logger.exception("Failed to initialize management UI root")
-                _management_thread_ready.set()
-                return
-
-            apply_modern_theme(tk_root)
-            tk_root.withdraw()
-            _management_thread_ready.set()
-
-            def process_queue() -> None:
-                # pull queue from system module (so it’s always the live one)
-                while True:
-                    try:
-                        func, args, kwargs = sysmod.management_ui_queue.get_nowait()
-                    except Empty:
-                        break
-                    try:
-                        func(*args, **kwargs)
-                    except Exception:
-                        logger.exception("Management UI task failed")
-                if tk_root is not None:
-                    tk_root.after(120, process_queue)
-
-            tk_root.after(80, process_queue)
-            try:
-                tk_root.mainloop()
-            finally:
-                tk_root = None
-                sysmod.management_ui_thread = None
-                _management_thread_ident = None
-                _management_thread_ready.clear()
-
-        thread = threading.Thread(target=_loop, name="CtrlSpeakManagementUI", daemon=True)
-        sysmod.management_ui_thread = thread
-        thread.start()
+    if tk_root is not None and tk_root.winfo_exists():
+        return
 
     with _management_thread_lock:
-        existing = getattr(sysmod, "management_ui_thread", None)
-        if existing is not None and existing.is_alive():
-            pass
+        if tk_root is not None and tk_root.winfo_exists():
+            return
+
+        if threading.current_thread() is threading.main_thread():
+            _initialize_management_ui_on_main_thread()
         else:
-            _management_thread_ready.clear()
-            _spawn_thread()
+            if not _management_thread_ready.wait(timeout=5.0):
+                logger.error("Management UI root was not initialized on the main thread within timeout")
 
-    if not _management_thread_ready.wait(timeout=5.0):
-        logger.warning("Management UI thread did not signal readiness within timeout")
 
-    with _management_thread_lock:
-        existing = getattr(sysmod, "management_ui_thread", None)
-    if existing is None or not existing.is_alive():
-        logger.error("Management UI thread is not running after initialization attempt")
+def run_management_ui_loop() -> None:
+    """Run the Tk mainloop on the main thread."""
+
+    ensure_management_ui_thread()
+
+    root = tk_root
+    if root is None or not root.winfo_exists():
+        return
+
+    try:
+        root.mainloop()
+    finally:
+        _teardown_management_ui()
+
+
+def _teardown_management_ui() -> None:
+    """Reset management UI globals after the loop exits."""
+
+    global tk_root, management_window, _management_thread_ident, _management_queue_job
+
+    root = tk_root
+    if root is not None and _management_queue_job is not None:
+        try:
+            root.after_cancel(_management_queue_job)
+        except Exception:
+            logger.exception("Failed to cancel management UI queue job during teardown")
+    _management_queue_job = None
+
+    if root is not None:
+        try:
+            root.destroy()
+        except Exception:
+            logger.exception("Failed to destroy management UI root during teardown")
+
+    tk_root = None
+    management_window = None
+    _management_thread_ident = None
+    _management_thread_ready.clear()
+    sysmod.management_ui_thread = None
+
+
+def request_management_ui_shutdown() -> None:
+    """Request the Tk mainloop to exit."""
+
+    root = tk_root
+    if root is None or not root.winfo_exists():
+        return
+
+    def _quit() -> None:
+        try:
+            root.quit()
+        except Exception:
+            logger.exception("Failed to quit management UI mainloop")
+
+    _call_on_management_ui(_quit, log_message="Failed to schedule management UI shutdown")
 
 def is_management_ui_thread() -> bool:
     return _management_thread_ident == threading.get_ident()
