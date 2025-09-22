@@ -920,6 +920,7 @@ model_lock = threading.Lock()
 whisper_model: Optional[WhisperModel] = None
 model_ready = threading.Event()
 warned_cuda_unavailable = False
+cuda_activation_disabled = False
 _missing_model_notified: Set[str] = set()
 
 
@@ -1147,14 +1148,19 @@ def _ensure_model_available_active(interactive: bool = True) -> bool:
 
 
 def resolve_device() -> str:
+    global cuda_activation_disabled
     if CLIENT_ONLY_BUILD:
         return "cpu"
     preference = get_device_preference()
     if preference == "cpu":
         return "cpu"
+    if cuda_activation_disabled and preference != "cuda":
+        return "cpu"
     if preference == "cuda":
         return "cuda" if cuda_runtime_ready() else "cpu"
     # auto
+    if cuda_activation_disabled:
+        return "cpu"
     return "cuda" if cuda_runtime_ready() else "cpu"
 
 
@@ -1178,11 +1184,11 @@ def initialize_transcriber(
     """
     Loads the Whisper model selected in settings into faster-whisper with the active device choice.
     """
-    global whisper_model, warned_cuda_unavailable
+    global whisper_model, warned_cuda_unavailable, cuda_activation_disabled
 
     def perform_activation(finalize: Callable[[bool, Optional[str]], None]) -> Optional[WhisperModel]:
         nonlocal device, compute_type, model_name
-        global whisper_model, warned_cuda_unavailable
+        global whisper_model, warned_cuda_unavailable, cuda_activation_disabled
 
         if device == "cpu":
             _force_cpu_env()
@@ -1211,9 +1217,13 @@ def initialize_transcriber(
                 else:
                     notify(
                         "Running CtrlSpeak transcription on CPU fallback. "
-                        "Set CTRLSPEAK_DEVICE=cpu to suppress this message."
+                        "CtrlSpeak will continue using the CPU until you explicitly switch the device preference back to GPU."
                     )
                     warned_cuda_unavailable = True
+                    cuda_activation_disabled = True
+                    logger.warning(
+                        "CUDA activation failed; defaulting future activations to CPU until GPU is explicitly requested."
+                    )
                     finalize(
                         True,
                         (
@@ -1230,6 +1240,7 @@ def initialize_transcriber(
             whisper_model = None
             return None
         else:
+            cuda_activation_disabled = False
             print(f"Whisper model '{model_name}' ready on {device} ({compute_type})")
             finalize(
                 True,
