@@ -48,6 +48,14 @@ MODEL_REPO_OVERRIDE   = os.environ.get("CTRLSPEAK_MODEL_REPO")
 # All model content under %APPDATA%/CtrlSpeak/models
 MODEL_ROOT_PATH = get_config_dir() / "models"
 
+# Hard-coded download targets (bytes) for progress tracking
+EXPECTED_MODEL_BYTES: dict[str, int] = {
+    "small": 584 * (1024 ** 2),
+    "large-v3": int(2.87 * (1024 ** 3)),
+}
+
+CUDA_RUNTIME_EXPECTED_BYTES = int(1.2 * (1024 ** 3))
+
 # CUDA search: also look in %APPDATA%/CtrlSpeak/cuda
 cuda_paths_initialized = False
 
@@ -291,6 +299,60 @@ def format_duration(seconds: float) -> str:
     return f"{secs:d}s"
 
 
+_dir_size_command_failures: Set[str] = set()
+
+
+def _measure_directory_size_python(path: Path) -> int:
+    total = 0
+    try:
+        iterator = path.rglob("*")
+    except Exception:
+        return 0
+    for entry in iterator:
+        try:
+            if entry.is_file():
+                total += entry.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _measure_directory_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+
+    command_key = "win" if os.name.startswith("nt") else "posix"
+    try:
+        if os.name.startswith("nt"):
+            path_str = str(path)
+            safe_path = path_str.replace("'", "''")
+            command = [
+                "powershell",
+                "-NoLogo",
+                "-NoProfile",
+                "-Command",
+                (
+                    "(Get-ChildItem -LiteralPath '"
+                    f"{safe_path}"
+                    "' -Recurse -Force -File | Measure-Object -Property Length -Sum).Sum"
+                ),
+            ]
+            result = subprocess.run(command, capture_output=True, text=True, check=True)
+            output = result.stdout.strip()
+            return int(output) if output else 0
+
+        command = ["du", "-sb", str(path)]
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        output = result.stdout.strip()
+        size_str = output.split("\t", 1)[0].strip()
+        return int(size_str) if size_str else 0
+    except Exception:
+        if command_key not in _dir_size_command_failures:
+            logger.exception("Failed to measure directory size via system command: %s", path)
+            _dir_size_command_failures.add(command_key)
+        return _measure_directory_size_python(path)
+
+
 class DownloadDialog:
     def __init__(self, model_name: str, progress_queue: Queue, cancel_event: threading.Event):
         self.progress_queue = progress_queue
@@ -484,44 +546,13 @@ class DownloadDialog:
         return self.result or "cancelled"
 
 
-def make_tqdm_class(callback, cancel_event):
+def make_tqdm_class(cancel_event: threading.Event):
     class GuiTqdm(tqdm):
         def update(self_inner, n=1):
-            super().update(n)
-            try:
-                current = float(getattr(self_inner, "n", 0.0) or 0.0)
-                total_raw = getattr(self_inner, "total", 0.0) or 0.0
-                total = float(total_raw) if total_raw is not None else 0.0
-
-                # Safely get description (some tqdm impls don't have .desc)
-                desc = ""
-                try:
-                    desc = str(getattr(self_inner, "desc", "") or getattr(self_inner, "desc_str", "") or "")
-                except Exception:
-                    desc = ""
-
-                # Pull unit info robustly
-                fmt = getattr(self_inner, "format_dict", None)
-                unit = ""
-                unit_scale = False
-                if isinstance(fmt, dict):
-                    unit = str(fmt.get("unit") or "")
-                    unit_scale = bool(fmt.get("unit_scale"))
-                else:
-                    unit = str(getattr(self_inner, "unit", "") or "")
-                    unit_scale = bool(getattr(self_inner, "unit_scale", False))
-
-                unit_lower = unit.lower()
-                is_bytes = unit_lower in {"b", "ib", "byte", "bytes"} or (
-                    unit_scale and unit_lower.endswith("b")
-                )
-
-                callback(desc, current, total, is_bytes)
-            except Exception:
-                logger.exception("Progress callback failed")
-
             if cancel_event.is_set():
                 raise CancelledDownload()
+            return super().update(n)
+
     return GuiTqdm
 
 
@@ -555,16 +586,42 @@ def download_model_with_gui(
     cancel_event = threading.Event()
     dialog = DownloadDialog(model_name, progress_queue, cancel_event)
 
-    def progress_callback(desc: str, current: float, total: float, is_bytes: bool) -> None:
-        progress_queue.put(("progress", desc, current, total, is_bytes))
-
     def worker() -> None:
+        monitor_stop = threading.Event()
+        monitor_thread: Optional[threading.Thread] = None
+        success = False
         try:
             repo_id = _model_repo_id(model_name)
             progress_queue.put(("stage", f"Connecting to Hugging Face ({repo_id})"))
             store_path = model_store_path_for(model_name)
             store_path.mkdir(parents=True, exist_ok=True)
-            gui_tqdm = make_tqdm_class(progress_callback, cancel_event)
+            expected_total = EXPECTED_MODEL_BYTES.get(model_name)
+
+            def monitor_download() -> None:
+                last_reported = -1.0
+                total_value = float(expected_total) if expected_total else 0.0
+                while True:
+                    current_size = float(_measure_directory_size(store_path))
+                    if expected_total:
+                        current_size = min(current_size, float(expected_total))
+                    if current_size != last_reported:
+                        progress_queue.put(("progress", "", current_size, total_value, True))
+                        last_reported = current_size
+                    if monitor_stop.wait(1.0):
+                        break
+
+                final_size = float(_measure_directory_size(store_path))
+                if expected_total:
+                    final_size = min(final_size, float(expected_total))
+                if final_size != last_reported:
+                    total_value = float(expected_total) if expected_total else 0.0
+                    progress_queue.put(("progress", "", final_size, total_value, True))
+
+            monitor_thread = threading.Thread(target=monitor_download, daemon=True)
+            monitor_thread.start()
+            progress_queue.put(("stage", f"Downloading {model_name} model files…"))
+
+            gui_tqdm = make_tqdm_class(cancel_event)
             import importlib
 
             file_download_module = importlib.import_module("huggingface_hub.file_download")
@@ -592,12 +649,24 @@ def download_model_with_gui(
             if cancel_event.is_set():
                 progress_queue.put(("cancelled",)); return
             (store_path / ".installed").touch(exist_ok=True)
-            progress_queue.put(("done",))
+            success = True
         except CancelledDownload:
             progress_queue.put(("cancelled",))
+            return
         except Exception as exc:
             progress_queue.put(("error", f"Failed: {exc}"))
             logger.exception("Model download failed")
+            return
+        finally:
+            monitor_stop.set()
+            if monitor_thread is not None:
+                try:
+                    monitor_thread.join(timeout=2.0)
+                except Exception:
+                    logger.exception("Failed to join download monitor thread")
+
+        if success:
+            progress_queue.put(("done",))
 
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
