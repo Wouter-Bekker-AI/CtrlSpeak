@@ -9,7 +9,7 @@ import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from queue import Queue, Empty
-from typing import Optional, List, Set, Callable
+from typing import Optional, List, Set, Callable, Tuple
 
 import ctypes
 import ctranslate2
@@ -30,6 +30,7 @@ from utils.system import (
     get_config_dir, save_settings,
     start_processing_feedback, stop_processing_feedback,
     ui_show_activation_popup, ui_close_activation_popup,
+    ui_show_lockout_window, ui_update_lockout_message, ui_close_lockout_window,
     ui_remind_activation_popup, ui_update_activation_progress,
     pump_management_events_once,
 )
@@ -694,6 +695,7 @@ def download_model_with_gui(
         busy_message="CtrlSpeak is downloading the Whisper model. Please wait for the download to finish before using CtrlSpeak.",
         success_message="The Whisper model download completed successfully.",
         failure_message="CtrlSpeak could not download the Whisper model. Please try again.",
+        lockout=True,
     ) as finalize:
         success = _run()
         if not success:
@@ -703,6 +705,13 @@ def download_model_with_gui(
         if not activate_after:
             finalize(True, "The Whisper model download completed successfully.")
             return True
+
+        try:
+            ui_update_lockout_message(
+                "CtrlSpeak is activating the Whisper model. Please wait for activation to complete before using CtrlSpeak."
+            )
+        except Exception:
+            logger.exception("Failed to update lockout window before model activation")
 
         try:
             ui_show_activation_popup(
@@ -864,7 +873,7 @@ def ensure_model_ready_for_local_server() -> bool:
 # Track long-running activation/installation work so the hotkey can be gated.
 _activation_event = threading.Event()
 _activation_lock = threading.Lock()
-_activation_reasons: list[str] = []
+_activation_reasons: list[Tuple[str, bool]] = []
 
   
 def is_model_loaded() -> bool:
@@ -893,28 +902,36 @@ def _activation_failure_message(reason: str) -> str:
     )
 
 
-def _begin_activation(reason: str, busy_message: str) -> None:
+def _begin_activation(reason: str, busy_message: str, *, lockout: bool) -> None:
     with _activation_lock:
-        _activation_reasons.append(reason)
+        _activation_reasons.append((reason, lockout))
         _activation_event.set()
     try:
-        ui_show_activation_popup(busy_message)
+        if lockout:
+            ui_show_lockout_window(busy_message)
+        else:
+            ui_show_activation_popup(busy_message)
     except Exception:
         logger.exception("Failed to present activation busy popup")
 
 
 def _end_activation(reason: str, *, success: bool, message: Optional[str]) -> None:
-    new_top: Optional[str] = None
+    new_top: Optional[Tuple[str, bool]] = None
+    popped_lockout = False
     with _activation_lock:
         if _activation_reasons:
-            _activation_reasons.pop()
+            _reason, popped_lockout = _activation_reasons.pop()
         if _activation_reasons:
             new_top = _activation_reasons[-1]
         else:
             _activation_event.clear()
     if new_top:
+        next_reason, is_lockout = new_top
         try:
-            ui_show_activation_popup(_activation_busy_message(new_top))
+            if is_lockout:
+                ui_show_lockout_window(_activation_busy_message(next_reason))
+            else:
+                ui_show_activation_popup(_activation_busy_message(next_reason))
         except Exception:
             logger.exception("Failed to refresh activation popup message")
         return
@@ -926,7 +943,10 @@ def _end_activation(reason: str, *, success: bool, message: Optional[str]) -> No
             if success else _activation_failure_message(reason)
         )
     try:
-        ui_close_activation_popup(final_text)
+        if popped_lockout:
+            ui_close_lockout_window(final_text)
+        else:
+            ui_close_activation_popup(final_text)
     except Exception:
         logger.exception("Failed to close activation popup")
 
@@ -938,10 +958,11 @@ def activation_guard(
     busy_message: Optional[str] = None,
     success_message: Optional[str] = None,
     failure_message: Optional[str] = None,
+    lockout: bool = False,
 ):
     """Track long-running activation work and drive the busy popup lifecycle."""
     busy = busy_message or _activation_busy_message(reason)
-    _begin_activation(reason, busy)
+    _begin_activation(reason, busy, lockout=lockout)
     outcome = {"success": True, "message": success_message}
 
     def finalize(success: bool, message: Optional[str] = None) -> None:
@@ -972,8 +993,9 @@ def describe_activation_block() -> Optional[str]:
     if not _activation_event.is_set():
         return None
     with _activation_lock:
-        reason = _activation_reasons[-1] if _activation_reasons else None
-    if reason:
+        entry = _activation_reasons[-1] if _activation_reasons else None
+    if entry:
+        reason, _ = entry
         return _activation_busy_message(reason)
     return "CtrlSpeak is preparing resources. Please wait before using the app."
 
