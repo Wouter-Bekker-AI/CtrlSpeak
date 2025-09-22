@@ -7,10 +7,10 @@ Both flavours support Windows 10/11, enforce a single running instance, expose a
 ## Repository Layout
 
 - `main.py` – application entry point.
-- `build_exe.py` – helper script that runs PyInstaller with the correct data files.
 - `assets/` – static resources such as the tray icon (`icon.ico`) and processing chime (`loading.wav`).
 - `utils/` – implementation modules (GUI, models, networking, configuration helpers, etc.).
-- `serverportsetup.txt` – Windows PowerShell commands to open discovery/API firewall ports.
+- `utils/build_exe.py` – helper script that runs PyInstaller with the correct data files.
+- `packaging/` – PyInstaller spec (`CtrlSpeak.spec`) and additional build documentation.
 
 Generated folders such as `dist/` and `build/` are ignored via `.gitignore`.
 
@@ -36,6 +36,7 @@ On first launch you will be prompted to choose between **Client + Server** or **
 
 ### Command-line Flags
 
+- `--auto-setup {client,client_server}` – pre-select the startup mode without showing the GUI prompts.
 - `--force-sendinput` – force the AnyDesk-compatible synthetic keystroke path.
 - `--transcribe <wav>` – batch process an audio file without the hotkey workflow.
 - `--uninstall` – remove the application data and executable (used by the packaged build).
