@@ -614,14 +614,17 @@ def download_model_with_gui(
 
             def monitor_download() -> None:
                 last_reported = -1.0
+                last_emitted = 0.0
                 total_value = float(expected_total) if expected_total else 0.0
                 while True:
                     current_size = float(_measure_directory_size(store_path))
                     if expected_total:
                         current_size = min(current_size, float(expected_total))
-                    if current_size != last_reported:
+                    now = time.monotonic()
+                    if current_size != last_reported or (now - last_emitted) >= 2.0:
                         progress_queue.put(("progress", "", current_size, total_value, True))
                         last_reported = current_size
+                        last_emitted = now
                     if monitor_stop.wait(1.0):
                         break
 

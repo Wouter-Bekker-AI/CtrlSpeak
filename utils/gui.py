@@ -351,6 +351,14 @@ def close_activation_popup(message: Optional[str] = None) -> None:
         except Exception:
             logger.exception("Failed to schedule activation popup dismissal")
             _destroy_busy_popup()
+        else:
+            def _ensure_close() -> None:
+                _call_on_management_ui(
+                    _destroy_busy_popup,
+                    log_message="Failed to destroy activation popup after timeout",
+                )
+
+            threading.Timer(3.2, _ensure_close).start()
     else:
         _destroy_busy_popup()
 # -------- Voice Waveform Overlay --------
