@@ -18,6 +18,7 @@ from utils.system import (
     CLIENT_ONLY_BUILD,
     start_server,
     run_tray,
+    apply_auto_setup,
 )
 
 from utils.gui import show_splash_screen, ensure_mode_selected
@@ -43,6 +44,9 @@ def main(argv: list[str]) -> int:
 
     # Load settings early
     load_settings()
+
+    if args.auto_setup:
+        apply_auto_setup(args.auto_setup)
 
     # CLI: offline transcription of a file
     if args.transcribe:
