@@ -345,6 +345,7 @@ class DownloadDialog:
         self._start_time = time.time()
         self._last_bytes = 0.0
         self._last_update = self._start_time
+        self._last_progress_was_bytes = False
 
     def cancel(self) -> None:
         if self.result is None:
@@ -373,18 +374,25 @@ class DownloadDialog:
             logger.exception("Failed to schedule download dialog close")
             _close()
 
-    def _update_progress(self, desc: str, current: float, total: float) -> None:
+    def _update_progress(self, desc: str, current: float, total: float, *, is_bytes: bool) -> None:
         if desc:
             desc_clean = desc.strip()
             if desc_clean:
                 self.stage_var.set(f"Downloading: {desc_clean}")
-        if total and total > 0:
-            if self.progress["mode"] != "determinate":
-                self.progress.config(mode="determinate")
-                self.progress.stop()
-            self.progress.config(maximum=total)
-            self.progress["value"] = current
-            percent = min(max(int((current / total) * 100), 0), 100)
+        if is_bytes:
+            if total and total > 0:
+                if self.progress["mode"] != "determinate":
+                    self.progress.config(mode="determinate")
+                    self.progress.stop()
+                self.progress.config(maximum=total)
+                self.progress["value"] = current
+                percent = min(max(int((current / total) * 100), 0), 100)
+            else:
+                if self.progress["mode"] != "indeterminate":
+                    self.progress.config(mode="indeterminate")
+                    self.progress.start(10)
+                self.progress["value"] = 0
+                percent = 0
             now = time.time()
             elapsed = max(now - self._start_time, 1e-6)
             window_elapsed = max(now - self._last_update, 1e-6)
@@ -392,14 +400,16 @@ class DownloadDialog:
             inst_speed = (current - self._last_bytes) / window_elapsed
             speed = inst_speed if window_elapsed >= 0.5 else avg_speed
             downloaded_mb = current / MB_DIVISOR
-            total_mb = total / MB_DIVISOR
-            eta_seconds = (total - current) / speed if speed > 1e-6 else None
+            total_mb = total / MB_DIVISOR if total and total > 0 else None
+            remaining = (total - current) if total and total > current else None
+            eta_seconds = (remaining / speed) if (remaining is not None and speed > 1e-6) else None
             eta_text = format_duration(eta_seconds) if eta_seconds is not None else "calculating"
             elapsed_text = format_duration(elapsed)
+            total_text = f"File size: {total_mb:.2f} MB" if total_mb is not None else "File size: unknown"
             self.status_var.set(
                 "  •  ".join([
                     f"Progress: {percent}%",
-                    f"File size: {total_mb:.2f} MB",
+                    total_text,
                     f"Downloaded: {downloaded_mb:.2f} MB",
                     f"Speed: {format_bytes(speed)}/s",
                     f"ETA: {eta_text}",
@@ -408,24 +418,32 @@ class DownloadDialog:
             )
             self._last_bytes = current
             self._last_update = now
+            self._last_progress_was_bytes = True
         else:
+            if self._last_progress_was_bytes:
+                # Ignore non-byte updates once byte progress has started to avoid regressions.
+                return
             if self.progress["mode"] != "indeterminate":
                 self.progress.config(mode="indeterminate")
                 self.progress.start(10)
             now = time.time()
             elapsed = max(now - self._start_time, 1e-6)
-            speed = current / elapsed
-            downloaded_mb = current / MB_DIVISOR
+            percent = 0
+            progress_parts = []
+            if total and total > 0:
+                percent = min(max(int((current / total) * 100), 0), 100)
+                progress_parts.append(f"Progress: {percent}%")
+                progress_parts.append(f"Items: {int(current)}/{int(total)}")
+            else:
+                progress_parts.append(f"Items processed: {int(current)}")
             elapsed_text = format_duration(elapsed)
-            self.status_var.set(
-                "  •  ".join([
-                    "File size: unknown",
-                    f"Downloaded: {downloaded_mb:.2f} MB",
-                    f"Speed: {format_bytes(speed)}/s",
-                    "ETA: calculating",
-                    f"Elapsed: {elapsed_text}",
-                ])
-            )
+            progress_parts.extend([
+                "File size: unknown",
+                "Downloaded: calculating",
+                "Speed: calculating",
+                f"Elapsed: {elapsed_text}",
+            ])
+            self.status_var.set("  •  ".join(progress_parts))
 
     def _process_queue(self) -> None:
         while True:
@@ -435,8 +453,8 @@ class DownloadDialog:
                 break
             message_type = message[0]
             if message_type == "progress":
-                _, desc, current, total = message
-                self._update_progress(desc, current, total)
+                _, desc, current, total, is_bytes = message
+                self._update_progress(desc, current, total, is_bytes=is_bytes)
             elif message_type == "stage":
                 _, desc = message
                 self.stage_var.set(desc)
@@ -471,7 +489,23 @@ def make_tqdm_class(callback, cancel_event):
         def update(self_inner, n=1):
             super().update(n)
             try:
-                callback(self_inner.desc or "", float(self_inner.n), float(self_inner.total or 0))
+                current = float(getattr(self_inner, "n", 0.0) or 0.0)
+                total_raw = getattr(self_inner, "total", 0.0) or 0.0
+                total = float(total_raw) if total_raw is not None else 0.0
+                fmt = getattr(self_inner, "format_dict", None)
+                unit = ""
+                unit_scale = False
+                if isinstance(fmt, dict):
+                    unit = str(fmt.get("unit") or "")
+                    unit_scale = bool(fmt.get("unit_scale"))
+                else:
+                    unit = str(getattr(self_inner, "unit", "") or "")
+                    unit_scale = bool(getattr(self_inner, "unit_scale", False))
+                unit_lower = unit.lower()
+                is_bytes = unit_lower in {"b", "ib", "byte", "bytes"} or (
+                    unit_scale and unit_lower.endswith("b")
+                )
+                callback(self_inner.desc or "", current, total, is_bytes)
             except Exception:
                 logger.exception("Progress callback failed")
             if cancel_event.is_set():
@@ -508,8 +542,8 @@ def download_model_with_gui(
     cancel_event = threading.Event()
     dialog = DownloadDialog(model_name, progress_queue, cancel_event)
 
-    def progress_callback(desc: str, current: float, total: float) -> None:
-        progress_queue.put(("progress", desc, current, total))
+    def progress_callback(desc: str, current: float, total: float, is_bytes: bool) -> None:
+        progress_queue.put(("progress", desc, current, total, is_bytes))
 
     def worker() -> None:
         try:
@@ -517,14 +551,31 @@ def download_model_with_gui(
             progress_queue.put(("stage", f"Connecting to Hugging Face ({repo_id})"))
             store_path = model_store_path_for(model_name)
             store_path.mkdir(parents=True, exist_ok=True)
-            snapshot_download(
-                repo_id=repo_id,
-                local_dir=str(store_path),
-                local_dir_use_symlinks=False,
-                resume_download=True,
-                max_workers=4,
-                tqdm_class=make_tqdm_class(progress_callback, cancel_event),
-            )
+            gui_tqdm = make_tqdm_class(progress_callback, cancel_event)
+            import importlib
+
+            file_download_module = importlib.import_module("huggingface_hub.file_download")
+            utils_tqdm_module = importlib.import_module("huggingface_hub.utils.tqdm")
+            original_file_tqdm = getattr(file_download_module, "tqdm", None)
+            original_utils_tqdm = getattr(utils_tqdm_module, "tqdm", None)
+
+            file_download_module.tqdm = gui_tqdm
+            if original_utils_tqdm is not None:
+                utils_tqdm_module.tqdm = gui_tqdm
+            try:
+                snapshot_download(
+                    repo_id=repo_id,
+                    local_dir=str(store_path),
+                    local_dir_use_symlinks=False,
+                    resume_download=True,
+                    max_workers=4,
+                    tqdm_class=gui_tqdm,
+                )
+            finally:
+                if original_file_tqdm is not None:
+                    file_download_module.tqdm = original_file_tqdm
+                if original_utils_tqdm is not None:
+                    utils_tqdm_module.tqdm = original_utils_tqdm
             if cancel_event.is_set():
                 progress_queue.put(("cancelled",)); return
             (store_path / ".installed").touch(exist_ok=True)
