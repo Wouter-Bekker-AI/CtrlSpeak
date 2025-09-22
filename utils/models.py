@@ -241,6 +241,15 @@ def format_bytes(value: float) -> str:
     return f"{amount:.1f} PB"
 
 
+def format_duration(seconds: float) -> str:
+    total_seconds = int(max(seconds, 0))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:d}:{secs:02d}"
+
+
 class DownloadDialog:
     def __init__(self, model_name: str, progress_queue: Queue, cancel_event: threading.Event):
         self.progress_queue = progress_queue
@@ -276,12 +285,45 @@ class DownloadDialog:
         self.stage_var = tk.StringVar(value="Preparing download…")
         ttk.Label(card, textvariable=self.stage_var, style="SectionHeading.TLabel").pack(anchor=tk.W)
 
-        self.progress = ttk.Progressbar(card, length=360, mode="determinate", maximum=100,
-                                        style="Modern.Horizontal.TProgressbar")
+        self.progress = ttk.Progressbar(
+            card,
+            length=360,
+            mode="determinate",
+            maximum=100,
+            style="Modern.Horizontal.TProgressbar",
+        )
         self.progress.pack(fill=tk.X, pady=(12, 8))
 
+        metrics = ttk.Frame(card, style="ModernCardInner.TFrame")
+        metrics.pack(fill=tk.X, pady=(4, 8))
+        metrics.columnconfigure(0, weight=1)
+        metrics.columnconfigure(1, weight=1)
+
+        self.percent_var = tk.StringVar(value="0%")
+        self.downloaded_var = tk.StringVar(value="0.0 B")
+        self.total_var = tk.StringVar(value="—")
+        self.speed_var = tk.StringVar(value="Calculating…")
+        self.elapsed_var = tk.StringVar(value="0:00")
+        self.eta_var = tk.StringVar(value="—")
+
+        def add_metric(row: int, label: str, variable: tk.StringVar) -> None:
+            ttk.Label(metrics, text=label, style="Subtitle.TLabel").grid(
+                row=row, column=0, sticky=tk.W, pady=2
+            )
+            ttk.Label(metrics, textvariable=variable, style="Body.TLabel").grid(
+                row=row, column=1, sticky=tk.E, pady=2
+            )
+
+        add_metric(0, "Progress", self.percent_var)
+        add_metric(1, "Downloaded", self.downloaded_var)
+        add_metric(2, "Total size", self.total_var)
+        add_metric(3, "Speed", self.speed_var)
+        add_metric(4, "Elapsed", self.elapsed_var)
+        add_metric(5, "ETA", self.eta_var)
+
         self.status_var = tk.StringVar(value="")
-        ttk.Label(card, textvariable=self.status_var, style="Caption.TLabel").pack(anchor=tk.W)
+        ttk.Label(card, textvariable=self.status_var, style="Body.TLabel", wraplength=380,
+                  justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
 
         actions = ttk.Frame(card, style="ModernCardInner.TFrame")
         actions.pack(fill=tk.X, pady=(20, 0))
@@ -293,6 +335,7 @@ class DownloadDialog:
         self._start_time = time.time()
         self._last_bytes = 0.0
         self._last_update = self._start_time
+        self._latest_total = 0.0
 
     def cancel(self) -> None:
         if self.result is None:
@@ -303,33 +346,50 @@ class DownloadDialog:
     def _update_progress(self, desc: str, current: float, total: float) -> None:
         if desc:
             self.stage_var.set(desc)
+        now = time.time()
+        elapsed = max(now - self._start_time, 1e-6)
+        window_elapsed = max(now - self._last_update, 1e-6)
+        avg_speed = current / elapsed if elapsed > 0 else 0.0
+        inst_speed = (current - self._last_bytes) / window_elapsed if window_elapsed > 0 else 0.0
+        speed = inst_speed if window_elapsed >= 0.5 else avg_speed
+
         if total and total > 0:
+            self._latest_total = max(self._latest_total, float(total))
             if self.progress["mode"] != "determinate":
-                self.progress.config(mode="determinate")
+                self.progress.config(mode="determinate", maximum=100)
                 self.progress.stop()
-            self.progress.config(maximum=total)
-            self.progress["value"] = current
-            percent = min(max(int((current / total) * 100), 0), 100)
-            now = time.time()
-            elapsed = max(now - self._start_time, 1e-6)
-            window_elapsed = max(now - self._last_update, 1e-6)
-            avg_speed = current / elapsed
-            inst_speed = (current - self._last_bytes) / window_elapsed
-            speed = inst_speed if window_elapsed >= 0.5 else avg_speed
-            self.status_var.set(
-                f"{percent}%  ({format_bytes(current)} / {format_bytes(total)})"
-                f"  •  {format_bytes(speed)}/s"
-            )
-            self._last_bytes = current
-            self._last_update = now
+            clamped_total = max(self._latest_total, 1.0)
+            clamped_current = max(min(current, clamped_total), 0.0)
+            percent = min(max((clamped_current / clamped_total) * 100.0, 0.0), 100.0)
+            self.progress["value"] = percent
+            percent_text = f"{percent:.1f}".rstrip("0").rstrip(".")
+            if not percent_text:
+                percent_text = "0"
+            self.percent_var.set(f"{percent_text}%")
+            self.total_var.set(format_bytes(clamped_total))
+            if speed > 0:
+                remaining = max(clamped_total - clamped_current, 0.0)
+                self.eta_var.set(format_duration(remaining / speed) if remaining > 0 else "Complete")
+            else:
+                self.eta_var.set("Calculating…")
         else:
             if self.progress["mode"] != "indeterminate":
                 self.progress.config(mode="indeterminate")
                 self.progress.start(10)
-            now = time.time()
-            elapsed = max(now - self._start_time, 1e-6)
-            speed = current / elapsed
-            self.status_var.set(f"{format_bytes(current)} downloaded  •  {format_bytes(speed)}/s")
+            self.percent_var.set("—")
+            self.total_var.set("—")
+            self.eta_var.set("—")
+
+        if speed <= 0:
+            self.speed_var.set("Calculating…")
+        else:
+            self.speed_var.set(f"{format_bytes(speed)}/s")
+
+        self.downloaded_var.set(format_bytes(max(current, 0.0)))
+        self.elapsed_var.set(format_duration(elapsed))
+
+        self._last_bytes = current
+        self._last_update = now
 
     def _process_queue(self) -> None:
         while True:
@@ -350,9 +410,32 @@ class DownloadDialog:
                 self.status_var.set(error_text)
             elif message_type == "done":
                 self.result = "success"
-                self.status_var.set("Download completed.")
+                elapsed = time.time() - self._start_time
+                total_bytes = max(self._latest_total, self._last_bytes)
+                self.stage_var.set("Download complete")
+                self.elapsed_var.set(format_duration(elapsed))
+                if total_bytes > 0:
+                    self.downloaded_var.set(format_bytes(total_bytes))
+                    self.total_var.set(format_bytes(total_bytes))
+                    self.percent_var.set("100%")
+                    if self.progress["mode"] != "determinate":
+                        self.progress.stop()
+                        self.progress.config(mode="determinate", maximum=100)
+                    self.progress["value"] = 100
+                    avg_speed = total_bytes / elapsed if elapsed > 0 else 0.0
+                    if avg_speed > 0:
+                        self.speed_var.set(f"{format_bytes(avg_speed)}/s")
+                    self.eta_var.set("Complete")
+                summary = f"Download completed in {format_duration(elapsed)}"
+                if total_bytes > 0:
+                    summary += f"  •  {format_bytes(total_bytes)}"
+                    avg_speed = total_bytes / elapsed if elapsed > 0 else 0.0
+                    if avg_speed > 0:
+                        summary += f"  •  Avg {format_bytes(avg_speed)}/s"
+                self.status_var.set(summary)
             elif message_type == "cancelled":
                 self.result = "cancelled"
+                self.eta_var.set("—")
                 self.status_var.set("Download cancelled.")
 
         if self.result is None:
