@@ -486,6 +486,10 @@ def manual_discovery_refresh(wait_time: float = 1.5) -> Optional[ServerInfo]:
     server = _nd_manual_discovery_refresh(discovery_listener, wait_time=wait_time)
     return _apply_last_connected(server)
 
+def get_last_connected_server() -> Optional[ServerInfo]:
+    """Return the most recently discovered or connected server without side effects."""
+    return last_connected_server
+
 def get_best_server() -> Optional[ServerInfo]:
     server = _nd_get_best_server(discovery_listener)
     return _apply_last_connected(server)

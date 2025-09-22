@@ -483,19 +483,17 @@ def describe_server_status() -> str:
         mode = settings.get("mode")
         port = int(settings.get("server_port", 65432))
 
+    server = sysmod.get_last_connected_server()
+
     if mode == "client_server" and sysmod.server_thread and sysmod.server_thread.is_alive():
-        host = sysmod.last_connected_server.host if sysmod.last_connected_server else sysmod.get_advertised_host_ip()
+        host = server.host if server else sysmod.get_advertised_host_ip()
         return f"Serving: {host}:{port}"
 
-    if sysmod.last_connected_server:
-        host = sysmod.last_connected_server.host
-        prt = sysmod.last_connected_server.port
+    if server:
+        host = server.host
+        prt = server.port
         label = "local CPU" if host == "local-cpu" else ("local" if host == "local" else f"{host}:{prt}")
         return f"Connected: {label}"
-
-    server = sysmod.get_best_server()
-    if server:
-        return f"Discovered: {server.host}:{server.port}"
 
     return "Not connected"
 
