@@ -22,7 +22,7 @@ from utils.system import (
 )
 
 from utils.gui import show_splash_screen, ensure_mode_selected
-from utils.models import initialize_transcriber
+from utils.models import initialize_transcriber, ensure_model_ready_for_local_server
 
 
 def main(argv: list[str]) -> int:
@@ -58,12 +58,17 @@ def main(argv: list[str]) -> int:
     # Ensure mode selected (client or client_server)
     ensure_mode_selected()
 
-    # Start discovery listener for client mode visibility
-    start_discovery_listener()
-
-    # Orchestrate engine/server as needed based on mode
+    # Determine the selected mode now that setup is complete
     with settings_lock:
         mode = settings.get("mode")
+
+    # Automatically prepare local transcription assets when running the server locally
+    if mode == "client_server":
+        if not ensure_model_ready_for_local_server():
+            return 0
+
+    # Start discovery listener for client mode visibility
+    start_discovery_listener()
 
     if mode == "client_server":
         initialize_transcriber(interactive=False)   # warm-up local model when assets are ready
