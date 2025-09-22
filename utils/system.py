@@ -847,14 +847,27 @@ def initiate_self_uninstall(icon: Optional[pystray.Icon]) -> None:
 # ---------------- Lifecycle helpers ----------------
 def start_discovery_listener() -> None:
     global discovery_listener
+    if discovery_listener is not None and discovery_listener.is_alive():
+        return
     with settings_lock:
         port = int(settings.get("discovery_port", 54330))
     discovery_listener = DiscoveryListener(port); discovery_listener.start()
 
+def stop_discovery_listener() -> None:
+    global discovery_listener
+    if discovery_listener is None:
+        return
+    try:
+        discovery_listener.stop()
+    except Exception:
+        logger.exception("Failed to stop discovery listener")
+    finally:
+        discovery_listener = None
+
 def shutdown_all():
     stop_client_listener(); shutdown_server()
     try:
-        if discovery_listener: discovery_listener.stop()
+        stop_discovery_listener()
     except Exception:
         logger.exception("Failed to stop discovery listener during shutdown")
 
@@ -873,17 +886,35 @@ def transcribe_cli(target: str) -> int:
     file_path = Path(target).expanduser()
     if not file_path.is_file():
         print(f"Audio file not found: {file_path}", file=sys.stderr); return 1
-    with settings_lock:
-        mode = settings.get("mode")
-    if mode == "client_server":
-        if initialize_transcriber() is None:
-            print("Unable to initialize the transcription engine.", file=sys.stderr); return 2
-    elif mode == "client":
-        time.sleep(1.0)
-    text = transcribe_audio(str(file_path), play_feedback=False)
-    if text is None:
-        print("Transcription produced no output.", file=sys.stderr); return 3
-    print(text); return 0
+    discovery_started = False
+    try:
+        with settings_lock:
+            mode = settings.get("mode")
+        if mode == "client_server":
+            if initialize_transcriber() is None:
+                print("Unable to initialize the transcription engine.", file=sys.stderr); return 2
+        elif mode == "client":
+            start_discovery_listener(); discovery_started = True
+            time.sleep(1.0)
+            server = get_best_server()
+            if server is not None:
+                logger.info(
+                    "CLI transcription discovered server %s:%s; skipping local fallback prompt.",
+                    server.host,
+                    server.port,
+                )
+            else:
+                logger.info(
+                    "CLI transcription did not discover a server; fallback prompt may still be shown."
+                )
+        text = transcribe_audio(str(file_path), play_feedback=False)
+        if text is None:
+            print("Transcription produced no output.", file=sys.stderr); return 3
+        print(text)
+        return 0
+    finally:
+        if discovery_started:
+            stop_discovery_listener()
 
 def apply_auto_setup(profile: str) -> None:
     global AUTO_MODE, AUTO_MODE_PROFILE
