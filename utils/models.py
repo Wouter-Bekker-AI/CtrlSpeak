@@ -246,6 +246,7 @@ class DownloadDialog:
         self.progress_queue = progress_queue
         self.cancel_event = cancel_event
         self.result: Optional[str] = None
+        self._close_scheduled = False
 
         self.root = tk.Tk()
         self.root.title("CtrlSpeak Setup")
@@ -299,6 +300,27 @@ class DownloadDialog:
             self.result = "cancelled"
             self.cancel_event.set()
             self.status_var.set("Cancelling...")
+
+    def _schedule_close(self, delay_ms: int = 0) -> None:
+        if self._close_scheduled:
+            return
+        self._close_scheduled = True
+
+        def _close() -> None:
+            try:
+                self.root.quit()
+            except Exception:
+                logger.exception("Failed to quit download dialog mainloop")
+            try:
+                self.root.destroy()
+            except Exception:
+                logger.exception("Failed to destroy download dialog window")
+
+        try:
+            self.root.after(delay_ms, _close)
+        except Exception:
+            logger.exception("Failed to schedule download dialog close")
+            _close()
 
     def _update_progress(self, desc: str, current: float, total: float) -> None:
         if desc:
@@ -361,7 +383,8 @@ class DownloadDialog:
             if self.progress["mode"] == "indeterminate":
                 self.progress.stop()
             self.cancel_button.config(state=tk.DISABLED)
-            self.root.after(400, self.root.destroy)
+            delay = 400 if self.result == "success" else 0
+            self._schedule_close(delay)
 
     def run(self) -> str:
         self.root.after(100, self._process_queue)
