@@ -603,13 +603,35 @@ def start_client_listener() -> None:
     schedule_management_refresh()
 
 def stop_client_listener() -> None:
-    global listener, client_enabled, recording_file_path
+    global listener, client_enabled, recording, recording_thread, recording_file_path
+    thread_to_join: Optional[threading.Thread] = None
+    cleanup_path: Optional[Path] = None
+    should_hide_waveform = False
     with listener_lock:
         client_enabled = False
         if listener is not None:
             listener.stop(); listener = None
-    cleanup_recording_file(recording_file_path)
-    recording_file_path = None
+        if recording:
+            recording = False
+            should_hide_waveform = True
+        if recording_thread is not None:
+            thread_to_join = recording_thread
+            recording_thread = None
+            should_hide_waveform = True
+        if recording_file_path is not None:
+            cleanup_path = recording_file_path
+            recording_file_path = None
+            should_hide_waveform = True
+    if thread_to_join:
+        thread_to_join.join()
+    if should_hide_waveform:
+        try:
+            from utils.gui import hide_waveform_overlay
+            enqueue_management_task(hide_waveform_overlay)
+        except Exception:
+            logger.exception("Failed to hide waveform overlay when stopping listener")
+    if cleanup_path is not None:
+        cleanup_recording_file(cleanup_path)
     schedule_management_refresh()
 
 # ---------------- Server (HTTP) ----------------
