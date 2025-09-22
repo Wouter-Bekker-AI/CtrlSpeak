@@ -62,7 +62,9 @@ logger = get_logger(__name__)
 _busy_popup_win: Optional[tk.Toplevel] = None
 _busy_popup_label: Optional[ttk.Label] = None
 _busy_popup_progress: Optional[ttk.Progressbar] = None
+_busy_popup_status_label: Optional[ttk.Label] = None
 _busy_popup_close_job: Optional[str] = None
+_busy_popup_progress_mode: str = "indeterminate"
 
 
 def show_notification_popup(title: str, message: str) -> None:
@@ -86,7 +88,8 @@ def _cancel_busy_popup_close() -> None:
 
 
 def _destroy_busy_popup() -> None:
-    global _busy_popup_win, _busy_popup_label, _busy_popup_progress, _busy_popup_close_job
+    global _busy_popup_win, _busy_popup_label, _busy_popup_progress
+    global _busy_popup_status_label, _busy_popup_close_job, _busy_popup_progress_mode
     if _busy_popup_win is not None and _busy_popup_win.winfo_exists():
         try:
             _busy_popup_win.destroy()
@@ -95,7 +98,9 @@ def _destroy_busy_popup() -> None:
     _busy_popup_win = None
     _busy_popup_label = None
     _busy_popup_progress = None
+    _busy_popup_status_label = None
     _busy_popup_close_job = None
+    _busy_popup_progress_mode = "indeterminate"
 
 
 def _set_busy_popup_text(message: str) -> None:
@@ -117,9 +122,26 @@ def _set_busy_popup_text(message: str) -> None:
         logger.exception("Failed to update activation popup message text")
 
 
+def _format_duration(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "—"
+    try:
+        total = max(float(seconds), 0.0)
+    except (TypeError, ValueError):
+        return "—"
+    minutes, secs = divmod(int(total + 0.5), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes:d}m {secs:02d}s"
+    return f"{secs:d}s"
+
+
 def show_activation_popup(message: str) -> None:
     """Create or update the activation progress popup."""
     global _busy_popup_win, _busy_popup_label, _busy_popup_progress
+    global _busy_popup_status_label, _busy_popup_progress_mode
     if tk_root is None or not tk_root.winfo_exists():
         return
 
@@ -160,6 +182,15 @@ def show_activation_popup(message: str) -> None:
             style="Modern.Horizontal.TProgressbar",
         )
         _busy_popup_progress.pack(fill=tk.X)
+        _busy_popup_progress_mode = "indeterminate"
+        _busy_popup_status_label = ttk.Label(
+            container,
+            text="",
+            style="Caption.TLabel",
+            justify=tk.LEFT,
+            wraplength=360,
+        )
+        _busy_popup_status_label.pack(anchor=tk.W, pady=(12, 0))
         try:
             _busy_popup_progress.start(12)
         except Exception:
@@ -172,7 +203,12 @@ def show_activation_popup(message: str) -> None:
             logger.exception("Failed to raise activation popup window")
 
     _set_busy_popup_text(message)
-    if _busy_popup_progress is not None:
+    if _busy_popup_status_label is not None and _busy_popup_status_label.winfo_exists():
+        try:
+            _busy_popup_status_label.configure(text="")
+        except Exception:
+            logger.exception("Failed to reset activation popup status text")
+    if _busy_popup_progress is not None and _busy_popup_progress_mode == "indeterminate":
         try:
             _busy_popup_progress.config(mode="indeterminate")
             _busy_popup_progress.start(12)
@@ -185,6 +221,80 @@ def show_activation_popup(message: str) -> None:
     except Exception:
         # Focus hints may fail in some environments
         pass
+
+
+def update_activation_progress(
+    progress: Optional[float],
+    elapsed: Optional[float],
+    eta: Optional[float],
+) -> None:
+    """Update the activation popup progress bar and status text."""
+    global _busy_popup_progress_mode
+
+    def _apply() -> None:
+        if _busy_popup_progress is None or not _busy_popup_progress.winfo_exists():
+            return
+
+        clamped_progress: Optional[float]
+        if progress is None:
+            clamped_progress = None
+            if _busy_popup_progress_mode != "indeterminate":
+                try:
+                    _busy_popup_progress.stop()
+                except Exception:
+                    pass
+                _busy_popup_progress.config(mode="indeterminate")
+                _busy_popup_progress_mode = "indeterminate"
+            try:
+                _busy_popup_progress.start(12)
+            except Exception:
+                logger.exception("Failed to start activation popup spinner")
+        else:
+            clamped_progress = max(0.0, min(float(progress), 100.0))
+            if _busy_popup_progress_mode != "determinate":
+                try:
+                    _busy_popup_progress.stop()
+                except Exception:
+                    pass
+                _busy_popup_progress.config(mode="determinate", maximum=100.0)
+                _busy_popup_progress_mode = "determinate"
+            else:
+                try:
+                    current_max = float(_busy_popup_progress.cget("maximum"))
+                except Exception:
+                    current_max = 0.0
+                if current_max != 100.0:
+                    _busy_popup_progress.config(maximum=100.0)
+            _busy_popup_progress["value"] = clamped_progress
+
+        if _busy_popup_status_label is not None and _busy_popup_status_label.winfo_exists():
+            parts: list[str] = []
+            if clamped_progress is not None:
+                parts.append(f"Progress: {clamped_progress:.0f}%")
+            elif progress is None:
+                parts.append("Progress: calculating")
+            if elapsed is not None:
+                parts.append(f"Elapsed: {_format_duration(elapsed)}")
+            if eta is not None:
+                parts.append(f"ETA: {_format_duration(eta)}")
+            elif clamped_progress is not None and clamped_progress < 100.0:
+                parts.append("ETA: calculating")
+            status_text = "  •  ".join(parts)
+            try:
+                _busy_popup_status_label.configure(text=status_text)
+            except Exception:
+                logger.exception("Failed to update activation popup status text")
+
+    try:
+        _apply()
+    except RuntimeError:
+        if tk_root is not None:
+            try:
+                tk_root.after(0, _apply)
+            except Exception:
+                logger.exception("Failed to schedule activation progress update")
+    except Exception:
+        logger.exception("Failed to update activation popup progress")
 
 
 def focus_activation_popup(message: Optional[str] = None) -> None:
@@ -207,7 +317,7 @@ def focus_activation_popup(message: Optional[str] = None) -> None:
 
 def close_activation_popup(message: Optional[str] = None) -> None:
     """Stop the busy popup and close it, optionally after showing a final message."""
-    global _busy_popup_close_job
+    global _busy_popup_close_job, _busy_popup_progress_mode
     if _busy_popup_win is None or not _busy_popup_win.winfo_exists():
         if message:
             show_notification_popup("CtrlSpeak", message)
@@ -219,8 +329,14 @@ def close_activation_popup(message: Optional[str] = None) -> None:
         try:
             _busy_popup_progress.stop()
             _busy_popup_progress.config(mode="determinate", maximum=100, value=100)
+            _busy_popup_progress_mode = "determinate"
         except Exception:
             logger.exception("Failed to update activation popup progress state")
+    if _busy_popup_status_label is not None and _busy_popup_status_label.winfo_exists():
+        try:
+            _busy_popup_status_label.configure(text="")
+        except Exception:
+            logger.exception("Failed to clear activation popup status text")
 
     if message:
         _set_busy_popup_text(message)
