@@ -277,6 +277,20 @@ def format_bytes(value: float) -> str:
     return f"{amount:.1f} PB"
 
 
+MB_DIVISOR = 1024.0 * 1024.0
+
+
+def format_duration(seconds: float) -> str:
+    seconds = max(float(seconds), 0.0)
+    minutes, secs = divmod(int(seconds + 0.5), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes:d}m {secs:02d}s"
+    return f"{secs:d}s"
+
+
 class DownloadDialog:
     def __init__(self, model_name: str, progress_queue: Queue, cancel_event: threading.Event):
         self.progress_queue = progress_queue
@@ -361,7 +375,9 @@ class DownloadDialog:
 
     def _update_progress(self, desc: str, current: float, total: float) -> None:
         if desc:
-            self.stage_var.set(desc)
+            desc_clean = desc.strip()
+            if desc_clean:
+                self.stage_var.set(f"Downloading: {desc_clean}")
         if total and total > 0:
             if self.progress["mode"] != "determinate":
                 self.progress.config(mode="determinate")
@@ -375,9 +391,20 @@ class DownloadDialog:
             avg_speed = current / elapsed
             inst_speed = (current - self._last_bytes) / window_elapsed
             speed = inst_speed if window_elapsed >= 0.5 else avg_speed
+            downloaded_mb = current / MB_DIVISOR
+            total_mb = total / MB_DIVISOR
+            eta_seconds = (total - current) / speed if speed > 1e-6 else None
+            eta_text = format_duration(eta_seconds) if eta_seconds is not None else "calculating"
+            elapsed_text = format_duration(elapsed)
             self.status_var.set(
-                f"{percent}%  ({format_bytes(current)} / {format_bytes(total)})"
-                f"  •  {format_bytes(speed)}/s"
+                "  •  ".join([
+                    f"Progress: {percent}%",
+                    f"File size: {total_mb:.2f} MB",
+                    f"Downloaded: {downloaded_mb:.2f} MB",
+                    f"Speed: {format_bytes(speed)}/s",
+                    f"ETA: {eta_text}",
+                    f"Elapsed: {elapsed_text}",
+                ])
             )
             self._last_bytes = current
             self._last_update = now
@@ -388,7 +415,17 @@ class DownloadDialog:
             now = time.time()
             elapsed = max(now - self._start_time, 1e-6)
             speed = current / elapsed
-            self.status_var.set(f"{format_bytes(current)} downloaded  •  {format_bytes(speed)}/s")
+            downloaded_mb = current / MB_DIVISOR
+            elapsed_text = format_duration(elapsed)
+            self.status_var.set(
+                "  •  ".join([
+                    "File size: unknown",
+                    f"Downloaded: {downloaded_mb:.2f} MB",
+                    f"Speed: {format_bytes(speed)}/s",
+                    "ETA: calculating",
+                    f"Elapsed: {elapsed_text}",
+                ])
+            )
 
     def _process_queue(self) -> None:
         while True:
