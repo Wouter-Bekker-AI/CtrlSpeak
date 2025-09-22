@@ -51,6 +51,7 @@ from utils.config_paths import asset_path, get_logger
 # Shared UI thread root + instance ref (imported by utils.system.schedule_management_refresh)
 tk_root: Optional[tk.Tk] = None
 management_window: Optional["ManagementWindow"] = None
+_management_thread_ident: Optional[int] = None
 
 logger = get_logger(__name__)
 
@@ -610,12 +611,13 @@ def ensure_mode_selected() -> None:
 
 # ---------------- UI loop pump (for async updates) ----------------
 def ensure_management_ui_thread() -> None:
-    global tk_root
+    global tk_root, _management_thread_ident
     if tk_root and tk_root.winfo_exists():
         return
 
     def _loop():
-        global tk_root
+        global tk_root, _management_thread_ident
+        _management_thread_ident = threading.get_ident()
         tk_root = tk.Tk()
         apply_modern_theme(tk_root)
         tk_root.withdraw()
@@ -639,6 +641,9 @@ def ensure_management_ui_thread() -> None:
 
     t = threading.Thread(target=_loop, name="CtrlSpeakManagementUI", daemon=True)
     t.start()
+
+def is_management_ui_thread() -> bool:
+    return _management_thread_ident == threading.get_ident()
 
 # ---------------- Status helper ----------------
 def describe_server_status() -> str:
