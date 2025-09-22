@@ -29,6 +29,7 @@ from utils import system as sysmod
 
 # ---- Model/CUDA helpers kept in utils.models to avoid GUI bloat ----
 from utils.models import (
+    AVAILABLE_MODELS,
     cuda_runtime_ready,
     install_cuda_runtime_with_progress,   # opens progress window and installs nvidia wheels
     get_device_preference, set_device_preference,
