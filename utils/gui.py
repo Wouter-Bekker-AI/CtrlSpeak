@@ -53,6 +53,8 @@ from utils.config_paths import asset_path, get_logger
 tk_root: Optional[tk.Tk] = None
 management_window: Optional["ManagementWindow"] = None
 _management_thread_ident: Optional[int] = None
+_management_thread_lock = threading.Lock()
+_management_thread_ready = threading.Event()
 
 logger = get_logger(__name__)
 
@@ -630,36 +632,65 @@ def ensure_mode_selected() -> None:
 
 # ---------------- UI loop pump (for async updates) ----------------
 def ensure_management_ui_thread() -> None:
-    global tk_root, _management_thread_ident
-    if tk_root and tk_root.winfo_exists():
-        return
+    """Ensure the background Tk UI thread is running and ready."""
 
-    def _loop():
-        global tk_root, _management_thread_ident
-        _management_thread_ident = threading.get_ident()
-        tk_root = tk.Tk()
-        apply_modern_theme(tk_root)
-        tk_root.withdraw()
+    def _spawn_thread() -> None:
+        def _loop() -> None:
+            global tk_root, _management_thread_ident
+            try:
+                _management_thread_ident = threading.get_ident()
+                tk_root = tk.Tk()
+            except Exception:
+                logger.exception("Failed to initialize management UI root")
+                _management_thread_ready.set()
+                return
 
-        def process_queue() -> None:
-            # pull queue from system module (so it’s always the live one)
-            while True:
-                try:
-                    func, args, kwargs = sysmod.management_ui_queue.get_nowait()
-                except Empty:
-                    break
-                try:
-                    func(*args, **kwargs)
-                except Exception:
-                    logger.exception("Management UI task failed")
-            if tk_root is not None:
-                tk_root.after(120, process_queue)
+            apply_modern_theme(tk_root)
+            tk_root.withdraw()
+            _management_thread_ready.set()
 
-        tk_root.after(80, process_queue)
-        tk_root.mainloop()
+            def process_queue() -> None:
+                # pull queue from system module (so it’s always the live one)
+                while True:
+                    try:
+                        func, args, kwargs = sysmod.management_ui_queue.get_nowait()
+                    except Empty:
+                        break
+                    try:
+                        func(*args, **kwargs)
+                    except Exception:
+                        logger.exception("Management UI task failed")
+                if tk_root is not None:
+                    tk_root.after(120, process_queue)
 
-    t = threading.Thread(target=_loop, name="CtrlSpeakManagementUI", daemon=True)
-    t.start()
+            tk_root.after(80, process_queue)
+            try:
+                tk_root.mainloop()
+            finally:
+                tk_root = None
+                sysmod.management_ui_thread = None
+                _management_thread_ident = None
+                _management_thread_ready.clear()
+
+        thread = threading.Thread(target=_loop, name="CtrlSpeakManagementUI", daemon=True)
+        sysmod.management_ui_thread = thread
+        thread.start()
+
+    with _management_thread_lock:
+        existing = getattr(sysmod, "management_ui_thread", None)
+        if existing is not None and existing.is_alive():
+            pass
+        else:
+            _management_thread_ready.clear()
+            _spawn_thread()
+
+    if not _management_thread_ready.wait(timeout=5.0):
+        logger.warning("Management UI thread did not signal readiness within timeout")
+
+    with _management_thread_lock:
+        existing = getattr(sysmod, "management_ui_thread", None)
+    if existing is None or not existing.is_alive():
+        logger.error("Management UI thread is not running after initialization attempt")
 
 def is_management_ui_thread() -> bool:
     return _management_thread_ident == threading.get_ident()

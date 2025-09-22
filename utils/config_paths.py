@@ -119,35 +119,44 @@ def asset_path(relative_name: str) -> Path:
 
 
 LOGGER_NAME = "ctrlspeak"
+_LOG_HANDLER: Optional[RotatingFileHandler] = None
+_LOG_CONFIG_LOCK = threading.Lock()
 
 
 def _configure_logging() -> logging.Logger:
-    logger = logging.getLogger(LOGGER_NAME)
-    if logger.handlers:
-        return logger
+    global _LOG_HANDLER
 
-    logger.setLevel(logging.INFO)
-    logs_dir = get_logs_dir()
-    handler = RotatingFileHandler(
-        logs_dir / "ctrlspeak.log",
-        maxBytes=1_048_576,
-        backupCount=5,
-        encoding="utf-8",
-    )
-    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    logger.propagate = False
+    with _LOG_CONFIG_LOCK:
+        ctrl_logger = logging.getLogger(LOGGER_NAME)
+        if _LOG_HANDLER is None:
+            logs_dir = get_logs_dir()
+            handler = RotatingFileHandler(
+                logs_dir / "ctrlspeak.log",
+                maxBytes=1_048_576,
+                backupCount=5,
+                encoding="utf-8",
+            )
+            formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+            handler.setFormatter(formatter)
+            _LOG_HANDLER = handler
 
-    logging.captureWarnings(True)
-    return logger
+            root_logger = logging.getLogger()
+            root_logger.addHandler(handler)
+            if root_logger.level == logging.NOTSET or root_logger.level > logging.INFO:
+                root_logger.setLevel(logging.INFO)
+
+            logging.captureWarnings(True)
+
+        ctrl_logger.setLevel(logging.INFO)
+        ctrl_logger.propagate = True
+        return ctrl_logger
 
 
 _CONFIGURED_LOGGER = _configure_logging()
 
 
 def get_logger(name: str = LOGGER_NAME) -> logging.Logger:
-    if name == LOGGER_NAME:
-        return _CONFIGURED_LOGGER
-    _configure_logging()
-    return logging.getLogger(name)
+    logger = _CONFIGURED_LOGGER if name == LOGGER_NAME else logging.getLogger(name)
+    if logger is not _CONFIGURED_LOGGER:
+        _configure_logging()
+    return logger
