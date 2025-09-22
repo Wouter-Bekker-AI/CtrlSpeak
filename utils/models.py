@@ -30,6 +30,7 @@ from utils.system import (
     get_config_dir, save_settings,
     start_processing_feedback, stop_processing_feedback,
     ui_show_activation_popup, ui_close_activation_popup,
+    ui_remind_activation_popup, ui_update_activation_progress,
 )
 from utils.system import get_best_server, CLIENT_ONLY_BUILD
 from utils.ui_theme import apply_modern_theme
@@ -50,7 +51,7 @@ MODEL_ROOT_PATH = get_config_dir() / "models"
 
 # Hard-coded download targets (bytes) for progress tracking
 EXPECTED_MODEL_BYTES: dict[str, int] = {
-    "small": 584 * (1024 ** 2),
+    "small": 463 * (1024 ** 2),
     "large-v3": int(2.87 * (1024 ** 3)),
 }
 
@@ -147,6 +148,12 @@ def _model_repo_id(model_short: str) -> str:
         return MODEL_REPO_OVERRIDE
     # Your builds use Systran/faster-whisper-<name>
     return f"Systran/faster-whisper-{model_short}"
+
+
+def _model_activation_cache_path(model_short: str) -> Path:
+    repo_id = _model_repo_id(model_short)
+    safe_repo = repo_id.replace("/", "--")
+    return MODEL_ROOT_PATH / f"models--{safe_repo}"
 
 
 # ---------------- CUDA lookup / readiness ----------------
@@ -443,12 +450,19 @@ class DownloadDialog:
                 self.stage_var.set(f"Downloading: {desc_clean}")
         if is_bytes:
             if total and total > 0:
+                percent_float = max(min((current / total) * 100.0, 100.0), 0.0)
                 if self.progress["mode"] != "determinate":
-                    self.progress.config(mode="determinate")
                     self.progress.stop()
-                self.progress.config(maximum=total)
-                self.progress["value"] = current
-                percent = min(max(int((current / total) * 100), 0), 100)
+                    self.progress.config(mode="determinate", maximum=100.0)
+                else:
+                    try:
+                        current_max = float(self.progress.cget("maximum"))
+                    except Exception:
+                        current_max = 0.0
+                    if current_max != 100.0:
+                        self.progress.config(maximum=100.0)
+                self.progress["value"] = percent_float
+                percent = int(round(percent_float))
             else:
                 if self.progress["mode"] != "indeterminate":
                     self.progress.config(mode="indeterminate")
@@ -706,6 +720,90 @@ def download_model_with_gui(
             activation_finalizer=finalize,
         )
         return activated is not None
+
+
+# ---------------- Activation progress tracking ----------------
+class ActivationProgressMonitor:
+    def __init__(self, model_short: str):
+        self.model_short = model_short
+        self._cache_path = _model_activation_cache_path(model_short)
+        self._stop_event = threading.Event()
+        self._stopped = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._target_bytes = 0.0
+        self._start_time = 0.0
+        self._last_percent: Optional[float] = None
+
+    def start(self) -> None:
+        self._start_time = time.time()
+        store_path = model_store_path_for(self.model_short)
+        target_size = float(_measure_directory_size(store_path))
+        if target_size <= 0.0:
+            expected = EXPECTED_MODEL_BYTES.get(self.model_short)
+            target_size = float(expected or 0.0)
+        self._target_bytes = target_size
+        try:
+            ui_remind_activation_popup()
+        except Exception:
+            logger.exception("Failed to bring activation popup to foreground")
+        initial_percent: Optional[float]
+        initial_percent = 0.0 if self._target_bytes > 0.0 else None
+        try:
+            ui_update_activation_progress(initial_percent, 0.0, None)
+        except Exception:
+            logger.exception("Failed to initialize activation progress display")
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(1.0):
+            try:
+                current_size = float(_measure_directory_size(self._cache_path))
+            except Exception:
+                logger.exception("Failed to measure activation cache size")
+                current_size = 0.0
+            elapsed = max(time.time() - self._start_time, 0.0)
+            percent: Optional[float]
+            eta: Optional[float]
+            if self._target_bytes > 0.0:
+                ratio = min(max(current_size / self._target_bytes, 0.0), 1.0)
+                percent = ratio * 100.0
+                remaining = max(self._target_bytes - current_size, 0.0)
+                speed = current_size / elapsed if elapsed > 0.0 else 0.0
+                eta = (remaining / speed) if speed > 0.0 else None
+            else:
+                percent = None
+                eta = None
+            try:
+                ui_update_activation_progress(percent, elapsed, eta)
+            except Exception:
+                logger.exception("Failed to update activation progress display")
+            if percent is not None:
+                self._last_percent = percent
+
+    def stop(self, success: bool) -> None:
+        if self._stopped.is_set():
+            return
+        self._stopped.set()
+        self._stop_event.set()
+        if self._thread is not None and self._thread.is_alive():
+            try:
+                self._thread.join(timeout=2.5)
+            except Exception:
+                logger.exception("Failed to join activation progress monitor thread")
+        elapsed = max(time.time() - self._start_time, 0.0)
+        percent: Optional[float]
+        eta: Optional[float]
+        if success and self._target_bytes > 0.0:
+            percent = 100.0
+            eta = 0.0
+        else:
+            percent = self._last_percent
+            eta = None
+        try:
+            ui_update_activation_progress(percent, elapsed, eta)
+        except Exception:
+            logger.exception("Failed to finalize activation progress display")
 
 
 # ---------------- Transcriber ----------------
@@ -966,6 +1064,14 @@ def initialize_transcriber(
         if device == "cpu":
             _force_cpu_env()
 
+        progress_monitor: Optional[ActivationProgressMonitor] = None
+        try:
+            progress_monitor = ActivationProgressMonitor(model_name)
+            progress_monitor.start()
+        except Exception:
+            logger.exception("Failed to start activation progress monitor")
+            progress_monitor = None
+
         try:
             whisper_model = WhisperModel(
                 model_name,
@@ -973,15 +1079,6 @@ def initialize_transcriber(
                 compute_type=compute_type,
                 download_root=str(MODEL_ROOT_PATH),
             )
-            print(f"Whisper model '{model_name}' ready on {device} ({compute_type})")
-            finalize(
-                True,
-                (
-                    "Activation complete! You can now use CtrlSpeak. "
-                    f"The Whisper model '{model_name}' is ready on {device.upper()} ({compute_type})."
-                ),
-            )
-            return whisper_model
         except Exception as exc:
             print(f"Failed to load model on {device}: {exc}")
             logger.exception("Failed to load Whisper model on %s", device)
@@ -993,7 +1090,16 @@ def initialize_transcriber(
                         compute_type="int8",
                         download_root=str(MODEL_ROOT_PATH),
                     )
-                    notify("Running CtrlSpeak transcription on CPU fallback. Set CTRLSPEAK_DEVICE=cpu to suppress this message.")
+                except Exception as cpu_exc:
+                    print(f"CPU fallback failed: {cpu_exc}")
+                    logger.exception("CPU fallback model load failed")
+                else:
+                    if progress_monitor is not None:
+                        progress_monitor.stop(success=True)
+                    notify(
+                        "Running CtrlSpeak transcription on CPU fallback. "
+                        "Set CTRLSPEAK_DEVICE=cpu to suppress this message."
+                    )
                     warned_cuda_unavailable = True
                     finalize(
                         True,
@@ -1003,9 +1109,8 @@ def initialize_transcriber(
                         ),
                     )
                     return whisper_model
-                except Exception as cpu_exc:
-                    print(f"CPU fallback failed: {cpu_exc}")
-                    logger.exception("CPU fallback model load failed")
+            if progress_monitor is not None:
+                progress_monitor.stop(success=False)
             notify("Unable to initialize the transcription model. Please check your installation and try again.")
             finalize(
                 False,
@@ -1013,6 +1118,18 @@ def initialize_transcriber(
             )
             whisper_model = None
             return None
+        else:
+            if progress_monitor is not None:
+                progress_monitor.stop(success=True)
+            print(f"Whisper model '{model_name}' ready on {device} ({compute_type})")
+            finalize(
+                True,
+                (
+                    "Activation complete! You can now use CtrlSpeak. "
+                    f"The Whisper model '{model_name}' is ready on {device.upper()} ({compute_type})."
+                ),
+            )
+            return whisper_model
 
     with model_lock:
         if whisper_model is not None and not force:

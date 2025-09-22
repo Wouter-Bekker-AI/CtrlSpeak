@@ -248,6 +248,21 @@ def ui_close_activation_popup(message: str | None = None) -> None:
             except Exception:
                 logger.exception("Failed to print activation popup completion message")
 
+
+def ui_update_activation_progress(
+    progress: float | None,
+    elapsed: float | None,
+    eta: float | None,
+) -> None:
+    """Update the activation popup progress bar and timing information."""
+    try:
+        from utils.gui import ensure_management_ui_thread, update_activation_progress
+
+        ensure_management_ui_thread()
+        enqueue_management_task(update_activation_progress, progress, elapsed, eta)
+    except Exception:
+        logger.exception("Failed to schedule activation popup progress update")
+
 def format_exception_details(exc: Exception) -> str:
     return "".join(traceback.format_exception_only(type(exc), exc)).strip()
 
