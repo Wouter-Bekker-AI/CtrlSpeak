@@ -10,6 +10,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from queue import Queue, Empty
 from typing import Optional, List, Set, Callable, Tuple
+from urllib.parse import quote
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 
 import ctypes
 import ctranslate2
@@ -19,8 +22,7 @@ try:  # pragma: no cover - optional dependency rarely installed
 except ImportError:
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
-from huggingface_hub import snapshot_download
-from tqdm import tqdm
+from huggingface_hub import HfApi
 import tkinter as tk
 from tkinter import ttk
 
@@ -295,6 +297,8 @@ def format_bytes(value: float) -> str:
 
 
 MB_DIVISOR = 1024.0 * 1024.0
+DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+DOWNLOAD_USER_AGENT = "CtrlSpeak Downloader/1.0"
 
 
 def format_duration(seconds: float) -> str:
@@ -568,27 +572,6 @@ class DownloadDialog:
             except Exception:
                 logger.exception("Failed to schedule management UI pump during download")
 
-
-def make_tqdm_class(cancel_event: threading.Event):
-    """Return a tqdm subclass that only exists to honour cancellation requests.
-
-    Important: *Never* attempt to turn Hugging Face's tqdm callbacks into GUI
-    progress updates again. They don't reflect the actual bytes hitting disk
-    until Explorer pokes the folder, so we rely solely on the cache directory
-    size monitor in ``download_model_with_gui`` for determinate progress.
-    Future maintainers: please leave this warning in place.
-    """
-
-    class GuiTqdm(tqdm):
-        def update(self_inner, n=1):
-            if cancel_event.is_set():
-                raise CancelledDownload()
-            return super().update(n)
-
-    return GuiTqdm
-
-
-
 def _prompt_for_model_install(model_name: str) -> bool:
     # Small confirm; default to Install if headless
     prompt = (f"CtrlSpeak needs to download the Whisper speech model '{model_name}' (~GBs). "
@@ -619,167 +602,135 @@ def download_model_with_gui(
     dialog = DownloadDialog(model_name, progress_queue, cancel_event)
 
     def worker() -> None:
-        monitor_stop = threading.Event()
-        monitor_thread: Optional[threading.Thread] = None
         success = False
         try:
             repo_id = _model_repo_id(model_name)
             progress_queue.put(("stage", f"Connecting to Hugging Face ({repo_id})"))
             store_path = model_store_path_for(model_name)
             store_path.mkdir(parents=True, exist_ok=True)
-            expected_total = EXPECTED_MODEL_BYTES.get(model_name)
-            activation_cache_path = _model_activation_cache_path(model_name)
+
+            api = HfApi()
             try:
-                activation_cache_path.mkdir(parents=True, exist_ok=True)
-            except Exception:
-                logger.debug("Unable to ensure activation cache path %s exists", activation_cache_path)
+                model_info = api.model_info(repo_id)
+            except Exception as exc:
+                progress_queue.put(("error", f"Failed to query repository: {exc}"))
+                logger.exception("Unable to query Hugging Face model info for %s", repo_id)
+                return
 
-            cache_root_env = os.environ.get("HF_HUB_CACHE")
-            if cache_root_env:
-                cache_root = Path(cache_root_env)
-            else:
-                cache_root = get_config_dir() / "hf-cache" / "hub"
-            cache_path = cache_root / f"models--{repo_id.replace('/', '--')}"
-            try:
-                cache_path.mkdir(parents=True, exist_ok=True)
-            except Exception:
-                logger.debug("Unable to ensure cache path %s exists", cache_path)
-            downloads_path = cache_root / "downloads"
-            blobs_path = cache_root / "blobs"
-            baseline_store = float(_measure_directory_size(store_path))
-            baseline_cache = float(_measure_directory_size(cache_path))
-            baseline_activation_cache = float(_measure_directory_size(activation_cache_path))
-            baseline_downloads = float(_measure_directory_size(downloads_path))
-            baseline_blobs = float(_measure_directory_size(blobs_path))
-            starting_bytes = max(baseline_store, baseline_cache, baseline_activation_cache)
+            files: list[dict[str, Optional[int]]] = []
+            total_bytes = 0
+            for sibling in getattr(model_info, "siblings", []) or []:
+                path = getattr(sibling, "rfilename", None)
+                if not path:
+                    continue
+                size = getattr(sibling, "size", None)
+                size_value: Optional[int]
+                try:
+                    size_value = int(size) if size is not None else None
+                except (TypeError, ValueError):
+                    size_value = None
+                if size_value is not None and size_value > 0:
+                    total_bytes += size_value
+                files.append({"path": path, "size": size_value})
 
-            def monitor_download() -> None:
-                # NOTE: The only trustworthy signals of download progress are the
-                # bytes that have landed on disk in Hugging Face's cache, its
-                # staging directories, and the activation cache directory that
-                # faster-whisper uses. Please do not reintroduce tqdm-driven byte
-                # counters – they stay frozen until Explorer probes the folder,
-                # which makes the GUI look broken.
-                last_reported = -1.0
-                last_emitted = 0.0
-                total_value = float(expected_total) if expected_total else 0.0
-                while True:
-                    try:
-                        store_size = float(_measure_directory_size(store_path))
-                    except Exception:
-                        store_size = 0.0
-                    try:
-                        cache_size = float(_measure_directory_size(cache_path))
-                    except Exception:
-                        cache_size = 0.0
-                    try:
-                        activation_cache_size = float(_measure_directory_size(activation_cache_path))
-                    except Exception:
-                        activation_cache_size = 0.0
-                    try:
-                        downloads_size = float(_measure_directory_size(downloads_path))
-                    except Exception:
-                        downloads_size = 0.0
-                    try:
-                        blobs_size = float(_measure_directory_size(blobs_path))
-                    except Exception:
-                        blobs_size = 0.0
+            if not files:
+                progress_queue.put(("error", "No files available for download."))
+                return
 
-                    committed_bytes = max(
-                        store_size,
-                        cache_size,
-                        activation_cache_size,
-                        starting_bytes,
-                    )
-                    inflight_delta = max(
-                        max(0.0, downloads_size - baseline_downloads),
-                        max(0.0, blobs_size - baseline_blobs),
-                    )
-                    current_size = committed_bytes + inflight_delta
-                    if current_size < committed_bytes:
-                        current_size = committed_bytes
-                    if expected_total:
-                        current_size = min(current_size, float(expected_total))
-                    now = time.monotonic()
-                    if current_size != last_reported or (now - last_emitted) >= 2.0:
-                        progress_queue.put(("progress", "", current_size, total_value, True))
-                        last_reported = current_size
-                        last_emitted = now
-                    if monitor_stop.wait(1.0):
-                        break
+            files.sort(key=lambda item: item["path"])
 
-                try:
-                    final_store = float(_measure_directory_size(store_path))
-                except Exception:
-                    final_store = 0.0
-                try:
-                    final_cache = float(_measure_directory_size(cache_path))
-                except Exception:
-                    final_cache = 0.0
-                try:
-                    final_activation_cache = float(_measure_directory_size(activation_cache_path))
-                except Exception:
-                    final_activation_cache = 0.0
-                try:
-                    final_downloads = float(_measure_directory_size(downloads_path))
-                except Exception:
-                    final_downloads = 0.0
-                try:
-                    final_blobs = float(_measure_directory_size(blobs_path))
-                except Exception:
-                    final_blobs = 0.0
-                committed_bytes = max(
-                    final_store,
-                    final_cache,
-                    final_activation_cache,
-                    starting_bytes,
-                )
-                inflight_delta = max(
-                    max(0.0, final_downloads - baseline_downloads),
-                    max(0.0, final_blobs - baseline_blobs),
-                )
-                final_size = committed_bytes + inflight_delta
-                if final_size < committed_bytes:
-                    final_size = committed_bytes
-                if expected_total:
-                    final_size = min(final_size, float(expected_total))
-                if final_size != last_reported:
-                    total_value = float(expected_total) if expected_total else 0.0
-                    progress_queue.put(("progress", "", final_size, total_value, True))
-
-            monitor_thread = threading.Thread(target=monitor_download, daemon=True)
-            monitor_thread.start()
             progress_queue.put(("stage", f"Downloading {model_name} model files…"))
+            downloaded_bytes = 0
+            progress_queue.put(("progress", "", float(downloaded_bytes), float(total_bytes), True))
 
-            # Cancellation still routes through Hugging Face's tqdm shim, but
-            # progress itself must always come from the cache monitor above.
-            gui_tqdm = make_tqdm_class(cancel_event)
-            import importlib
+            encoded_repo = quote(repo_id, safe="/")
 
-            file_download_module = importlib.import_module("huggingface_hub.file_download")
-            utils_tqdm_module = importlib.import_module("huggingface_hub.utils.tqdm")
-            original_file_tqdm = getattr(file_download_module, "tqdm", None)
-            original_utils_tqdm = getattr(utils_tqdm_module, "tqdm", None)
+            for entry in files:
+                if cancel_event.is_set():
+                    raise CancelledDownload()
+                rel_path = entry["path"]
+                file_size = entry["size"]
+                dest_path = store_path / rel_path
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                temp_path = dest_path.with_name(dest_path.name + ".part")
+                encoded_rel = quote(rel_path.replace("\\", "/"))
+                url = f"https://huggingface.co/{encoded_repo}/resolve/main/{encoded_rel}?download=true"
 
-            file_download_module.tqdm = gui_tqdm
-            if original_utils_tqdm is not None:
-                utils_tqdm_module.tqdm = gui_tqdm
-            try:
-                snapshot_download(
-                    repo_id=repo_id,
-                    local_dir=str(store_path),
-                    local_dir_use_symlinks=False,
-                    resume_download=True,
-                    max_workers=4,
-                    tqdm_class=gui_tqdm,
-                )
-            finally:
-                if original_file_tqdm is not None:
-                    file_download_module.tqdm = original_file_tqdm
-                if original_utils_tqdm is not None:
-                    utils_tqdm_module.tqdm = original_utils_tqdm
+                if temp_path.exists():
+                    try:
+                        temp_path.unlink()
+                    except Exception:
+                        logger.debug("Unable to remove stale partial file %s", temp_path)
+
+                if file_size is None:
+                    try:
+                        head_req = Request(url, method="HEAD", headers={"User-Agent": DOWNLOAD_USER_AGENT})
+                        with urlopen(head_req) as head_resp:
+                            cl = head_resp.headers.get("Content-Length") or head_resp.getheader("Content-Length")
+                            if cl:
+                                file_size = int(cl)
+                                entry["size"] = file_size
+                                total_bytes += file_size
+                                progress_queue.put(("progress", "", float(downloaded_bytes), float(total_bytes), True))
+                    except Exception:
+                        file_size = None
+
+                if dest_path.exists():
+                    try:
+                        dest_path.unlink()
+                    except Exception:
+                        logger.debug("Unable to remove existing file %s before download", dest_path)
+
+                try:
+                    req = Request(url, method="GET", headers={"User-Agent": DOWNLOAD_USER_AGENT})
+                    with urlopen(req) as response, open(temp_path, "wb") as output:
+                        while True:
+                            chunk = response.read(DOWNLOAD_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            if cancel_event.is_set():
+                                raise CancelledDownload()
+                            output.write(chunk)
+                            chunk_len = len(chunk)
+                            downloaded_bytes += chunk_len
+                            progress_queue.put(("progress", rel_path, float(downloaded_bytes), float(total_bytes), True))
+                    temp_path.replace(dest_path)
+                except CancelledDownload:
+                    try:
+                        if temp_path.exists():
+                            temp_path.unlink()
+                    except Exception:
+                        logger.debug("Failed to remove partial download %s", temp_path)
+                    raise
+                except HTTPError as exc:
+                    try:
+                        if temp_path.exists():
+                            temp_path.unlink()
+                    except Exception:
+                        logger.debug("Failed to remove partial download %s after HTTP error", temp_path)
+                    progress_queue.put(("error", f"HTTP error while downloading {rel_path}: {exc.code} {exc.reason}"))
+                    return
+                except URLError as exc:
+                    try:
+                        if temp_path.exists():
+                            temp_path.unlink()
+                    except Exception:
+                        logger.debug("Failed to remove partial download %s after network error", temp_path)
+                    progress_queue.put(("error", f"Network error while downloading {rel_path}: {exc.reason}"))
+                    return
+                except Exception as exc:
+                    try:
+                        if temp_path.exists():
+                            temp_path.unlink()
+                    except Exception:
+                        logger.debug("Failed to remove partial download %s after error", temp_path)
+                    progress_queue.put(("error", f"Failed downloading {rel_path}: {exc}"))
+                    logger.exception("Error downloading %s from %s", rel_path, repo_id)
+                    return
+
             if cancel_event.is_set():
-                progress_queue.put(("cancelled",)); return
+                raise CancelledDownload()
+
             (store_path / ".installed").touch(exist_ok=True)
             success = True
         except CancelledDownload:
@@ -789,13 +740,6 @@ def download_model_with_gui(
             progress_queue.put(("error", f"Failed: {exc}"))
             logger.exception("Model download failed")
             return
-        finally:
-            monitor_stop.set()
-            if monitor_thread is not None:
-                try:
-                    monitor_thread.join(timeout=2.0)
-                except Exception:
-                    logger.exception("Failed to join download monitor thread")
 
         if success:
             progress_queue.put(("done",))
