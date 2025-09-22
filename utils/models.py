@@ -408,8 +408,39 @@ class DownloadDialog:
 
         self._start_time = time.time()
 
-        self.status_var = tk.StringVar(value=self._placeholder_status_text())
-        ttk.Label(card, textvariable=self.status_var, style="Caption.TLabel").pack(anchor=tk.W)
+        metrics = ttk.Frame(card, style="ModernCardInner.TFrame")
+        metrics.pack(fill=tk.X, pady=(8, 0))
+
+        self.metric_vars: dict[str, tk.StringVar] = {
+            "progress": tk.StringVar(),
+            "file_size": tk.StringVar(),
+            "downloaded": tk.StringVar(),
+            "speed": tk.StringVar(),
+            "eta": tk.StringVar(),
+            "elapsed": tk.StringVar(),
+        }
+
+        for row, (label_text, key) in enumerate([
+            ("Progress", "progress"),
+            ("File size", "file_size"),
+            ("Downloaded", "downloaded"),
+            ("Average speed", "speed"),
+            ("ETA", "eta"),
+            ("Elapsed", "elapsed"),
+        ]):
+            ttk.Label(metrics, text=f"{label_text}:", style="Caption.TLabel").grid(
+                row=row, column=0, sticky=tk.W, pady=(0, 2)
+            )
+            ttk.Label(metrics, textvariable=self.metric_vars[key], style="Caption.TLabel").grid(
+                row=row, column=1, sticky=tk.W, padx=(12, 0), pady=(0, 2)
+            )
+
+        metrics.grid_columnconfigure(0, weight=0)
+        metrics.grid_columnconfigure(1, weight=1)
+
+        self.status_var = tk.StringVar(value="")
+        ttk.Label(card, textvariable=self.status_var, style="Caption.TLabel", wraplength=360,
+                  justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 0))
 
         actions = ttk.Frame(card, style="ModernCardInner.TFrame")
         actions.pack(fill=tk.X, pady=(20, 0))
@@ -461,6 +492,8 @@ class DownloadDialog:
             if not self._progress_updates_started:
                 self._progress_updates_started = True
                 self._cancel_placeholder_refresh()
+            else:
+                self.status_var.set("")
             if total and total > 0:
                 percent_float = max(min((current / total) * 100.0, 100.0), 0.0)
                 if self.progress["mode"] != "determinate":
@@ -490,22 +523,22 @@ class DownloadDialog:
             eta_seconds = (remaining / speed) if (remaining is not None and speed > 1e-6) else None
             eta_text = format_duration(eta_seconds) if eta_seconds is not None else "calculating"
             elapsed_text = format_duration(elapsed)
-            total_text = f"File size: {total_mb:.2f} MB" if total_mb is not None else "File size: calculating"
-            self.status_var.set(
-                "  •  ".join([
-                    f"Progress: {percent}%",
-                    total_text,
-                    f"Downloaded: {downloaded_mb:.2f} MB",
-                    f"Average speed: {format_bytes(speed)}/s" if speed > 0 else "Average speed: calculating",
-                    f"ETA: {eta_text}",
-                    f"Elapsed: {elapsed_text}",
-                ])
+            total_text = f"{total_mb:.2f} MB" if total_mb is not None else "calculating"
+            self.metric_vars["progress"].set(f"{percent}%")
+            self.metric_vars["file_size"].set(total_text)
+            self.metric_vars["downloaded"].set(f"{downloaded_mb:.2f} MB")
+            self.metric_vars["speed"].set(
+                f"{format_bytes(speed)}/s" if speed > 0 else "calculating"
             )
+            self.metric_vars["eta"].set(eta_text)
+            self.metric_vars["elapsed"].set(elapsed_text)
             self._last_progress_was_bytes = True
         else:
             if not self._progress_updates_started:
                 self._progress_updates_started = True
                 self._cancel_placeholder_refresh()
+            else:
+                self.status_var.set("")
             if self._last_progress_was_bytes:
                 # Ignore non-byte updates once byte progress has started to avoid regressions.
                 return
@@ -515,36 +548,36 @@ class DownloadDialog:
             now = time.time()
             elapsed = max(now - self._start_time, 1e-6)
             percent = 0
-            progress_parts = []
             if total and total > 0:
                 percent = min(max(int((current / total) * 100), 0), 100)
-                progress_parts.append(f"Progress: {percent}%")
-                progress_parts.append(f"Items: {int(current)}/{int(total)}")
+                progress_text = f"{percent}%"
             else:
-                progress_parts.append(f"Items processed: {int(current)}")
+                progress_text = f"Items: {int(current)}"
             elapsed_text = format_duration(elapsed)
-            progress_parts.extend([
-                "File size: calculating",
-                "Downloaded: calculating",
-                "Average speed: calculating",
-                f"Elapsed: {elapsed_text}",
-            ])
-            self.status_var.set("  •  ".join(progress_parts))
+            self.metric_vars["progress"].set(progress_text)
+            self.metric_vars["file_size"].set("calculating")
+            self.metric_vars["downloaded"].set("calculating")
+            self.metric_vars["speed"].set("calculating")
+            self.metric_vars["eta"].set("calculating")
+            self.metric_vars["elapsed"].set(elapsed_text)
 
-    def _placeholder_status_text(self) -> str:
+    def _placeholder_status_text(self) -> dict[str, str]:
         elapsed = max(time.time() - self._start_time, 0.0)
         elapsed_text = format_duration(elapsed)
-        return "  •  ".join([
-            "Progress: 0%",
-            "File size: calculating",
-            "Downloaded: 0.00 MB",
-            "Average speed: calculating",
-            "ETA: calculating",
-            f"Elapsed: {elapsed_text}",
-        ])
+        return {
+            "progress": "0%",
+            "file_size": "calculating",
+            "downloaded": "0.00 MB",
+            "speed": "calculating",
+            "eta": "calculating",
+            "elapsed": elapsed_text,
+        }
 
     def _update_placeholder_status(self) -> None:
-        self.status_var.set(self._placeholder_status_text())
+        self.status_var.set("")
+        placeholder_values = self._placeholder_status_text()
+        for key, value in placeholder_values.items():
+            self.metric_vars[key].set(value)
 
     def _schedule_placeholder_refresh(self) -> None:
         if self._placeholder_after_id is not None or self.result is not None:
