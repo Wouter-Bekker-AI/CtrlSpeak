@@ -796,9 +796,9 @@ class ManagementWindow:
         model_badges = ttk.Frame(model_row, style="ModernCardInner.TFrame")
         model_badges.pack(side=tk.LEFT, padx=(16, 0))
         self.model_small_badge = ttk.Label(model_badges, text="", style="PillMuted.TLabel")
-        self.model_small_badge.pack(side=tk.LEFT)
+        self.model_small_badge.pack(anchor=tk.W)
         self.model_large_badge = ttk.Label(model_badges, text="", style="PillMuted.TLabel")
-        self.model_large_badge.pack(side=tk.LEFT, padx=(12, 0))
+        self.model_large_badge.pack(anchor=tk.W, pady=(8, 0))
         model_buttons = ttk.Frame(model_card, style="ModernCardInner.TFrame")
         model_buttons.pack(fill=tk.X, pady=(4, 0))
         self.apply_model_btn = ttk.Button(model_buttons, text="Activate model", style="Accent.TButton",
