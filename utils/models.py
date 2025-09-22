@@ -418,12 +418,17 @@ class DownloadDialog:
         self.root.protocol("WM_DELETE_WINDOW", self.cancel)
         self._start_time = time.time()
         self._last_progress_was_bytes = False
+        self._progress_updates_started = False
+        self._placeholder_after_id: Optional[str] = None
+        self._update_placeholder_status()
+        self._schedule_placeholder_refresh()
 
     def cancel(self) -> None:
         if self.result is None:
             self.result = "cancelled"
             self.cancel_event.set()
             self.status_var.set("Cancelling...")
+            self._cancel_placeholder_refresh()
 
     def _schedule_close(self, delay_ms: int = 0) -> None:
         if self._close_scheduled:
@@ -452,6 +457,9 @@ class DownloadDialog:
             if desc_clean:
                 self.stage_var.set(f"Downloading: {desc_clean}")
         if is_bytes:
+            if not self._progress_updates_started:
+                self._progress_updates_started = True
+                self._cancel_placeholder_refresh()
             if total and total > 0:
                 percent_float = max(min((current / total) * 100.0, 100.0), 0.0)
                 if self.progress["mode"] != "determinate":
@@ -481,7 +489,7 @@ class DownloadDialog:
             eta_seconds = (remaining / speed) if (remaining is not None and speed > 1e-6) else None
             eta_text = format_duration(eta_seconds) if eta_seconds is not None else "calculating"
             elapsed_text = format_duration(elapsed)
-            total_text = f"File size: {total_mb:.2f} MB" if total_mb is not None else "File size: unknown"
+            total_text = f"File size: {total_mb:.2f} MB" if total_mb is not None else "File size: calculating"
             self.status_var.set(
                 "  •  ".join([
                     f"Progress: {percent}%",
@@ -494,6 +502,9 @@ class DownloadDialog:
             )
             self._last_progress_was_bytes = True
         else:
+            if not self._progress_updates_started:
+                self._progress_updates_started = True
+                self._cancel_placeholder_refresh()
             if self._last_progress_was_bytes:
                 # Ignore non-byte updates once byte progress has started to avoid regressions.
                 return
@@ -512,12 +523,53 @@ class DownloadDialog:
                 progress_parts.append(f"Items processed: {int(current)}")
             elapsed_text = format_duration(elapsed)
             progress_parts.extend([
-                "File size: unknown",
+                "File size: calculating",
                 "Downloaded: calculating",
-                "Speed: calculating",
+                "Average speed: calculating",
                 f"Elapsed: {elapsed_text}",
             ])
             self.status_var.set("  •  ".join(progress_parts))
+
+    def _placeholder_status_text(self) -> str:
+        elapsed = max(time.time() - self._start_time, 0.0)
+        elapsed_text = format_duration(elapsed)
+        return "  •  ".join([
+            "Progress: 0%",
+            "File size: calculating",
+            "Downloaded: 0.00 MB",
+            "Average speed: calculating",
+            "ETA: calculating",
+            f"Elapsed: {elapsed_text}",
+        ])
+
+    def _update_placeholder_status(self) -> None:
+        self.status_var.set(self._placeholder_status_text())
+
+    def _schedule_placeholder_refresh(self) -> None:
+        if self._placeholder_after_id is not None or self.result is not None:
+            return
+
+        def _tick() -> None:
+            self._placeholder_after_id = None
+            if self._progress_updates_started or self.result is not None:
+                return
+            self._update_placeholder_status()
+            self._schedule_placeholder_refresh()
+
+        try:
+            self._placeholder_after_id = self.root.after(500, _tick)
+        except Exception:
+            logger.exception("Failed to schedule placeholder status refresh")
+
+    def _cancel_placeholder_refresh(self) -> None:
+        if self._placeholder_after_id is None:
+            return
+        try:
+            self.root.after_cancel(self._placeholder_after_id)
+        except Exception:
+            logger.exception("Failed to cancel placeholder status refresh")
+        finally:
+            self._placeholder_after_id = None
 
     def _process_queue(self) -> None:
         while True:
