@@ -250,8 +250,8 @@ class DownloadDialog:
 
         self.root = tk.Tk()
         self.root.title("CtrlSpeak Setup")
-        self.root.geometry("480x260")
-        self.root.minsize(440, 240)
+        self.root.geometry("960x520")
+        self.root.minsize(900, 500)
         self.root.resizable(True, True)
         self.root.attributes("-topmost", True)
         apply_modern_theme(self.root)
