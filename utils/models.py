@@ -551,8 +551,22 @@ class DownloadDialog:
 
     def run(self) -> str:
         self.root.after(100, self._process_queue)
+        self.root.after(80, self._pump_management_events)
         self.root.mainloop()
         return self.result or "cancelled"
+
+    def _pump_management_events(self) -> None:
+        if self.result is not None:
+            return
+        try:
+            pump_management_events_once()
+        except Exception:
+            logger.exception("Failed to pump management UI while downloading model")
+        finally:
+            try:
+                self.root.after(120, self._pump_management_events)
+            except Exception:
+                logger.exception("Failed to schedule management UI pump during download")
 
 
 def make_tqdm_class(cancel_event: threading.Event):
@@ -763,27 +777,36 @@ class ActivationProgressMonitor:
     def __init__(self, model_short: str):
         self.model_short = model_short
         self._cache_path = _model_activation_cache_path(model_short)
+        self._store_path = model_store_path_for(model_short)
         self._stop_event = threading.Event()
         self._stopped = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._target_bytes = 0.0
         self._start_time = 0.0
         self._last_percent: Optional[float] = None
+        self._baseline_cache_bytes = 0.0
+        self._baseline_store_bytes = 0.0
 
     def start(self) -> None:
         self._start_time = time.time()
-        store_path = model_store_path_for(self.model_short)
-        target_size = float(_measure_directory_size(store_path))
-        if target_size <= 0.0:
-            expected = EXPECTED_MODEL_BYTES.get(self.model_short)
-            target_size = float(expected or 0.0)
-        self._target_bytes = target_size
+        self._baseline_store_bytes = float(_measure_directory_size(self._store_path))
+        self._baseline_cache_bytes = float(_measure_directory_size(self._cache_path))
+        expected = EXPECTED_MODEL_BYTES.get(self.model_short)
+        target_size = float(expected or self._baseline_store_bytes)
+        self._target_bytes = max(target_size, 0.0)
         try:
             ui_remind_activation_popup()
         except Exception:
             logger.exception("Failed to bring activation popup to foreground")
         initial_percent: Optional[float]
-        initial_percent = 0.0 if self._target_bytes > 0.0 else None
+        if self._target_bytes > 0.0:
+            initial_added = self._current_added_bytes()
+            if initial_added >= self._target_bytes:
+                initial_percent = 100.0
+            else:
+                initial_percent = 0.0
+        else:
+            initial_percent = None
         try:
             ui_update_activation_progress(initial_percent, 0.0, None)
         except Exception:
@@ -791,21 +814,30 @@ class ActivationProgressMonitor:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
+    def _current_added_bytes(self) -> float:
+        cache_bytes = float(_measure_directory_size(self._cache_path))
+        store_bytes = float(_measure_directory_size(self._store_path))
+        added_cache = max(cache_bytes - self._baseline_cache_bytes, 0.0)
+        added_store = max(store_bytes - self._baseline_store_bytes, 0.0)
+        return max(added_cache + added_store, 0.0)
+
     def _run(self) -> None:
         while not self._stop_event.wait(1.0):
             try:
-                current_size = float(_measure_directory_size(self._cache_path))
+                added_bytes = self._current_added_bytes()
             except Exception:
                 logger.exception("Failed to measure activation cache size")
-                current_size = 0.0
+                added_bytes = 0.0
             elapsed = max(time.time() - self._start_time, 0.0)
             percent: Optional[float]
             eta: Optional[float]
             if self._target_bytes > 0.0:
-                ratio = min(max(current_size / self._target_bytes, 0.0), 1.0)
+                if added_bytes > self._target_bytes:
+                    self._target_bytes = added_bytes
+                ratio = min(max(added_bytes / self._target_bytes, 0.0), 1.0)
                 percent = ratio * 100.0
-                remaining = max(self._target_bytes - current_size, 0.0)
-                speed = current_size / elapsed if elapsed > 0.0 else 0.0
+                remaining = max(self._target_bytes - added_bytes, 0.0)
+                speed = added_bytes / elapsed if elapsed > 0.0 else 0.0
                 eta = (remaining / speed) if speed > 0.0 else None
             else:
                 percent = None
@@ -830,9 +862,17 @@ class ActivationProgressMonitor:
         elapsed = max(time.time() - self._start_time, 0.0)
         percent: Optional[float]
         eta: Optional[float]
-        if success and self._target_bytes > 0.0:
-            percent = 100.0
-            eta = 0.0
+        if self._target_bytes > 0.0:
+            added_bytes = self._current_added_bytes()
+            if success:
+                self._target_bytes = max(self._target_bytes, added_bytes)
+            if self._target_bytes > 0.0:
+                percent = min(max((added_bytes / self._target_bytes) * 100.0, 0.0), 100.0)
+            else:
+                percent = None
+            eta = 0.0 if success else None
+            if success:
+                percent = 100.0
         else:
             percent = self._last_percent
             eta = None
@@ -945,6 +985,7 @@ def _end_activation(reason: str, *, success: bool, message: Optional[str]) -> No
     try:
         if popped_lockout:
             ui_close_lockout_window(final_text)
+            ui_close_activation_popup(final_text)
         else:
             ui_close_activation_popup(final_text)
     except Exception:
