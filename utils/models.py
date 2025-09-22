@@ -644,18 +644,22 @@ def download_model_with_gui(
                 cache_path.mkdir(parents=True, exist_ok=True)
             except Exception:
                 logger.debug("Unable to ensure cache path %s exists", cache_path)
+            downloads_path = cache_root / "downloads"
+            blobs_path = cache_root / "blobs"
             baseline_store = float(_measure_directory_size(store_path))
             baseline_cache = float(_measure_directory_size(cache_path))
             baseline_activation_cache = float(_measure_directory_size(activation_cache_path))
+            baseline_downloads = float(_measure_directory_size(downloads_path))
+            baseline_blobs = float(_measure_directory_size(blobs_path))
             starting_bytes = max(baseline_store, baseline_cache, baseline_activation_cache)
 
             def monitor_download() -> None:
                 # NOTE: The only trustworthy signals of download progress are the
-                # bytes that have landed on disk in Hugging Face's cache and the
-                # activation cache directory that faster-whisper uses. Please do
-                # not reintroduce tqdm-driven byte counters – they stay frozen
-                # until Explorer probes the folder, which makes the GUI look
-                # broken.
+                # bytes that have landed on disk in Hugging Face's cache, its
+                # staging directories, and the activation cache directory that
+                # faster-whisper uses. Please do not reintroduce tqdm-driven byte
+                # counters – they stay frozen until Explorer probes the folder,
+                # which makes the GUI look broken.
                 last_reported = -1.0
                 last_emitted = 0.0
                 total_value = float(expected_total) if expected_total else 0.0
@@ -672,7 +676,28 @@ def download_model_with_gui(
                         activation_cache_size = float(_measure_directory_size(activation_cache_path))
                     except Exception:
                         activation_cache_size = 0.0
-                    current_size = max(store_size, cache_size, activation_cache_size, starting_bytes)
+                    try:
+                        downloads_size = float(_measure_directory_size(downloads_path))
+                    except Exception:
+                        downloads_size = 0.0
+                    try:
+                        blobs_size = float(_measure_directory_size(blobs_path))
+                    except Exception:
+                        blobs_size = 0.0
+
+                    committed_bytes = max(
+                        store_size,
+                        cache_size,
+                        activation_cache_size,
+                        starting_bytes,
+                    )
+                    inflight_delta = max(
+                        max(0.0, downloads_size - baseline_downloads),
+                        max(0.0, blobs_size - baseline_blobs),
+                    )
+                    current_size = committed_bytes + inflight_delta
+                    if current_size < committed_bytes:
+                        current_size = committed_bytes
                     if expected_total:
                         current_size = min(current_size, float(expected_total))
                     now = time.monotonic()
@@ -695,7 +720,27 @@ def download_model_with_gui(
                     final_activation_cache = float(_measure_directory_size(activation_cache_path))
                 except Exception:
                     final_activation_cache = 0.0
-                final_size = max(final_store, final_cache, final_activation_cache, starting_bytes)
+                try:
+                    final_downloads = float(_measure_directory_size(downloads_path))
+                except Exception:
+                    final_downloads = 0.0
+                try:
+                    final_blobs = float(_measure_directory_size(blobs_path))
+                except Exception:
+                    final_blobs = 0.0
+                committed_bytes = max(
+                    final_store,
+                    final_cache,
+                    final_activation_cache,
+                    starting_bytes,
+                )
+                inflight_delta = max(
+                    max(0.0, final_downloads - baseline_downloads),
+                    max(0.0, final_blobs - baseline_blobs),
+                )
+                final_size = committed_bytes + inflight_delta
+                if final_size < committed_bytes:
+                    final_size = committed_bytes
                 if expected_total:
                     final_size = min(final_size, float(expected_total))
                 if final_size != last_reported:
