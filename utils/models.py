@@ -31,6 +31,7 @@ from utils.system import (
     start_processing_feedback, stop_processing_feedback,
     ui_show_activation_popup, ui_close_activation_popup,
     ui_remind_activation_popup, ui_update_activation_progress,
+    pump_management_events_once,
 )
 from utils.system import get_best_server, CLIENT_ONLY_BUILD
 from utils.ui_theme import apply_modern_theme
@@ -714,12 +715,42 @@ def download_model_with_gui(
         except Exception:
             logger.exception("Failed to update activation popup before model activation")
 
-        activated = initialize_transcriber(
-            force=True,
-            allow_client=True,
-            activation_finalizer=finalize,
+        activation_done = threading.Event()
+        activation_success = {"value": False}
+
+        def _activate() -> None:
+            try:
+                activated = initialize_transcriber(
+                    force=True,
+                    allow_client=True,
+                    activation_finalizer=finalize,
+                )
+                activation_success["value"] = activated is not None
+            finally:
+                activation_done.set()
+
+        activation_thread = threading.Thread(
+            target=_activate,
+            name="CtrlSpeakActivation",
+            daemon=True,
         )
-        return activated is not None
+        activation_thread.start()
+
+        # Keep the activation popup responsive while the model initializes.
+        try:
+            pump_management_events_once()
+            while not activation_done.wait(0.05):
+                pump_management_events_once()
+
+            # Give the completion message a brief opportunity to display and dismiss.
+            end_time = time.time() + 0.6
+            while time.time() < end_time:
+                pump_management_events_once()
+                time.sleep(0.05)
+        finally:
+            activation_thread.join(timeout=0.5)
+
+        return activation_success["value"]
 
 
 # ---------------- Activation progress tracking ----------------

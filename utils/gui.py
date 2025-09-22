@@ -840,6 +840,31 @@ def run_management_ui_loop() -> None:
         _teardown_management_ui()
 
 
+def pump_management_events_once() -> None:
+    """Process pending management UI work without entering the Tk mainloop."""
+
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("Management UI events must be pumped on the main thread")
+
+    root = tk_root
+    if root is None or not root.winfo_exists():
+        return
+
+    # Process any queued management tasks before flushing Tk events so that
+    # worker threads can update the UI while the main thread is busy.
+    _process_management_queue()
+
+    try:
+        root.update_idletasks()
+    except tk.TclError:
+        return
+
+    try:
+        root.update()
+    except tk.TclError:
+        pass
+
+
 def _teardown_management_ui() -> None:
     """Reset management UI globals after the loop exits."""
 
