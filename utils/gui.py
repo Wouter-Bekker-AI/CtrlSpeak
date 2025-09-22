@@ -66,6 +66,8 @@ _busy_popup_progress: Optional[ttk.Progressbar] = None
 _busy_popup_status_label: Optional[ttk.Label] = None
 _busy_popup_close_job: Optional[str] = None
 _busy_popup_progress_mode: str = "indeterminate"
+_busy_popup_stage_var: Optional[tk.StringVar] = None
+_busy_popup_status_var: Optional[tk.StringVar] = None
 
 
 def show_notification_popup(title: str, message: str) -> None:
@@ -102,6 +104,8 @@ def _destroy_busy_popup() -> None:
     _busy_popup_status_label = None
     _busy_popup_close_job = None
     _busy_popup_progress_mode = "indeterminate"
+    _busy_popup_stage_var = None
+    _busy_popup_status_var = None
 
 
 def _call_on_management_ui(callback: Callable[[], None], *, log_message: str) -> None:
@@ -124,8 +128,18 @@ def _set_busy_popup_text(message: str) -> None:
     """Update the activation popup message safely from any thread."""
 
     def _apply() -> None:
+        if _busy_popup_stage_var is not None:
+            try:
+                _busy_popup_stage_var.set(message)
+            except Exception:
+                logger.exception("Failed to update activation popup message text")
+            return
+
         if _busy_popup_label is not None and _busy_popup_label.winfo_exists():
-            _busy_popup_label.configure(text=message)
+            try:
+                _busy_popup_label.configure(text=message)
+            except Exception:
+                logger.exception("Failed to update activation popup message text")
 
     _call_on_management_ui(_apply, log_message="Failed to update activation popup message text")
 
@@ -150,6 +164,7 @@ def show_activation_popup(message: str) -> None:
     """Create or update the activation progress popup."""
     global _busy_popup_win, _busy_popup_label, _busy_popup_progress
     global _busy_popup_status_label, _busy_popup_progress_mode
+    global _busy_popup_stage_var, _busy_popup_status_var
     if tk_root is None or not tk_root.winfo_exists():
         return
 
@@ -157,9 +172,10 @@ def show_activation_popup(message: str) -> None:
 
     if _busy_popup_win is None or not _busy_popup_win.winfo_exists():
         _busy_popup_win = tk.Toplevel(tk_root)
-        _busy_popup_win.title("CtrlSpeak is preparing")
-        _busy_popup_win.geometry("420x220")
-        _busy_popup_win.resizable(False, False)
+        _busy_popup_win.title("CtrlSpeak · Activating model")
+        _busy_popup_win.geometry("760x360")
+        _busy_popup_win.minsize(640, 320)
+        _busy_popup_win.resizable(True, True)
         _busy_popup_win.attributes("-topmost", True)
         try:
             _busy_popup_win.attributes("-toolwindow", True)
@@ -169,36 +185,45 @@ def show_activation_popup(message: str) -> None:
         apply_modern_theme(_busy_popup_win)
         _busy_popup_win.protocol("WM_DELETE_WINDOW", lambda: None)
 
-        container = ttk.Frame(_busy_popup_win, style="Modern.TFrame", padding=(24, 22))
+        container = ttk.Frame(_busy_popup_win, style="Modern.TFrame", padding=(26, 24))
         container.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(container, text="Preparing CtrlSpeak", style="Title.TLabel").pack(anchor=tk.W)
+        card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
+        card.pack(fill=tk.BOTH, expand=True)
 
+        ttk.Label(card, text="Activate speech model", style="Title.TLabel").pack(anchor=tk.W)
+        accent = ttk.Frame(card, style="AccentLine.TFrame")
+        accent.configure(height=2)
+        accent.pack(fill=tk.X, pady=(12, 18))
+
+        _busy_popup_stage_var = tk.StringVar(value=message)
         _busy_popup_label = ttk.Label(
-            container,
-            text=message,
+            card,
+            textvariable=_busy_popup_stage_var,
             style="Body.TLabel",
-            wraplength=360,
+            wraplength=520,
             justify=tk.LEFT,
         )
-        _busy_popup_label.pack(anchor=tk.W, pady=(12, 20))
+        _busy_popup_label.pack(anchor=tk.W, pady=(8, 20))
 
         _busy_popup_progress = ttk.Progressbar(
-            container,
+            card,
             mode="indeterminate",
-            length=340,
+            length=420,
             style="Modern.Horizontal.TProgressbar",
         )
         _busy_popup_progress.pack(fill=tk.X)
         _busy_popup_progress_mode = "indeterminate"
+
+        _busy_popup_status_var = tk.StringVar(value="")
         _busy_popup_status_label = ttk.Label(
-            container,
-            text="",
+            card,
+            textvariable=_busy_popup_status_var,
             style="Caption.TLabel",
             justify=tk.LEFT,
-            wraplength=360,
+            wraplength=520,
         )
-        _busy_popup_status_label.pack(anchor=tk.W, pady=(12, 0))
+        _busy_popup_status_label.pack(anchor=tk.W, pady=(16, 0))
         try:
             _busy_popup_progress.start(12)
         except Exception:
@@ -211,9 +236,9 @@ def show_activation_popup(message: str) -> None:
             logger.exception("Failed to raise activation popup window")
 
     _set_busy_popup_text(message)
-    if _busy_popup_status_label is not None and _busy_popup_status_label.winfo_exists():
+    if _busy_popup_status_var is not None:
         try:
-            _busy_popup_status_label.configure(text="")
+            _busy_popup_status_var.set("")
         except Exception:
             logger.exception("Failed to reset activation popup status text")
     if _busy_popup_progress is not None and _busy_popup_progress_mode == "indeterminate":
@@ -275,19 +300,25 @@ def update_activation_progress(
                     _busy_popup_progress.config(maximum=100.0)
             _busy_popup_progress["value"] = clamped_progress
 
-        if _busy_popup_status_label is not None and _busy_popup_status_label.winfo_exists():
-            parts: list[str] = []
-            if clamped_progress is not None:
-                parts.append(f"Progress: {clamped_progress:.0f}%")
-            elif progress is None:
-                parts.append("Progress: calculating")
-            if elapsed is not None:
-                parts.append(f"Elapsed: {_format_duration(elapsed)}")
-            if eta is not None:
-                parts.append(f"ETA: {_format_duration(eta)}")
-            elif clamped_progress is not None and clamped_progress < 100.0:
-                parts.append("ETA: calculating")
-            status_text = "  •  ".join(parts)
+        parts: list[str] = []
+        if clamped_progress is not None:
+            parts.append(f"Progress: {clamped_progress:.0f}%")
+        elif progress is None:
+            parts.append("Progress: calculating")
+        if elapsed is not None:
+            parts.append(f"Elapsed: {_format_duration(elapsed)}")
+        if eta is not None:
+            parts.append(f"ETA: {_format_duration(eta)}")
+        elif clamped_progress is not None and clamped_progress < 100.0:
+            parts.append("ETA: calculating")
+        status_text = "  •  ".join(parts)
+
+        if _busy_popup_status_var is not None:
+            try:
+                _busy_popup_status_var.set(status_text)
+            except Exception:
+                logger.exception("Failed to update activation popup status text")
+        elif _busy_popup_status_label is not None and _busy_popup_status_label.winfo_exists():
             try:
                 _busy_popup_status_label.configure(text=status_text)
             except Exception:
@@ -331,7 +362,12 @@ def close_activation_popup(message: Optional[str] = None) -> None:
             _busy_popup_progress_mode = "determinate"
         except Exception:
             logger.exception("Failed to update activation popup progress state")
-    if _busy_popup_status_label is not None and _busy_popup_status_label.winfo_exists():
+    if _busy_popup_status_var is not None:
+        try:
+            _busy_popup_status_var.set("")
+        except Exception:
+            logger.exception("Failed to clear activation popup status text")
+    elif _busy_popup_status_label is not None and _busy_popup_status_label.winfo_exists():
         try:
             _busy_popup_status_label.configure(text="")
         except Exception:

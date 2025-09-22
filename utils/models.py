@@ -413,8 +413,6 @@ class DownloadDialog:
 
         self.root.protocol("WM_DELETE_WINDOW", self.cancel)
         self._start_time = time.time()
-        self._last_bytes = 0.0
-        self._last_update = self._start_time
         self._last_progress_was_bytes = False
 
     def cancel(self) -> None:
@@ -472,10 +470,7 @@ class DownloadDialog:
                 percent = 0
             now = time.time()
             elapsed = max(now - self._start_time, 1e-6)
-            window_elapsed = max(now - self._last_update, 1e-6)
-            avg_speed = current / elapsed
-            inst_speed = (current - self._last_bytes) / window_elapsed
-            speed = inst_speed if window_elapsed >= 0.5 else avg_speed
+            speed = current / elapsed if elapsed > 0.0 else 0.0
             downloaded_mb = current / MB_DIVISOR
             total_mb = total / MB_DIVISOR if total and total > 0 else None
             remaining = (total - current) if total and total > current else None
@@ -488,13 +483,11 @@ class DownloadDialog:
                     f"Progress: {percent}%",
                     total_text,
                     f"Downloaded: {downloaded_mb:.2f} MB",
-                    f"Speed: {format_bytes(speed)}/s",
+                    f"Average speed: {format_bytes(speed)}/s" if speed > 0 else "Average speed: calculating",
                     f"ETA: {eta_text}",
                     f"Elapsed: {elapsed_text}",
                 ])
             )
-            self._last_bytes = current
-            self._last_update = now
             self._last_progress_was_bytes = True
         else:
             if self._last_progress_was_bytes:
