@@ -492,6 +492,15 @@ def make_tqdm_class(callback, cancel_event):
                 current = float(getattr(self_inner, "n", 0.0) or 0.0)
                 total_raw = getattr(self_inner, "total", 0.0) or 0.0
                 total = float(total_raw) if total_raw is not None else 0.0
+
+                # Safely get description (some tqdm impls don't have .desc)
+                desc = ""
+                try:
+                    desc = str(getattr(self_inner, "desc", "") or getattr(self_inner, "desc_str", "") or "")
+                except Exception:
+                    desc = ""
+
+                # Pull unit info robustly
                 fmt = getattr(self_inner, "format_dict", None)
                 unit = ""
                 unit_scale = False
@@ -501,16 +510,20 @@ def make_tqdm_class(callback, cancel_event):
                 else:
                     unit = str(getattr(self_inner, "unit", "") or "")
                     unit_scale = bool(getattr(self_inner, "unit_scale", False))
+
                 unit_lower = unit.lower()
                 is_bytes = unit_lower in {"b", "ib", "byte", "bytes"} or (
                     unit_scale and unit_lower.endswith("b")
                 )
-                callback(self_inner.desc or "", current, total, is_bytes)
+
+                callback(desc, current, total, is_bytes)
             except Exception:
                 logger.exception("Progress callback failed")
+
             if cancel_event.is_set():
                 raise CancelledDownload()
     return GuiTqdm
+
 
 
 def _prompt_for_model_install(model_name: str) -> bool:
