@@ -57,7 +57,7 @@ logger = get_logger(__name__)
 
 # -------- Notification helpers --------
 _busy_popup_win: Optional[tk.Toplevel] = None
-_busy_popup_message: Optional[tk.StringVar] = None
+_busy_popup_label: Optional[ttk.Label] = None
 _busy_popup_progress: Optional[ttk.Progressbar] = None
 _busy_popup_close_job: Optional[str] = None
 
@@ -83,21 +83,40 @@ def _cancel_busy_popup_close() -> None:
 
 
 def _destroy_busy_popup() -> None:
-    global _busy_popup_win, _busy_popup_message, _busy_popup_progress, _busy_popup_close_job
+    global _busy_popup_win, _busy_popup_label, _busy_popup_progress, _busy_popup_close_job
     if _busy_popup_win is not None and _busy_popup_win.winfo_exists():
         try:
             _busy_popup_win.destroy()
         except Exception:
             logger.exception("Failed to destroy activation popup window")
     _busy_popup_win = None
-    _busy_popup_message = None
+    _busy_popup_label = None
     _busy_popup_progress = None
     _busy_popup_close_job = None
 
 
+def _set_busy_popup_text(message: str) -> None:
+    """Update the activation popup message safely from any thread."""
+
+    def _apply() -> None:
+        if _busy_popup_label is not None and _busy_popup_label.winfo_exists():
+            _busy_popup_label.configure(text=message)
+
+    try:
+        _apply()
+    except RuntimeError:
+        if tk_root is not None:
+            try:
+                tk_root.after(0, _apply)
+            except Exception:
+                logger.exception("Failed to schedule activation popup message update")
+    except Exception:
+        logger.exception("Failed to update activation popup message text")
+
+
 def show_activation_popup(message: str) -> None:
     """Create or update the activation progress popup."""
-    global _busy_popup_win, _busy_popup_message, _busy_popup_progress
+    global _busy_popup_win, _busy_popup_label, _busy_popup_progress
     if tk_root is None or not tk_root.winfo_exists():
         return
 
@@ -122,14 +141,14 @@ def show_activation_popup(message: str) -> None:
 
         ttk.Label(container, text="Preparing CtrlSpeak", style="Title.TLabel").pack(anchor=tk.W)
 
-        _busy_popup_message = tk.StringVar(value=message)
-        ttk.Label(
+        _busy_popup_label = ttk.Label(
             container,
-            textvariable=_busy_popup_message,
+            text=message,
             style="Body.TLabel",
             wraplength=360,
             justify=tk.LEFT,
-        ).pack(anchor=tk.W, pady=(12, 20))
+        )
+        _busy_popup_label.pack(anchor=tk.W, pady=(12, 20))
 
         _busy_popup_progress = ttk.Progressbar(
             container,
@@ -149,8 +168,7 @@ def show_activation_popup(message: str) -> None:
         except Exception:
             logger.exception("Failed to raise activation popup window")
 
-    if _busy_popup_message is not None:
-        _busy_popup_message.set(message)
+    _set_busy_popup_text(message)
     if _busy_popup_progress is not None:
         try:
             _busy_popup_progress.config(mode="indeterminate")
@@ -201,8 +219,8 @@ def close_activation_popup(message: Optional[str] = None) -> None:
         except Exception:
             logger.exception("Failed to update activation popup progress state")
 
-    if message and _busy_popup_message is not None:
-        _busy_popup_message.set(message)
+    if message:
+        _set_busy_popup_text(message)
 
     if message:
         try:
