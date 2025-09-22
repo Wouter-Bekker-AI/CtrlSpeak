@@ -29,6 +29,7 @@ from utils.system import (
     notify, notify_error, format_exception_details,
     get_config_dir, save_settings,
     start_processing_feedback, stop_processing_feedback,
+    ui_show_activation_popup, ui_close_activation_popup,
 )
 from utils.system import get_best_server, CLIENT_ONLY_BUILD
 from utils.ui_theme import apply_modern_theme
@@ -197,14 +198,32 @@ def install_cuda_runtime_with_progress(parent=None) -> bool:
         "--extra-index-url", "https://pypi.nvidia.com",
         *pkgs
     ]
-    with activation_guard("installing CUDA runtime components"):
+    with activation_guard(
+        "installing CUDA runtime components",
+        busy_message=(
+            "CtrlSpeak is installing CUDA runtime components required for GPU transcription. "
+            "Please wait for this to finish."
+        ),
+        success_message=(
+            "CUDA runtime components are ready. CtrlSpeak will continue preparing the Whisper model."
+        ),
+        failure_message=(
+            "CUDA runtime installation did not complete. CtrlSpeak will continue without GPU acceleration."
+        ),
+    ) as complete:
         rc = _run_cmd_stream(cmd, timeout=600)
         if rc != 0:
             notify("CUDA runtime installation failed (pip returned non-zero).")
+            complete(False, "CUDA runtime installation failed. CtrlSpeak will continue using the CPU.")
             return False
         # refresh DLL search path + verify
         time.sleep(0.5)
-        return cuda_runtime_ready(ignore_preference=True)
+        ready = cuda_runtime_ready(ignore_preference=True)
+        if not ready:
+            complete(False, "CtrlSpeak installed the CUDA runtime but could not validate the GPU libraries.")
+            return False
+        complete(True, "CUDA runtime components were installed successfully. Continuing activation…")
+        return True
 
 
 # ---------------- Download dialog (GUI) ----------------
@@ -434,27 +453,96 @@ _activation_lock = threading.Lock()
 _activation_reasons: list[str] = []
 
 
-def _begin_activation(reason: str) -> None:
+def _activation_busy_message(reason: str) -> str:
+    clean = reason.rstrip(". ")
+    return (
+        "CtrlSpeak is busy "
+        f"{clean}. Please wait for this to finish before using CtrlSpeak."
+    )
+
+
+def _activation_success_message(reason: str) -> str:
+    clean = reason.rstrip(". ")
+    return f"Finished {clean}. CtrlSpeak is ready to use."
+
+
+def _activation_failure_message(reason: str) -> str:
+    clean = reason.rstrip(". ")
+    return (
+        f"CtrlSpeak could not finish {clean}. "
+        "Please review the logs or try again."
+    )
+
+
+def _begin_activation(reason: str, busy_message: str) -> None:
     with _activation_lock:
         _activation_reasons.append(reason)
         _activation_event.set()
+    try:
+        ui_show_activation_popup(busy_message)
+    except Exception:
+        logger.exception("Failed to present activation busy popup")
 
 
-def _end_activation() -> None:
+def _end_activation(reason: str, *, success: bool, message: Optional[str]) -> None:
+    new_top: Optional[str] = None
     with _activation_lock:
         if _activation_reasons:
             _activation_reasons.pop()
-        if not _activation_reasons:
+        if _activation_reasons:
+            new_top = _activation_reasons[-1]
+        else:
             _activation_event.clear()
+    if new_top:
+        try:
+            ui_show_activation_popup(_activation_busy_message(new_top))
+        except Exception:
+            logger.exception("Failed to refresh activation popup message")
+        return
+
+    final_text = message
+    if final_text is None:
+        final_text = (
+            _activation_success_message(reason)
+            if success else _activation_failure_message(reason)
+        )
+    try:
+        ui_close_activation_popup(final_text)
+    except Exception:
+        logger.exception("Failed to close activation popup")
 
 
 @contextmanager
-def activation_guard(reason: str):
-    _begin_activation(reason)
+def activation_guard(
+    reason: str,
+    *,
+    busy_message: Optional[str] = None,
+    success_message: Optional[str] = None,
+    failure_message: Optional[str] = None,
+):
+    """Track long-running activation work and drive the busy popup lifecycle."""
+    busy = busy_message or _activation_busy_message(reason)
+    _begin_activation(reason, busy)
+    outcome = {"success": True, "message": success_message}
+
+    def finalize(success: bool, message: Optional[str] = None) -> None:
+        outcome["success"] = bool(success)
+        outcome["message"] = message
+
     try:
-        yield
-    finally:
-        _end_activation()
+        yield finalize
+    except Exception:
+        _end_activation(reason, success=False, message=failure_message)
+        raise
+    else:
+        final_message = outcome["message"]
+        if outcome["success"]:
+            if final_message is None:
+                final_message = _activation_success_message(reason)
+        else:
+            if final_message is None:
+                final_message = failure_message or _activation_failure_message(reason)
+        _end_activation(reason, success=outcome["success"], message=final_message)
 
 
 def is_activation_in_progress() -> bool:
@@ -467,10 +555,7 @@ def describe_activation_block() -> Optional[str]:
     with _activation_lock:
         reason = _activation_reasons[-1] if _activation_reasons else None
     if reason:
-        return (
-            "CtrlSpeak is busy: "
-            f"{reason}. Please wait for this to finish before using CtrlSpeak."
-        )
+        return _activation_busy_message(reason)
     return "CtrlSpeak is preparing resources. Please wait before using the app."
 
 def _force_cpu_env() -> None:
@@ -600,7 +685,12 @@ def initialize_transcriber(
         compute_type = resolve_compute_type(device)
         model_name = get_current_model_name()
 
-        with activation_guard("activating the Whisper model"):
+        with activation_guard(
+            "activating the Whisper model",
+            busy_message="CtrlSpeak is activating the Whisper model. Please wait for the model to finish preparing.",
+            success_message="The Whisper model is ready. You may now use CtrlSpeak.",
+            failure_message="CtrlSpeak could not activate the Whisper model."
+        ) as complete:
             if device == "cpu":
                 _force_cpu_env()
 
@@ -612,6 +702,7 @@ def initialize_transcriber(
                     download_root=str(MODEL_ROOT_PATH),
                 )
                 print(f"Whisper model '{model_name}' ready on {device} ({compute_type})")
+                complete(True, f"The Whisper model '{model_name}' is ready on {device.upper()} ({compute_type}).")
                 return whisper_model
             except Exception as exc:
                 print(f"Failed to load model on {device}: {exc}")
@@ -626,11 +717,19 @@ def initialize_transcriber(
                         )
                         notify("Running CtrlSpeak transcription on CPU fallback. Set CTRLSPEAK_DEVICE=cpu to suppress this message.")
                         warned_cuda_unavailable = True
+                        complete(
+                            True,
+                            f"The Whisper model '{model_name}' is ready on CPU fallback. CtrlSpeak will continue using the CPU.",
+                        )
                         return whisper_model
                     except Exception as cpu_exc:
                         print(f"CPU fallback failed: {cpu_exc}")
                         logger.exception("CPU fallback model load failed")
                 notify("Unable to initialize the transcription model. Please check your installation and try again.")
+                complete(
+                    False,
+                    "CtrlSpeak was unable to activate the Whisper model. Please check your installation and try again.",
+                )
                 whisper_model = None
                 return None
 
