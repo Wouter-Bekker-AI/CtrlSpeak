@@ -488,12 +488,12 @@ _activation_event = threading.Event()
 _activation_lock = threading.Lock()
 _activation_reasons: list[str] = []
 
-
+  
 def is_model_loaded() -> bool:
     with model_lock:
         return whisper_model is not None
 
-
+      
 def _activation_busy_message(reason: str) -> str:
     clean = reason.rstrip(". ")
     return (
