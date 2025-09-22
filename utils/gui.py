@@ -69,6 +69,11 @@ _busy_popup_progress_mode: str = "indeterminate"
 _busy_popup_stage_var: Optional[tk.StringVar] = None
 _busy_popup_status_var: Optional[tk.StringVar] = None
 
+_lockout_win: Optional[tk.Toplevel] = None
+_lockout_message_var: Optional[tk.StringVar] = None
+_lockout_close_job: Optional[str] = None
+_lockout_progress: Optional[ttk.Progressbar] = None
+
 
 def show_notification_popup(title: str, message: str) -> None:
     """Display a simple informational dialog."""
@@ -144,6 +149,151 @@ def _set_busy_popup_text(message: str) -> None:
     _call_on_management_ui(_apply, log_message="Failed to update activation popup message text")
 
 
+def _cancel_lockout_close() -> None:
+    global _lockout_close_job
+    if _lockout_win is not None and _lockout_close_job is not None:
+        try:
+            _lockout_win.after_cancel(_lockout_close_job)
+        except Exception:
+            logger.exception("Failed to cancel lockout window dismissal")
+    _lockout_close_job = None
+
+
+def _destroy_lockout_window() -> None:
+    global _lockout_win, _lockout_message_var, _lockout_close_job, _lockout_progress
+    if _lockout_win is not None and _lockout_win.winfo_exists():
+        try:
+            _lockout_win.destroy()
+        except Exception:
+            logger.exception("Failed to destroy lockout window")
+    _lockout_win = None
+    _lockout_message_var = None
+    _lockout_close_job = None
+    if _lockout_progress is not None:
+        try:
+            _lockout_progress.stop()
+        except Exception:
+            pass
+    _lockout_progress = None
+
+
+def show_lockout_window(message: str) -> None:
+    global _lockout_win, _lockout_message_var, _lockout_progress
+    if tk_root is None or not tk_root.winfo_exists():
+        return
+
+    _cancel_lockout_close()
+
+    if _lockout_win is None or not _lockout_win.winfo_exists():
+        _lockout_win = tk.Toplevel(tk_root)
+        _lockout_win.title("CtrlSpeak · Preparing CtrlSpeak")
+        _lockout_win.geometry("720x340")
+        _lockout_win.minsize(580, 300)
+        _lockout_win.resizable(True, True)
+        _lockout_win.attributes("-topmost", True)
+        try:
+            _lockout_win.attributes("-toolwindow", True)
+        except Exception:
+            pass
+        apply_modern_theme(_lockout_win)
+        _lockout_win.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        container = ttk.Frame(_lockout_win, style="Modern.TFrame", padding=(26, 24))
+        container.pack(fill=tk.BOTH, expand=True)
+
+        card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
+        card.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(card, text="Preparing CtrlSpeak", style="Title.TLabel").pack(anchor=tk.W)
+        accent = ttk.Frame(card, style="AccentLine.TFrame")
+        accent.configure(height=2)
+        accent.pack(fill=tk.X, pady=(12, 18))
+
+        _lockout_message_var = tk.StringVar(master=_lockout_win, value=message)
+        message_label = ttk.Label(
+            card,
+            textvariable=_lockout_message_var,
+            style="Body.TLabel",
+            wraplength=540,
+            justify=tk.LEFT,
+        )
+        message_label.pack(anchor=tk.W, fill=tk.X, expand=True)
+
+        _lockout_progress = ttk.Progressbar(
+            card,
+            mode="indeterminate",
+            length=380,
+            style="Modern.Horizontal.TProgressbar",
+        )
+        _lockout_progress.pack(fill=tk.X, pady=(20, 0))
+        try:
+            _lockout_progress.start(12)
+        except Exception:
+            logger.exception("Failed to start lockout spinner")
+    else:
+        try:
+            _lockout_win.deiconify()
+            _lockout_win.lift()
+        except Exception:
+            logger.exception("Failed to raise lockout window")
+
+    if _lockout_message_var is not None:
+        try:
+            _lockout_message_var.set(message)
+        except Exception:
+            logger.exception("Failed to set lockout message text")
+
+    if _lockout_progress is not None:
+        try:
+            _lockout_progress.start(12)
+        except Exception:
+            pass
+
+    try:
+        _lockout_win.lift()
+        _lockout_win.focus_force()
+    except Exception:
+        pass
+
+
+def update_lockout_message(message: str) -> None:
+    _call_on_management_ui(
+        lambda: show_lockout_window(message),
+        log_message="Failed to update lockout message text",
+    )
+
+
+def close_lockout_window(message: Optional[str] = None) -> None:
+    global _lockout_close_job
+    if _lockout_win is None or not _lockout_win.winfo_exists():
+        return
+
+    _cancel_lockout_close()
+
+    if _lockout_message_var is not None and message:
+        try:
+            _lockout_message_var.set(message)
+        except Exception:
+            logger.exception("Failed to set lockout completion message")
+
+    if _lockout_progress is not None:
+        try:
+            _lockout_progress.stop()
+        except Exception:
+            pass
+
+    if message:
+        try:
+            _lockout_win.lift()
+        except Exception:
+            pass
+        try:
+            _lockout_close_job = _lockout_win.after(2400, _destroy_lockout_window)
+        except Exception:
+            logger.exception("Failed to schedule lockout window dismissal")
+            _destroy_lockout_window()
+    else:
+        _destroy_lockout_window()
 def _format_duration(seconds: Optional[float]) -> str:
     if seconds is None:
         return "—"
@@ -196,7 +346,7 @@ def show_activation_popup(message: str) -> None:
         accent.configure(height=2)
         accent.pack(fill=tk.X, pady=(12, 18))
 
-        _busy_popup_stage_var = tk.StringVar(value=message)
+        _busy_popup_stage_var = tk.StringVar(master=_busy_popup_win, value=message)
         _busy_popup_label = ttk.Label(
             card,
             textvariable=_busy_popup_stage_var,
@@ -215,7 +365,7 @@ def show_activation_popup(message: str) -> None:
         _busy_popup_progress.pack(fill=tk.X)
         _busy_popup_progress_mode = "indeterminate"
 
-        _busy_popup_status_var = tk.StringVar(value="")
+        _busy_popup_status_var = tk.StringVar(master=_busy_popup_win, value="")
         _busy_popup_status_label = ttk.Label(
             card,
             textvariable=_busy_popup_status_var,
@@ -330,19 +480,32 @@ def update_activation_progress(
 def focus_activation_popup(message: Optional[str] = None) -> None:
     """Bring the activation popup to the foreground."""
     if message:
-        show_activation_popup(message)
+        if _busy_popup_win is not None and _busy_popup_win.winfo_exists():
+            show_activation_popup(message)
+        elif _lockout_win is not None and _lockout_win.winfo_exists():
+            show_lockout_window(message)
+        else:
+            show_activation_popup(message)
         return
 
-    if _busy_popup_win is None or not _busy_popup_win.winfo_exists():
+    if _busy_popup_win is not None and _busy_popup_win.winfo_exists():
+        _cancel_busy_popup_close()
+        try:
+            _busy_popup_win.deiconify()
+            _busy_popup_win.lift()
+            _busy_popup_win.focus_force()
+        except Exception:
+            pass
         return
 
-    _cancel_busy_popup_close()
-    try:
-        _busy_popup_win.deiconify()
-        _busy_popup_win.lift()
-        _busy_popup_win.focus_force()
-    except Exception:
-        pass
+    if _lockout_win is not None and _lockout_win.winfo_exists():
+        _cancel_lockout_close()
+        try:
+            _lockout_win.deiconify()
+            _lockout_win.lift()
+            _lockout_win.focus_force()
+        except Exception:
+            pass
 
 
 def close_activation_popup(message: Optional[str] = None) -> None:

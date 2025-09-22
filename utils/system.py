@@ -210,6 +210,28 @@ def ui_show_activation_popup(message: str) -> None:
             logger.exception("Failed to print activation popup fallback message")
 
 
+def ui_show_lockout_window(message: str) -> None:
+    """Display (or update) the first-run lockout window."""
+    try:
+        from utils.gui import (
+            ensure_management_ui_thread,
+            show_lockout_window,
+            is_management_ui_thread,
+        )
+
+        ensure_management_ui_thread()
+        if is_management_ui_thread():
+            show_lockout_window(message)
+        else:
+            enqueue_management_task(show_lockout_window, message)
+    except Exception:
+        logger.exception("Failed to show lockout window")
+        try:
+            print(f"CtrlSpeak: {message}")
+        except Exception:
+            logger.exception("Failed to print lockout window fallback message")
+
+
 def ui_remind_activation_popup(message: str | None = None) -> None:
     """Bring the activation popup to the foreground (optionally updating its text)."""
     try:
@@ -224,6 +246,17 @@ def ui_remind_activation_popup(message: str | None = None) -> None:
                 print(f"CtrlSpeak: {message}")
             except Exception:
                 logger.exception("Failed to print activation popup focus message")
+
+
+def ui_update_lockout_message(message: str) -> None:
+    """Update the message shown in the lockout window."""
+    try:
+        from utils.gui import ensure_management_ui_thread, update_lockout_message
+
+        ensure_management_ui_thread()
+        enqueue_management_task(update_lockout_message, message)
+    except Exception:
+        logger.exception("Failed to update lockout message")
 
 
 def ui_close_activation_popup(message: str | None = None) -> None:
@@ -247,6 +280,24 @@ def ui_close_activation_popup(message: str | None = None) -> None:
                 print(f"CtrlSpeak: {message}")
             except Exception:
                 logger.exception("Failed to print activation popup completion message")
+
+
+def ui_close_lockout_window(message: str | None = None) -> None:
+    """Close the lockout window, optionally after showing a completion message."""
+    try:
+        from utils.gui import (
+            ensure_management_ui_thread,
+            close_lockout_window,
+            is_management_ui_thread,
+        )
+
+        ensure_management_ui_thread()
+        if is_management_ui_thread():
+            close_lockout_window(message)
+        else:
+            enqueue_management_task(close_lockout_window, message)
+    except Exception:
+        logger.exception("Failed to close lockout window")
 
 
 def ui_update_activation_progress(

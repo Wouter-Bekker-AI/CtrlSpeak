@@ -9,7 +9,10 @@ import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from queue import Queue, Empty
-from typing import Optional, List, Set, Callable
+from typing import Optional, List, Set, Callable, Tuple
+from urllib.parse import quote
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 
 import ctypes
 import ctranslate2
@@ -19,8 +22,7 @@ try:  # pragma: no cover - optional dependency rarely installed
 except ImportError:
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
-from huggingface_hub import snapshot_download
-from tqdm import tqdm
+from huggingface_hub import HfApi
 import tkinter as tk
 from tkinter import ttk
 
@@ -30,7 +32,7 @@ from utils.system import (
     get_config_dir, save_settings,
     start_processing_feedback, stop_processing_feedback,
     ui_show_activation_popup, ui_close_activation_popup,
-    ui_remind_activation_popup, ui_update_activation_progress,
+    ui_show_lockout_window, ui_update_lockout_message, ui_close_lockout_window,
     pump_management_events_once,
 )
 from utils.system import get_best_server, CLIENT_ONLY_BUILD
@@ -294,6 +296,8 @@ def format_bytes(value: float) -> str:
 
 
 MB_DIVISOR = 1024.0 * 1024.0
+DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+DOWNLOAD_USER_AGENT = "CtrlSpeak Downloader/1.0"
 
 
 def format_duration(seconds: float) -> str:
@@ -402,8 +406,40 @@ class DownloadDialog:
                                         style="Modern.Horizontal.TProgressbar")
         self.progress.pack(fill=tk.X, pady=(12, 8))
 
+        self._start_time = time.time()
+
+        metrics = ttk.Frame(card, style="ModernCardInner.TFrame")
+        metrics.pack(fill=tk.X, pady=(8, 0))
+
+        self.metric_vars: dict[str, tk.StringVar] = {
+            "progress": tk.StringVar(),
+            "file_size": tk.StringVar(),
+            "downloaded": tk.StringVar(),
+            "speed": tk.StringVar(),
+            "eta": tk.StringVar(),
+            "elapsed": tk.StringVar(),
+        }
+
+        for label_text, key in [
+            ("Progress", "progress"),
+            ("File size", "file_size"),
+            ("Downloaded", "downloaded"),
+            ("Average speed", "speed"),
+            ("ETA", "eta"),
+            ("Elapsed", "elapsed"),
+        ]:
+            column_frame = ttk.Frame(metrics, style="ModernCardInner.TFrame")
+            column_frame.pack(side=tk.LEFT, padx=(0, 24))
+
+            ttk.Label(column_frame, text=f"{label_text}:", style="Caption.TLabel").pack(anchor=tk.W)
+            ttk.Label(
+                column_frame,
+                textvariable=self.metric_vars[key],
+                style="Caption.TLabel",
+            ).pack(anchor=tk.W)
         self.status_var = tk.StringVar(value="")
-        ttk.Label(card, textvariable=self.status_var, style="Caption.TLabel").pack(anchor=tk.W)
+        ttk.Label(card, textvariable=self.status_var, style="Caption.TLabel", wraplength=360,
+                  justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 0))
 
         actions = ttk.Frame(card, style="ModernCardInner.TFrame")
         actions.pack(fill=tk.X, pady=(20, 0))
@@ -412,14 +448,18 @@ class DownloadDialog:
         self.cancel_button.pack(side=tk.RIGHT)
 
         self.root.protocol("WM_DELETE_WINDOW", self.cancel)
-        self._start_time = time.time()
         self._last_progress_was_bytes = False
+        self._progress_updates_started = False
+        self._placeholder_after_id: Optional[str] = None
+        self._update_placeholder_status()
+        self._schedule_placeholder_refresh()
 
     def cancel(self) -> None:
         if self.result is None:
             self.result = "cancelled"
             self.cancel_event.set()
             self.status_var.set("Cancelling...")
+            self._cancel_placeholder_refresh()
 
     def _schedule_close(self, delay_ms: int = 0) -> None:
         if self._close_scheduled:
@@ -448,6 +488,11 @@ class DownloadDialog:
             if desc_clean:
                 self.stage_var.set(f"Downloading: {desc_clean}")
         if is_bytes:
+            if not self._progress_updates_started:
+                self._progress_updates_started = True
+                self._cancel_placeholder_refresh()
+            else:
+                self.status_var.set("")
             if total and total > 0:
                 percent_float = max(min((current / total) * 100.0, 100.0), 0.0)
                 if self.progress["mode"] != "determinate":
@@ -477,19 +522,22 @@ class DownloadDialog:
             eta_seconds = (remaining / speed) if (remaining is not None and speed > 1e-6) else None
             eta_text = format_duration(eta_seconds) if eta_seconds is not None else "calculating"
             elapsed_text = format_duration(elapsed)
-            total_text = f"File size: {total_mb:.2f} MB" if total_mb is not None else "File size: unknown"
-            self.status_var.set(
-                "  •  ".join([
-                    f"Progress: {percent}%",
-                    total_text,
-                    f"Downloaded: {downloaded_mb:.2f} MB",
-                    f"Average speed: {format_bytes(speed)}/s" if speed > 0 else "Average speed: calculating",
-                    f"ETA: {eta_text}",
-                    f"Elapsed: {elapsed_text}",
-                ])
+            total_text = f"{total_mb:.2f} MB" if total_mb is not None else "calculating"
+            self.metric_vars["progress"].set(f"{percent}%")
+            self.metric_vars["file_size"].set(total_text)
+            self.metric_vars["downloaded"].set(f"{downloaded_mb:.2f} MB")
+            self.metric_vars["speed"].set(
+                f"{format_bytes(speed)}/s" if speed > 0 else "calculating"
             )
+            self.metric_vars["eta"].set(eta_text)
+            self.metric_vars["elapsed"].set(elapsed_text)
             self._last_progress_was_bytes = True
         else:
+            if not self._progress_updates_started:
+                self._progress_updates_started = True
+                self._cancel_placeholder_refresh()
+            else:
+                self.status_var.set("")
             if self._last_progress_was_bytes:
                 # Ignore non-byte updates once byte progress has started to avoid regressions.
                 return
@@ -499,21 +547,62 @@ class DownloadDialog:
             now = time.time()
             elapsed = max(now - self._start_time, 1e-6)
             percent = 0
-            progress_parts = []
             if total and total > 0:
                 percent = min(max(int((current / total) * 100), 0), 100)
-                progress_parts.append(f"Progress: {percent}%")
-                progress_parts.append(f"Items: {int(current)}/{int(total)}")
+                progress_text = f"{percent}%"
             else:
-                progress_parts.append(f"Items processed: {int(current)}")
+                progress_text = f"Items: {int(current)}"
             elapsed_text = format_duration(elapsed)
-            progress_parts.extend([
-                "File size: unknown",
-                "Downloaded: calculating",
-                "Speed: calculating",
-                f"Elapsed: {elapsed_text}",
-            ])
-            self.status_var.set("  •  ".join(progress_parts))
+            self.metric_vars["progress"].set(progress_text)
+            self.metric_vars["file_size"].set("calculating")
+            self.metric_vars["downloaded"].set("calculating")
+            self.metric_vars["speed"].set("calculating")
+            self.metric_vars["eta"].set("calculating")
+            self.metric_vars["elapsed"].set(elapsed_text)
+
+    def _placeholder_status_text(self) -> dict[str, str]:
+        elapsed = max(time.time() - self._start_time, 0.0)
+        elapsed_text = format_duration(elapsed)
+        return {
+            "progress": "0%",
+            "file_size": "calculating",
+            "downloaded": "0.00 MB",
+            "speed": "calculating",
+            "eta": "calculating",
+            "elapsed": elapsed_text,
+        }
+
+    def _update_placeholder_status(self) -> None:
+        self.status_var.set("")
+        placeholder_values = self._placeholder_status_text()
+        for key, value in placeholder_values.items():
+            self.metric_vars[key].set(value)
+
+    def _schedule_placeholder_refresh(self) -> None:
+        if self._placeholder_after_id is not None or self.result is not None:
+            return
+
+        def _tick() -> None:
+            self._placeholder_after_id = None
+            if self._progress_updates_started or self.result is not None:
+                return
+            self._update_placeholder_status()
+            self._schedule_placeholder_refresh()
+
+        try:
+            self._placeholder_after_id = self.root.after(500, _tick)
+        except Exception:
+            logger.exception("Failed to schedule placeholder status refresh")
+
+    def _cancel_placeholder_refresh(self) -> None:
+        if self._placeholder_after_id is None:
+            return
+        try:
+            self.root.after_cancel(self._placeholder_after_id)
+        except Exception:
+            logger.exception("Failed to cancel placeholder status refresh")
+        finally:
+            self._placeholder_after_id = None
 
     def _process_queue(self) -> None:
         while True:
@@ -550,20 +639,22 @@ class DownloadDialog:
 
     def run(self) -> str:
         self.root.after(100, self._process_queue)
+        self.root.after(80, self._pump_management_events)
         self.root.mainloop()
         return self.result or "cancelled"
 
-
-def make_tqdm_class(cancel_event: threading.Event):
-    class GuiTqdm(tqdm):
-        def update(self_inner, n=1):
-            if cancel_event.is_set():
-                raise CancelledDownload()
-            return super().update(n)
-
-    return GuiTqdm
-
-
+    def _pump_management_events(self) -> None:
+        if self.result is not None:
+            return
+        try:
+            pump_management_events_once()
+        except Exception:
+            logger.exception("Failed to pump management UI while downloading model")
+        finally:
+            try:
+                self.root.after(120, self._pump_management_events)
+            except Exception:
+                logger.exception("Failed to schedule management UI pump during download")
 
 def _prompt_for_model_install(model_name: str) -> bool:
     # Small confirm; default to Install if headless
@@ -595,70 +686,144 @@ def download_model_with_gui(
     dialog = DownloadDialog(model_name, progress_queue, cancel_event)
 
     def worker() -> None:
-        monitor_stop = threading.Event()
-        monitor_thread: Optional[threading.Thread] = None
         success = False
         try:
             repo_id = _model_repo_id(model_name)
             progress_queue.put(("stage", f"Connecting to Hugging Face ({repo_id})"))
             store_path = model_store_path_for(model_name)
             store_path.mkdir(parents=True, exist_ok=True)
-            expected_total = EXPECTED_MODEL_BYTES.get(model_name)
 
-            def monitor_download() -> None:
-                last_reported = -1.0
-                last_emitted = 0.0
-                total_value = float(expected_total) if expected_total else 0.0
-                while True:
-                    current_size = float(_measure_directory_size(store_path))
-                    if expected_total:
-                        current_size = min(current_size, float(expected_total))
-                    now = time.monotonic()
-                    if current_size != last_reported or (now - last_emitted) >= 2.0:
-                        progress_queue.put(("progress", "", current_size, total_value, True))
-                        last_reported = current_size
-                        last_emitted = now
-                    if monitor_stop.wait(1.0):
-                        break
-
-                final_size = float(_measure_directory_size(store_path))
-                if expected_total:
-                    final_size = min(final_size, float(expected_total))
-                if final_size != last_reported:
-                    total_value = float(expected_total) if expected_total else 0.0
-                    progress_queue.put(("progress", "", final_size, total_value, True))
-
-            monitor_thread = threading.Thread(target=monitor_download, daemon=True)
-            monitor_thread.start()
-            progress_queue.put(("stage", f"Downloading {model_name} model files…"))
-
-            gui_tqdm = make_tqdm_class(cancel_event)
-            import importlib
-
-            file_download_module = importlib.import_module("huggingface_hub.file_download")
-            utils_tqdm_module = importlib.import_module("huggingface_hub.utils.tqdm")
-            original_file_tqdm = getattr(file_download_module, "tqdm", None)
-            original_utils_tqdm = getattr(utils_tqdm_module, "tqdm", None)
-
-            file_download_module.tqdm = gui_tqdm
-            if original_utils_tqdm is not None:
-                utils_tqdm_module.tqdm = gui_tqdm
+            api = HfApi()
             try:
-                snapshot_download(
-                    repo_id=repo_id,
-                    local_dir=str(store_path),
-                    local_dir_use_symlinks=False,
-                    resume_download=True,
-                    max_workers=4,
-                    tqdm_class=gui_tqdm,
-                )
-            finally:
-                if original_file_tqdm is not None:
-                    file_download_module.tqdm = original_file_tqdm
-                if original_utils_tqdm is not None:
-                    utils_tqdm_module.tqdm = original_utils_tqdm
+                try:
+                    model_info = api.model_info(repo_id, files_metadata=True)
+                except TypeError:
+                    # Older huggingface-hub versions do not accept files_metadata
+                    model_info = api.model_info(repo_id)
+            except Exception as exc:
+                progress_queue.put(("error", f"Failed to query repository: {exc}"))
+                logger.exception("Unable to query Hugging Face model info for %s", repo_id)
+                return
+
+            files: list[dict[str, Optional[int]]] = []
+            total_bytes = 0
+            for sibling in getattr(model_info, "siblings", []) or []:
+                path = getattr(sibling, "rfilename", None)
+                if not path:
+                    continue
+                size = getattr(sibling, "size", None)
+                size_value: Optional[int]
+                try:
+                    size_value = int(size) if size is not None else None
+                except (TypeError, ValueError):
+                    size_value = None
+                if size_value is not None and size_value > 0:
+                    total_bytes += size_value
+                files.append({"path": path, "size": size_value})
+
+            if not files:
+                progress_queue.put(("error", "No files available for download."))
+                return
+
+            files.sort(key=lambda item: item["path"])
+
+            if total_bytes <= 0:
+                expected = EXPECTED_MODEL_BYTES.get(model_name)
+                if expected is not None and expected > 0:
+                    total_bytes = expected
+
+            progress_queue.put(("stage", f"Downloading {model_name} model files…"))
+            downloaded_bytes = 0
+            progress_queue.put(("progress", "", float(downloaded_bytes), float(total_bytes), True))
+
+            encoded_repo = quote(repo_id, safe="/")
+
+            for entry in files:
+                if cancel_event.is_set():
+                    raise CancelledDownload()
+                rel_path = entry["path"]
+                file_size = entry["size"]
+                dest_path = store_path / rel_path
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                temp_path = dest_path.with_name(dest_path.name + ".part")
+                encoded_rel = quote(rel_path.replace("\\", "/"))
+                url = f"https://huggingface.co/{encoded_repo}/resolve/main/{encoded_rel}?download=true"
+
+                if temp_path.exists():
+                    try:
+                        temp_path.unlink()
+                    except Exception:
+                        logger.debug("Unable to remove stale partial file %s", temp_path)
+
+                if file_size is None:
+                    try:
+                        head_req = Request(url, method="HEAD", headers={"User-Agent": DOWNLOAD_USER_AGENT})
+                        with urlopen(head_req) as head_resp:
+                            cl = head_resp.headers.get("Content-Length") or head_resp.getheader("Content-Length")
+                            if cl:
+                                file_size = int(cl)
+                                entry["size"] = file_size
+                                total_bytes += file_size
+                                progress_queue.put(("progress", "", float(downloaded_bytes), float(total_bytes), True))
+                    except Exception:
+                        file_size = None
+
+                if dest_path.exists():
+                    try:
+                        dest_path.unlink()
+                    except Exception:
+                        logger.debug("Unable to remove existing file %s before download", dest_path)
+
+                try:
+                    req = Request(url, method="GET", headers={"User-Agent": DOWNLOAD_USER_AGENT})
+                    with urlopen(req) as response, open(temp_path, "wb") as output:
+                        while True:
+                            chunk = response.read(DOWNLOAD_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            if cancel_event.is_set():
+                                raise CancelledDownload()
+                            output.write(chunk)
+                            chunk_len = len(chunk)
+                            downloaded_bytes += chunk_len
+                            progress_queue.put(("progress", rel_path, float(downloaded_bytes), float(total_bytes), True))
+                    temp_path.replace(dest_path)
+                except CancelledDownload:
+                    try:
+                        if temp_path.exists():
+                            temp_path.unlink()
+                    except Exception:
+                        logger.debug("Failed to remove partial download %s", temp_path)
+                    raise
+                except HTTPError as exc:
+                    try:
+                        if temp_path.exists():
+                            temp_path.unlink()
+                    except Exception:
+                        logger.debug("Failed to remove partial download %s after HTTP error", temp_path)
+                    progress_queue.put(("error", f"HTTP error while downloading {rel_path}: {exc.code} {exc.reason}"))
+                    return
+                except URLError as exc:
+                    try:
+                        if temp_path.exists():
+                            temp_path.unlink()
+                    except Exception:
+                        logger.debug("Failed to remove partial download %s after network error", temp_path)
+                    progress_queue.put(("error", f"Network error while downloading {rel_path}: {exc.reason}"))
+                    return
+                except Exception as exc:
+                    try:
+                        if temp_path.exists():
+                            temp_path.unlink()
+                    except Exception:
+                        logger.debug("Failed to remove partial download %s after error", temp_path)
+                    progress_queue.put(("error", f"Failed downloading {rel_path}: {exc}"))
+                    logger.exception("Error downloading %s from %s", rel_path, repo_id)
+                    return
+
             if cancel_event.is_set():
-                progress_queue.put(("cancelled",)); return
+                raise CancelledDownload()
+
             (store_path / ".installed").touch(exist_ok=True)
             success = True
         except CancelledDownload:
@@ -668,13 +833,6 @@ def download_model_with_gui(
             progress_queue.put(("error", f"Failed: {exc}"))
             logger.exception("Model download failed")
             return
-        finally:
-            monitor_stop.set()
-            if monitor_thread is not None:
-                try:
-                    monitor_thread.join(timeout=2.0)
-                except Exception:
-                    logger.exception("Failed to join download monitor thread")
 
         if success:
             progress_queue.put(("done",))
@@ -694,6 +852,7 @@ def download_model_with_gui(
         busy_message="CtrlSpeak is downloading the Whisper model. Please wait for the download to finish before using CtrlSpeak.",
         success_message="The Whisper model download completed successfully.",
         failure_message="CtrlSpeak could not download the Whisper model. Please try again.",
+        lockout=True,
     ) as finalize:
         success = _run()
         if not success:
@@ -703,6 +862,13 @@ def download_model_with_gui(
         if not activate_after:
             finalize(True, "The Whisper model download completed successfully.")
             return True
+
+        try:
+            ui_update_lockout_message(
+                "CtrlSpeak is activating the Whisper model. Please wait for activation to complete before using CtrlSpeak."
+            )
+        except Exception:
+            logger.exception("Failed to update lockout window before model activation")
 
         try:
             ui_show_activation_popup(
@@ -749,90 +915,6 @@ def download_model_with_gui(
         return activation_success["value"]
 
 
-# ---------------- Activation progress tracking ----------------
-class ActivationProgressMonitor:
-    def __init__(self, model_short: str):
-        self.model_short = model_short
-        self._cache_path = _model_activation_cache_path(model_short)
-        self._stop_event = threading.Event()
-        self._stopped = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-        self._target_bytes = 0.0
-        self._start_time = 0.0
-        self._last_percent: Optional[float] = None
-
-    def start(self) -> None:
-        self._start_time = time.time()
-        store_path = model_store_path_for(self.model_short)
-        target_size = float(_measure_directory_size(store_path))
-        if target_size <= 0.0:
-            expected = EXPECTED_MODEL_BYTES.get(self.model_short)
-            target_size = float(expected or 0.0)
-        self._target_bytes = target_size
-        try:
-            ui_remind_activation_popup()
-        except Exception:
-            logger.exception("Failed to bring activation popup to foreground")
-        initial_percent: Optional[float]
-        initial_percent = 0.0 if self._target_bytes > 0.0 else None
-        try:
-            ui_update_activation_progress(initial_percent, 0.0, None)
-        except Exception:
-            logger.exception("Failed to initialize activation progress display")
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def _run(self) -> None:
-        while not self._stop_event.wait(1.0):
-            try:
-                current_size = float(_measure_directory_size(self._cache_path))
-            except Exception:
-                logger.exception("Failed to measure activation cache size")
-                current_size = 0.0
-            elapsed = max(time.time() - self._start_time, 0.0)
-            percent: Optional[float]
-            eta: Optional[float]
-            if self._target_bytes > 0.0:
-                ratio = min(max(current_size / self._target_bytes, 0.0), 1.0)
-                percent = ratio * 100.0
-                remaining = max(self._target_bytes - current_size, 0.0)
-                speed = current_size / elapsed if elapsed > 0.0 else 0.0
-                eta = (remaining / speed) if speed > 0.0 else None
-            else:
-                percent = None
-                eta = None
-            try:
-                ui_update_activation_progress(percent, elapsed, eta)
-            except Exception:
-                logger.exception("Failed to update activation progress display")
-            if percent is not None:
-                self._last_percent = percent
-
-    def stop(self, success: bool) -> None:
-        if self._stopped.is_set():
-            return
-        self._stopped.set()
-        self._stop_event.set()
-        if self._thread is not None and self._thread.is_alive():
-            try:
-                self._thread.join(timeout=2.5)
-            except Exception:
-                logger.exception("Failed to join activation progress monitor thread")
-        elapsed = max(time.time() - self._start_time, 0.0)
-        percent: Optional[float]
-        eta: Optional[float]
-        if success and self._target_bytes > 0.0:
-            percent = 100.0
-            eta = 0.0
-        else:
-            percent = self._last_percent
-            eta = None
-        try:
-            ui_update_activation_progress(percent, elapsed, eta)
-        except Exception:
-            logger.exception("Failed to finalize activation progress display")
-
-
 # ---------------- Transcriber ----------------
 model_lock = threading.Lock()
 whisper_model: Optional[WhisperModel] = None
@@ -864,7 +946,7 @@ def ensure_model_ready_for_local_server() -> bool:
 # Track long-running activation/installation work so the hotkey can be gated.
 _activation_event = threading.Event()
 _activation_lock = threading.Lock()
-_activation_reasons: list[str] = []
+_activation_reasons: list[Tuple[str, bool]] = []
 
   
 def is_model_loaded() -> bool:
@@ -893,28 +975,36 @@ def _activation_failure_message(reason: str) -> str:
     )
 
 
-def _begin_activation(reason: str, busy_message: str) -> None:
+def _begin_activation(reason: str, busy_message: str, *, lockout: bool) -> None:
     with _activation_lock:
-        _activation_reasons.append(reason)
+        _activation_reasons.append((reason, lockout))
         _activation_event.set()
     try:
-        ui_show_activation_popup(busy_message)
+        if lockout:
+            ui_show_lockout_window(busy_message)
+        else:
+            ui_show_activation_popup(busy_message)
     except Exception:
         logger.exception("Failed to present activation busy popup")
 
 
 def _end_activation(reason: str, *, success: bool, message: Optional[str]) -> None:
-    new_top: Optional[str] = None
+    new_top: Optional[Tuple[str, bool]] = None
+    popped_lockout = False
     with _activation_lock:
         if _activation_reasons:
-            _activation_reasons.pop()
+            _reason, popped_lockout = _activation_reasons.pop()
         if _activation_reasons:
             new_top = _activation_reasons[-1]
         else:
             _activation_event.clear()
     if new_top:
+        next_reason, is_lockout = new_top
         try:
-            ui_show_activation_popup(_activation_busy_message(new_top))
+            if is_lockout:
+                ui_show_lockout_window(_activation_busy_message(next_reason))
+            else:
+                ui_show_activation_popup(_activation_busy_message(next_reason))
         except Exception:
             logger.exception("Failed to refresh activation popup message")
         return
@@ -926,7 +1016,11 @@ def _end_activation(reason: str, *, success: bool, message: Optional[str]) -> No
             if success else _activation_failure_message(reason)
         )
     try:
-        ui_close_activation_popup(final_text)
+        if popped_lockout:
+            ui_close_lockout_window(final_text)
+            ui_close_activation_popup(final_text)
+        else:
+            ui_close_activation_popup(final_text)
     except Exception:
         logger.exception("Failed to close activation popup")
 
@@ -938,10 +1032,11 @@ def activation_guard(
     busy_message: Optional[str] = None,
     success_message: Optional[str] = None,
     failure_message: Optional[str] = None,
+    lockout: bool = False,
 ):
     """Track long-running activation work and drive the busy popup lifecycle."""
     busy = busy_message or _activation_busy_message(reason)
-    _begin_activation(reason, busy)
+    _begin_activation(reason, busy, lockout=lockout)
     outcome = {"success": True, "message": success_message}
 
     def finalize(success: bool, message: Optional[str] = None) -> None:
@@ -972,8 +1067,9 @@ def describe_activation_block() -> Optional[str]:
     if not _activation_event.is_set():
         return None
     with _activation_lock:
-        reason = _activation_reasons[-1] if _activation_reasons else None
-    if reason:
+        entry = _activation_reasons[-1] if _activation_reasons else None
+    if entry:
+        reason, _ = entry
         return _activation_busy_message(reason)
     return "CtrlSpeak is preparing resources. Please wait before using the app."
 
@@ -1091,14 +1187,6 @@ def initialize_transcriber(
         if device == "cpu":
             _force_cpu_env()
 
-        progress_monitor: Optional[ActivationProgressMonitor] = None
-        try:
-            progress_monitor = ActivationProgressMonitor(model_name)
-            progress_monitor.start()
-        except Exception:
-            logger.exception("Failed to start activation progress monitor")
-            progress_monitor = None
-
         try:
             whisper_model = WhisperModel(
                 model_name,
@@ -1121,8 +1209,6 @@ def initialize_transcriber(
                     print(f"CPU fallback failed: {cpu_exc}")
                     logger.exception("CPU fallback model load failed")
                 else:
-                    if progress_monitor is not None:
-                        progress_monitor.stop(success=True)
                     notify(
                         "Running CtrlSpeak transcription on CPU fallback. "
                         "Set CTRLSPEAK_DEVICE=cpu to suppress this message."
@@ -1136,8 +1222,6 @@ def initialize_transcriber(
                         ),
                     )
                     return whisper_model
-            if progress_monitor is not None:
-                progress_monitor.stop(success=False)
             notify("Unable to initialize the transcription model. Please check your installation and try again.")
             finalize(
                 False,
@@ -1146,8 +1230,6 @@ def initialize_transcriber(
             whisper_model = None
             return None
         else:
-            if progress_monitor is not None:
-                progress_monitor.stop(success=True)
             print(f"Whisper model '{model_name}' ready on {device} ({compute_type})")
             finalize(
                 True,
