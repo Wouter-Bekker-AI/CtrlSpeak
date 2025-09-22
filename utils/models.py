@@ -241,6 +241,15 @@ def format_bytes(value: float) -> str:
     return f"{amount:.1f} PB"
 
 
+def format_duration(seconds: float) -> str:
+    total_seconds = int(max(seconds, 0))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:d}:{secs:02d}"
+
+
 class DownloadDialog:
     def __init__(self, model_name: str, progress_queue: Queue, cancel_event: threading.Event):
         self.progress_queue = progress_queue
@@ -307,19 +316,33 @@ class DownloadDialog:
             if self.progress["mode"] != "determinate":
                 self.progress.config(mode="determinate")
                 self.progress.stop()
-            self.progress.config(maximum=total)
-            self.progress["value"] = current
-            percent = min(max(int((current / total) * 100), 0), 100)
+            clamped_total = max(total, 1.0)
+            clamped_current = max(min(current, clamped_total), 0.0)
+            self.progress.config(maximum=clamped_total)
+            self.progress["value"] = clamped_current
+            percent = min(max(int((clamped_current / clamped_total) * 100), 0), 100)
             now = time.time()
             elapsed = max(now - self._start_time, 1e-6)
             window_elapsed = max(now - self._last_update, 1e-6)
             avg_speed = current / elapsed
             inst_speed = (current - self._last_bytes) / window_elapsed
             speed = inst_speed if window_elapsed >= 0.5 else avg_speed
-            self.status_var.set(
-                f"{percent}%  ({format_bytes(current)} / {format_bytes(total)})"
-                f"  •  {format_bytes(speed)}/s"
-            )
+            if speed <= 0:
+                speed_text = "Calculating speed…"
+            else:
+                speed_text = f"{format_bytes(speed)}/s"
+            eta_text = "ETA —"
+            if speed > 0 and clamped_current < clamped_total:
+                remaining = max(clamped_total - clamped_current, 0.0)
+                eta_text = f"ETA {format_duration(remaining / speed)}"
+            status_parts = [
+                f"{percent}%",
+                f"{format_bytes(clamped_current)} of {format_bytes(clamped_total)}",
+                speed_text,
+                f"Elapsed {format_duration(elapsed)}",
+                eta_text,
+            ]
+            self.status_var.set("  •  ".join(status_parts))
             self._last_bytes = current
             self._last_update = now
         else:
@@ -329,7 +352,16 @@ class DownloadDialog:
             now = time.time()
             elapsed = max(now - self._start_time, 1e-6)
             speed = current / elapsed
-            self.status_var.set(f"{format_bytes(current)} downloaded  •  {format_bytes(speed)}/s")
+            if speed <= 0:
+                speed_text = "Calculating speed…"
+            else:
+                speed_text = f"{format_bytes(speed)}/s"
+            status_parts = [
+                f"{format_bytes(current)} downloaded",
+                speed_text,
+                f"Elapsed {format_duration(elapsed)}",
+            ]
+            self.status_var.set("  •  ".join(status_parts))
 
     def _process_queue(self) -> None:
         while True:
@@ -350,7 +382,18 @@ class DownloadDialog:
                 self.status_var.set(error_text)
             elif message_type == "done":
                 self.result = "success"
-                self.status_var.set("Download completed.")
+                elapsed = time.time() - self._start_time
+                total_bytes = self._last_bytes
+                if self.progress["mode"] == "determinate":
+                    try:
+                        total_bytes = float(self.progress["maximum"])
+                    except (TypeError, ValueError):
+                        total_bytes = self._last_bytes
+                self.stage_var.set("Download complete")
+                summary = f"Download completed in {format_duration(elapsed)}"
+                if total_bytes:
+                    summary += f"  •  {format_bytes(total_bytes)}"
+                self.status_var.set(summary)
             elif message_type == "cancelled":
                 self.result = "cancelled"
                 self.status_var.set("Download cancelled.")
