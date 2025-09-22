@@ -766,8 +766,21 @@ class ManagementWindow:
         model_row = ttk.Frame(model_card, style="ModernCardInner.TFrame")
         model_row.pack(fill=tk.X, pady=(14, 12))
         ttk.Label(model_row, text="Whisper model", style="Body.TLabel").pack(side=tk.LEFT)
-        ttk.Combobox(model_row, textvariable=self.model_var, values=["small", "large-v3"],
-                     state="readonly", width=18, style="Modern.TCombobox").pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Combobox(
+            model_row,
+            textvariable=self.model_var,
+            values=["small", "large-v3"],
+            state="readonly",
+            width=18,
+            style="Modern.TCombobox",
+        ).pack(side=tk.LEFT, padx=(12, 0))
+
+        model_badges = ttk.Frame(model_row, style="ModernCardInner.TFrame")
+        model_badges.pack(side=tk.LEFT, padx=(16, 0))
+        self.model_small_badge = ttk.Label(model_badges, text="", style="PillMuted.TLabel")
+        self.model_small_badge.pack(side=tk.LEFT)
+        self.model_large_badge = ttk.Label(model_badges, text="", style="PillMuted.TLabel")
+        self.model_large_badge.pack(side=tk.LEFT, padx=(12, 0))
         model_buttons = ttk.Frame(model_card, style="ModernCardInner.TFrame")
         model_buttons.pack(fill=tk.X, pady=(4, 0))
         self.apply_model_btn = ttk.Button(model_buttons, text="Activate model", style="Accent.TButton",
@@ -835,9 +848,8 @@ class ManagementWindow:
         with settings_lock:
             mode = settings.get("mode") or "unknown"
         device_pref = get_device_preference()
-        cuda_ok = cuda_runtime_ready()
+        cuda_available = cuda_runtime_ready(ignore_preference=True)
         model_name = get_current_model_name()
-        present = model_files_present(model_store_path_for(model_name))
         self.mode_badge.configure(text=f"MODE · {mode.upper()}", style="PillAccent.TLabel")
         network_label = describe_server_status()
         if "Not connected" in network_label:
@@ -861,13 +873,73 @@ class ManagementWindow:
         self.status_var.set("\n".join(status_parts))
         self.server_status_var.set(f"Network: {describe_server_status()}")
         if not (self._activation_busy and self._activation_status_var is self.cuda_status):
-            self.cuda_status.set("CUDA runtime ready." if cuda_ok else "CUDA runtime not detected.")
-        if not (self._activation_busy and self._activation_status_var is self.model_status):
-            self.model_status.set(
-                "Model installed locally." if present else "Model download required before use."
+            if not cuda_available:
+                cuda_text = "CUDA runtime not detected."
+            elif device_pref == "cuda":
+                cuda_text = "CUDA runtime active."
+            else:
+                cuda_text = "CUDA runtime available."
+            self.cuda_status.set(cuda_text)
+
+        model_statuses: dict[str, dict[str, object]] = {}
+        for candidate, display in (("small", "Small"), ("large-v3", "Large V3")):
+            candidate_present = model_files_present(model_store_path_for(candidate))
+            if not candidate_present:
+                state = "Not downloaded"
+                style = "PillDanger.TLabel"
+            elif model_name == candidate:
+                state = "Active"
+                style = "PillAccent.TLabel"
+            else:
+                state = "Available"
+                style = "PillMuted.TLabel"
+            model_statuses[candidate] = {
+                "display": display,
+                "state": state,
+                "style": style,
+                "present": candidate_present,
+            }
+
+        def format_state_text(state: str) -> str:
+            return "not downloaded" if state == "Not downloaded" else state.lower()
+
+        small_info = model_statuses.get("small")
+        if small_info:
+            self.model_small_badge.configure(
+                text=f"{small_info['display']}: {format_state_text(small_info['state'])}",
+                style=str(small_info["style"]),
             )
+
+        large_info = model_statuses.get("large-v3")
+        if large_info:
+            self.model_large_badge.configure(
+                text=f"{large_info['display']}: {format_state_text(large_info['state'])}",
+                style=str(large_info["style"]),
+            )
+
+        if not (self._activation_busy and self._activation_status_var is self.model_status):
+            active_info = model_statuses.get(model_name)
+            if active_info:
+                state = str(active_info["state"])
+                display = str(active_info["display"])
+                if state == "Not downloaded":
+                    message = f"{display} model is not downloaded."
+                elif state == "Active":
+                    message = f"{display} model is active."
+                else:
+                    message = f"{display} model is available locally."
+            else:
+                present = model_files_present(model_store_path_for(model_name))
+                message = (
+                    f"{model_name} model is ready." if present else f"{model_name} model status unknown."
+                )
+            self.model_status.set(message)
+
         self.device_var.set(device_pref)
-        self.model_var.set(model_name)
+        if model_name in {"small", "large-v3"}:
+            self.model_var.set(model_name)
+        else:
+            self.model_var.set("large-v3")
 
         if sysmod.client_enabled:
             self.start_button.state(["disabled"]); self.stop_button.state(["!disabled"])
