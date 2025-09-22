@@ -857,9 +857,22 @@ def transcribe_local(file_path: str, play_feedback: bool = True, allow_client: b
             with settings_lock:
                 port = int(settings.get("server_port", 65432))
             if allow_client and preferred_device == "cpu":
-                _sysmod.last_connected_server = ServerInfo(host="local-cpu", port=-1, last_seen=time.time())
+                server = ServerInfo(host="local-cpu", port=-1, last_seen=time.time())
             else:
-                _sysmod.last_connected_server = ServerInfo(host="local", port=port, last_seen=time.time())
+                server = ServerInfo(host="local", port=port, last_seen=time.time())
+            try:
+                apply_last_connected = getattr(_sysmod, "_apply_last_connected", None)
+                if callable(apply_last_connected):
+                    apply_last_connected(server)
+                else:
+                    _sysmod.last_connected_server = server
+                    _sysmod.schedule_management_refresh()
+            except Exception:
+                _sysmod.last_connected_server = server
+                try:
+                    _sysmod.schedule_management_refresh()
+                except Exception:
+                    pass
         return text or None
     except Exception as exc:
         notify_error("Transcription failed", format_exception_details(exc))
