@@ -508,6 +508,27 @@ model_ready = threading.Event()
 warned_cuda_unavailable = False
 _missing_model_notified: Set[str] = set()
 
+
+def ensure_model_ready_for_local_server() -> bool:
+    """Ensure a Whisper model is available and activated for local server mode."""
+
+    with model_lock:
+        if whisper_model is not None:
+            return True
+
+    model_name = get_current_model_name()
+    store = model_store_path_for(model_name)
+    marker = store / ".installed"
+
+    if model_files_present(store) and marker.exists():
+        return True
+
+    return download_model_with_gui(
+        model_name,
+        block_during_download=True,
+        activate_after=True,
+    )
+
 # Track long-running activation/installation work so the hotkey can be gated.
 _activation_event = threading.Event()
 _activation_lock = threading.Lock()
