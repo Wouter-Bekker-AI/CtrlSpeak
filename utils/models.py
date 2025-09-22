@@ -1223,7 +1223,7 @@ def transcribe_local(file_path: str, play_feedback: bool = True, allow_client: b
     if play_feedback:
         start_processing_feedback()
     try:
-        segments, _ = model.transcribe(file_path, beam_size=5, vad_filter=True, temperature=0.2)
+        segments, _ = model.transcribe(file_path, beam_size=5, vad_filter=True, temperature=0.2, task="translate")
         text = collect_text_from_segments(segments)
         if text:
             with settings_lock:
