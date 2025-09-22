@@ -38,7 +38,9 @@ from utils.config_paths import get_logger
 
 # ---------------- Env / defaults ----------------
 # These are *defaults*. Active choices come from settings via getters below.
-ENV_DEFAULT_MODEL = os.environ.get("CTRLSPEAK_MODEL", "small")
+AVAILABLE_MODELS: tuple[str, ...] = ("small", "large-v3")
+DEFAULT_MODEL_NAME = AVAILABLE_MODELS[0]
+ENV_DEFAULT_MODEL = os.environ.get("CTRLSPEAK_MODEL", DEFAULT_MODEL_NAME)
 ENV_DEVICE_PREF   = os.environ.get("CTRLSPEAK_DEVICE", "cpu").lower()
 COMPUTE_TYPE_OVERRIDE = os.environ.get("CTRLSPEAK_COMPUTE_TYPE")
 MODEL_REPO_OVERRIDE   = os.environ.get("CTRLSPEAK_MODEL_REPO")
@@ -70,13 +72,41 @@ def set_device_preference(pref: str) -> None:
     save_settings()
 
 
+def _normalize_model_name(name: object) -> Optional[str]:
+    if not isinstance(name, str):
+        return None
+    cleaned = name.strip()
+    return cleaned or None
+
+
 def get_current_model_name() -> str:
-    """Reads the model selected in the Settings UI; falls back to env default."""
+    """Reads the selected model, falling back to an installed/default option."""
+
     with settings_lock:
-        name = settings.get("model_name")
-    if isinstance(name, str) and name.strip():
-        return name.strip()
-    return ENV_DEFAULT_MODEL
+        stored_name = settings.get("model_name")
+
+    preferred = _normalize_model_name(stored_name)
+    env_preferred = _normalize_model_name(ENV_DEFAULT_MODEL)
+
+    candidates: list[str] = []
+    if preferred:
+        candidates.append(preferred)
+    if env_preferred and env_preferred in AVAILABLE_MODELS and env_preferred not in candidates:
+        candidates.append(env_preferred)
+    for known in AVAILABLE_MODELS:
+        if known not in candidates:
+            candidates.append(known)
+
+    for candidate in candidates:
+        if _is_model_installed(candidate):
+            if candidate != preferred:
+                set_current_model_name(candidate)
+            return candidate
+
+    fallback = AVAILABLE_MODELS[0] if AVAILABLE_MODELS else DEFAULT_MODEL_NAME
+    if preferred != fallback:
+        set_current_model_name(fallback)
+    return fallback
 
 
 def set_current_model_name(name: str) -> None:
@@ -96,6 +126,12 @@ def model_files_present(model_path: Path) -> bool:
         return False
     # faster-whisper weights are .bin files
     return any(model_path.rglob("*.bin"))
+
+
+def _is_model_installed(model_short: str) -> bool:
+    store = model_store_path_for(model_short)
+    marker = store / ".installed"
+    return model_files_present(store) and marker.exists()
 
 
 def _model_repo_id(model_short: str) -> str:

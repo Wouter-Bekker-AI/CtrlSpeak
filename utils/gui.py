@@ -29,6 +29,7 @@ from utils import system as sysmod
 
 # ---- Model/CUDA helpers kept in utils.models to avoid GUI bloat ----
 from utils.models import (
+    AVAILABLE_MODELS,
     cuda_runtime_ready,
     install_cuda_runtime_with_progress,   # opens progress window and installs nvidia wheels
     get_device_preference, set_device_preference,
@@ -784,7 +785,7 @@ class ManagementWindow:
         model_row = ttk.Frame(model_card, style="ModernCardInner.TFrame")
         model_row.pack(fill=tk.X, pady=(14, 12))
         ttk.Label(model_row, text="Whisper model", style="Body.TLabel").pack(side=tk.LEFT)
-        ttk.Combobox(model_row, textvariable=self.model_var, values=["small", "large-v3"],
+        ttk.Combobox(model_row, textvariable=self.model_var, values=list(AVAILABLE_MODELS),
                      state="readonly", width=18, style="Modern.TCombobox").pack(side=tk.LEFT, padx=(12, 0))
         model_buttons = ttk.Frame(model_card, style="ModernCardInner.TFrame")
         model_buttons.pack(fill=tk.X, pady=(4, 0))
