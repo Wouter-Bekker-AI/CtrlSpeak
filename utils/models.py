@@ -464,7 +464,9 @@ def download_model_with_gui(
             return True
 
         try:
-            ui_show_activation_popup("The Whisper model has been downloaded. Activating it now…")
+            ui_show_activation_popup(
+                "CtrlSpeak is activating the Whisper model. Please wait while the model starts up…"
+            )
         except Exception:
             logger.exception("Failed to update activation popup before model activation")
 
@@ -721,7 +723,13 @@ def initialize_transcriber(
                 download_root=str(MODEL_ROOT_PATH),
             )
             print(f"Whisper model '{model_name}' ready on {device} ({compute_type})")
-            finalize(True, f"The Whisper model '{model_name}' is ready on {device.upper()} ({compute_type}).")
+            finalize(
+                True,
+                (
+                    "Activation complete! You can now use CtrlSpeak. "
+                    f"The Whisper model '{model_name}' is ready on {device.upper()} ({compute_type})."
+                ),
+            )
             return whisper_model
         except Exception as exc:
             print(f"Failed to load model on {device}: {exc}")
@@ -738,7 +746,10 @@ def initialize_transcriber(
                     warned_cuda_unavailable = True
                     finalize(
                         True,
-                        f"The Whisper model '{model_name}' is ready on CPU fallback. CtrlSpeak will continue using the CPU.",
+                        (
+                            "Activation complete! You can now use CtrlSpeak. "
+                            f"The Whisper model '{model_name}' is running on the CPU fallback."
+                        ),
                     )
                     return whisper_model
                 except Exception as cpu_exc:

@@ -191,10 +191,17 @@ def notify(message: str, title: str = "CtrlSpeak") -> None:
 def ui_show_activation_popup(message: str) -> None:
     """Show (or update) the activation-in-progress popup."""
     try:
-        from utils.gui import ensure_management_ui_thread, show_activation_popup
+        from utils.gui import (
+            ensure_management_ui_thread,
+            show_activation_popup,
+            is_management_ui_thread,
+        )
 
         ensure_management_ui_thread()
-        enqueue_management_task(show_activation_popup, message)
+        if is_management_ui_thread():
+            show_activation_popup(message)
+        else:
+            enqueue_management_task(show_activation_popup, message)
     except Exception:
         logger.exception("Failed to show activation popup")
         try:
@@ -222,10 +229,17 @@ def ui_remind_activation_popup(message: str | None = None) -> None:
 def ui_close_activation_popup(message: str | None = None) -> None:
     """Close the activation popup, optionally leaving a completion message first."""
     try:
-        from utils.gui import ensure_management_ui_thread, close_activation_popup
+        from utils.gui import (
+            ensure_management_ui_thread,
+            close_activation_popup,
+            is_management_ui_thread,
+        )
 
         ensure_management_ui_thread()
-        enqueue_management_task(close_activation_popup, message)
+        if is_management_ui_thread():
+            close_activation_popup(message)
+        else:
+            enqueue_management_task(close_activation_popup, message)
     except Exception:
         logger.exception("Failed to close activation popup")
         if message:
