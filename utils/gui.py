@@ -209,7 +209,7 @@ def show_lockout_window(message: str) -> None:
         accent.configure(height=2)
         accent.pack(fill=tk.X, pady=(12, 18))
 
-        _lockout_message_var = tk.StringVar(value=message)
+        _lockout_message_var = tk.StringVar(master=_lockout_win, value=message)
         message_label = ttk.Label(
             card,
             textvariable=_lockout_message_var,
@@ -346,7 +346,7 @@ def show_activation_popup(message: str) -> None:
         accent.configure(height=2)
         accent.pack(fill=tk.X, pady=(12, 18))
 
-        _busy_popup_stage_var = tk.StringVar(value=message)
+        _busy_popup_stage_var = tk.StringVar(master=_busy_popup_win, value=message)
         _busy_popup_label = ttk.Label(
             card,
             textvariable=_busy_popup_stage_var,
@@ -365,7 +365,7 @@ def show_activation_popup(message: str) -> None:
         _busy_popup_progress.pack(fill=tk.X)
         _busy_popup_progress_mode = "indeterminate"
 
-        _busy_popup_status_var = tk.StringVar(value="")
+        _busy_popup_status_var = tk.StringVar(master=_busy_popup_win, value="")
         _busy_popup_status_label = ttk.Label(
             card,
             textvariable=_busy_popup_status_var,
