@@ -888,5 +888,6 @@ def transcribe_cli(target: str) -> int:
 def apply_auto_setup(profile: str) -> None:
     global AUTO_MODE, AUTO_MODE_PROFILE
     AUTO_MODE = True; AUTO_MODE_PROFILE = profile
+    logger.info("Applying auto-setup profile: %s", profile)
     with settings_lock: settings["mode"] = profile
     save_settings()
