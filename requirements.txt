@@ -10,3 +10,4 @@ pyinstaller
 pynput
 pystray
 tqdm
+pytest
