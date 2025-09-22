@@ -35,6 +35,7 @@ from utils.models import (
     get_current_model_name, set_current_model_name,
     model_store_path_for, model_files_present,
     download_model_with_gui,              # opens progress window and downloads model
+    is_model_loaded,
     format_bytes,                         # optional pretty bytes
 )
 
@@ -50,9 +51,172 @@ from utils.config_paths import asset_path, get_logger
 # Shared UI thread root + instance ref (imported by utils.system.schedule_management_refresh)
 tk_root: Optional[tk.Tk] = None
 management_window: Optional["ManagementWindow"] = None
+_management_thread_ident: Optional[int] = None
 
 logger = get_logger(__name__)
 
+# -------- Notification helpers --------
+_busy_popup_win: Optional[tk.Toplevel] = None
+_busy_popup_message: Optional[tk.StringVar] = None
+_busy_popup_progress: Optional[ttk.Progressbar] = None
+_busy_popup_close_job: Optional[str] = None
+
+
+def show_notification_popup(title: str, message: str) -> None:
+    """Display a simple informational dialog."""
+    if tk_root is None or not tk_root.winfo_exists():
+        return
+    try:
+        messagebox.showinfo(title, message, parent=tk_root)
+    except Exception:
+        logger.exception("Failed to display notification popup: %s", title)
+
+
+def _cancel_busy_popup_close() -> None:
+    global _busy_popup_close_job
+    if _busy_popup_win is not None and _busy_popup_close_job is not None:
+        try:
+            _busy_popup_win.after_cancel(_busy_popup_close_job)
+        except Exception:
+            logger.exception("Failed to cancel activation popup close timer")
+    _busy_popup_close_job = None
+
+
+def _destroy_busy_popup() -> None:
+    global _busy_popup_win, _busy_popup_message, _busy_popup_progress, _busy_popup_close_job
+    if _busy_popup_win is not None and _busy_popup_win.winfo_exists():
+        try:
+            _busy_popup_win.destroy()
+        except Exception:
+            logger.exception("Failed to destroy activation popup window")
+    _busy_popup_win = None
+    _busy_popup_message = None
+    _busy_popup_progress = None
+    _busy_popup_close_job = None
+
+
+def show_activation_popup(message: str) -> None:
+    """Create or update the activation progress popup."""
+    global _busy_popup_win, _busy_popup_message, _busy_popup_progress
+    if tk_root is None or not tk_root.winfo_exists():
+        return
+
+    _cancel_busy_popup_close()
+
+    if _busy_popup_win is None or not _busy_popup_win.winfo_exists():
+        _busy_popup_win = tk.Toplevel(tk_root)
+        _busy_popup_win.title("CtrlSpeak is preparing")
+        _busy_popup_win.geometry("420x220")
+        _busy_popup_win.resizable(False, False)
+        _busy_popup_win.attributes("-topmost", True)
+        try:
+            _busy_popup_win.attributes("-toolwindow", True)
+        except Exception:
+            # Not all platforms support this hint
+            pass
+        apply_modern_theme(_busy_popup_win)
+        _busy_popup_win.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        container = ttk.Frame(_busy_popup_win, style="Modern.TFrame", padding=(24, 22))
+        container.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(container, text="Preparing CtrlSpeak", style="Title.TLabel").pack(anchor=tk.W)
+
+        _busy_popup_message = tk.StringVar(value=message)
+        ttk.Label(
+            container,
+            textvariable=_busy_popup_message,
+            style="Body.TLabel",
+            wraplength=360,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(12, 20))
+
+        _busy_popup_progress = ttk.Progressbar(
+            container,
+            mode="indeterminate",
+            length=340,
+            style="Modern.Horizontal.TProgressbar",
+        )
+        _busy_popup_progress.pack(fill=tk.X)
+        try:
+            _busy_popup_progress.start(12)
+        except Exception:
+            logger.exception("Failed to start activation popup progress bar")
+    else:
+        try:
+            _busy_popup_win.deiconify()
+            _busy_popup_win.lift()
+        except Exception:
+            logger.exception("Failed to raise activation popup window")
+
+    if _busy_popup_message is not None:
+        _busy_popup_message.set(message)
+    if _busy_popup_progress is not None:
+        try:
+            _busy_popup_progress.config(mode="indeterminate")
+            _busy_popup_progress.start(12)
+        except Exception:
+            logger.exception("Failed to restart activation popup progress bar")
+
+    try:
+        _busy_popup_win.lift()
+        _busy_popup_win.focus_force()
+    except Exception:
+        # Focus hints may fail in some environments
+        pass
+
+
+def focus_activation_popup(message: Optional[str] = None) -> None:
+    """Bring the activation popup to the foreground."""
+    if message:
+        show_activation_popup(message)
+        return
+
+    if _busy_popup_win is None or not _busy_popup_win.winfo_exists():
+        return
+
+    _cancel_busy_popup_close()
+    try:
+        _busy_popup_win.deiconify()
+        _busy_popup_win.lift()
+        _busy_popup_win.focus_force()
+    except Exception:
+        pass
+
+
+def close_activation_popup(message: Optional[str] = None) -> None:
+    """Stop the busy popup and close it, optionally after showing a final message."""
+    global _busy_popup_close_job
+    if _busy_popup_win is None or not _busy_popup_win.winfo_exists():
+        if message:
+            show_notification_popup("CtrlSpeak", message)
+        return
+
+    _cancel_busy_popup_close()
+
+    if _busy_popup_progress is not None:
+        try:
+            _busy_popup_progress.stop()
+            _busy_popup_progress.config(mode="determinate", maximum=100, value=100)
+        except Exception:
+            logger.exception("Failed to update activation popup progress state")
+
+    if message and _busy_popup_message is not None:
+        _busy_popup_message.set(message)
+
+    if message:
+        try:
+            _busy_popup_win.lift()
+        except Exception:
+            pass
+        # Leave the completion message visible briefly before closing
+        try:
+            _busy_popup_close_job = _busy_popup_win.after(2400, _destroy_busy_popup)
+        except Exception:
+            logger.exception("Failed to schedule activation popup dismissal")
+            _destroy_busy_popup()
+    else:
+        _destroy_busy_popup()
 # -------- Voice Waveform Overlay --------
 _waveform_win: Optional[tk.Toplevel] = None
 _waveform_canvas: Optional[tk.Canvas] = None
@@ -447,12 +611,13 @@ def ensure_mode_selected() -> None:
 
 # ---------------- UI loop pump (for async updates) ----------------
 def ensure_management_ui_thread() -> None:
-    global tk_root
+    global tk_root, _management_thread_ident
     if tk_root and tk_root.winfo_exists():
         return
 
     def _loop():
-        global tk_root
+        global tk_root, _management_thread_ident
+        _management_thread_ident = threading.get_ident()
         tk_root = tk.Tk()
         apply_modern_theme(tk_root)
         tk_root.withdraw()
@@ -476,6 +641,9 @@ def ensure_management_ui_thread() -> None:
 
     t = threading.Thread(target=_loop, name="CtrlSpeakManagementUI", daemon=True)
     t.start()
+
+def is_management_ui_thread() -> bool:
+    return _management_thread_ident == threading.get_ident()
 
 # ---------------- Status helper ----------------
 def describe_server_status() -> str:
@@ -859,9 +1027,18 @@ class ManagementWindow:
         name = self.model_var.get()
         if name not in {"small", "large-v3"}:
             name = "large-v3"
-        if download_model_with_gui(name):
+        model_already_loaded = is_model_loaded()
+        if download_model_with_gui(
+            name,
+            block_during_download=not model_already_loaded,
+            activate_after=not model_already_loaded,
+        ):
             (model_store_path_for(name) / ".installed").touch(exist_ok=True)
-            messagebox.showinfo("Model", "Model downloaded successfully.", parent=self.window)
+            if model_already_loaded:
+                message = "Model downloaded successfully."
+            else:
+                message = "Model downloaded and activated successfully."
+            messagebox.showinfo("Model", message, parent=self.window)
         else:
             messagebox.showwarning("Model", "Model download did not complete.", parent=self.window)
         self.refresh_status()

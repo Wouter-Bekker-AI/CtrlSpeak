@@ -174,10 +174,79 @@ last_connected_server: Optional[ServerInfo] = None
 
 # ---------------- Notifications / logging ----------------
 def notify(message: str, title: str = "CtrlSpeak") -> None:
+    """Display a user-facing notification window (falls back to stdout)."""
     try:
-        print(f"{title}: {message}")
+        from utils.gui import ensure_management_ui_thread, show_notification_popup
+
+        ensure_management_ui_thread()
+        enqueue_management_task(show_notification_popup, title, message)
     except Exception:
         logger.exception("Failed to display notification '%s': %s", title, message)
+        try:
+            print(f"{title}: {message}")
+        except Exception:
+            logger.exception("Failed to print fallback notification '%s'", title)
+
+
+def ui_show_activation_popup(message: str) -> None:
+    """Show (or update) the activation-in-progress popup."""
+    try:
+        from utils.gui import (
+            ensure_management_ui_thread,
+            show_activation_popup,
+            is_management_ui_thread,
+        )
+
+        ensure_management_ui_thread()
+        if is_management_ui_thread():
+            show_activation_popup(message)
+        else:
+            enqueue_management_task(show_activation_popup, message)
+    except Exception:
+        logger.exception("Failed to show activation popup")
+        try:
+            print(f"CtrlSpeak: {message}")
+        except Exception:
+            logger.exception("Failed to print activation popup fallback message")
+
+
+def ui_remind_activation_popup(message: str | None = None) -> None:
+    """Bring the activation popup to the foreground (optionally updating its text)."""
+    try:
+        from utils.gui import ensure_management_ui_thread, focus_activation_popup
+
+        ensure_management_ui_thread()
+        enqueue_management_task(focus_activation_popup, message)
+    except Exception:
+        logger.exception("Failed to focus activation popup")
+        if message:
+            try:
+                print(f"CtrlSpeak: {message}")
+            except Exception:
+                logger.exception("Failed to print activation popup focus message")
+
+
+def ui_close_activation_popup(message: str | None = None) -> None:
+    """Close the activation popup, optionally leaving a completion message first."""
+    try:
+        from utils.gui import (
+            ensure_management_ui_thread,
+            close_activation_popup,
+            is_management_ui_thread,
+        )
+
+        ensure_management_ui_thread()
+        if is_management_ui_thread():
+            close_activation_popup(message)
+        else:
+            enqueue_management_task(close_activation_popup, message)
+    except Exception:
+        logger.exception("Failed to close activation popup")
+        if message:
+            try:
+                print(f"CtrlSpeak: {message}")
+            except Exception:
+                logger.exception("Failed to print activation popup completion message")
 
 def format_exception_details(exc: Exception) -> str:
     return "".join(traceback.format_exception_only(type(exc), exc)).strip()
@@ -417,9 +486,15 @@ def record_audio(target_path: Path) -> None:
 
 # ---------------- Client keyboard listener ----------------
 def on_press(key):
-    from utils.models import transcribe_audio  # imported on-demand to avoid circulars
+    from utils.models import describe_activation_block, is_activation_in_progress  # on-demand to avoid circulars
     global recording, recording_thread, recording_file_path
     if not client_enabled: return
+    if is_activation_in_progress():
+        message = describe_activation_block()
+        if not message:
+            message = "CtrlSpeak is busy preparing resources. Please wait before using the hotkey again."
+        ui_remind_activation_popup(message)
+        return
     if key == keyboard.Key.ctrl_r and not recording:
         recording = True
         recording_file_path = create_recording_file_path()
@@ -433,13 +508,30 @@ def on_press(key):
 
 
 def on_release(key):
-    from utils.models import transcribe_audio
+    from utils.models import describe_activation_block, is_activation_in_progress, transcribe_audio
     global recording, recording_thread, recording_file_path
     if key == keyboard.Key.ctrl_r:
         if recording:
             recording = False
             if recording_thread:
                 recording_thread.join(); recording_thread = None
+            path = recording_file_path
+            block_message = None
+            try:
+                if is_activation_in_progress():
+                    block_message = describe_activation_block()
+            except Exception:
+                logger.exception("Failed to check activation status before transcription")
+            if block_message:
+                ui_remind_activation_popup(block_message)
+                try:
+                    from utils.gui import hide_waveform_overlay
+                    enqueue_management_task(hide_waveform_overlay)
+                except Exception:
+                    logger.exception("Failed to hide waveform overlay after activation block")
+                cleanup_recording_file(path)
+                recording_file_path = None
+                return
             # switch overlay into “processing” mode
             try:
                 from utils.gui import set_waveform_processing
@@ -451,7 +543,6 @@ def on_release(key):
                 start_processing_feedback()
             except Exception:
                 logger.exception("Failed to start processing feedback loop")
-            path = recording_file_path
             text = None
             try:
                 if path and path.exists() and path.stat().st_size > 0:
