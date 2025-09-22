@@ -304,6 +304,21 @@ def enqueue_management_task(func: Callable[..., None], *args, **kwargs) -> None:
     except Exception:
         logger.exception("Failed to enqueue management task %s", getattr(func, "__name__", str(func)))
 
+
+def pump_management_events_once() -> None:
+    """Process queued management UI work once without blocking."""
+
+    try:
+        from utils.gui import ensure_management_ui_thread, pump_management_events_once as _pump_once
+
+        ensure_management_ui_thread()
+        _pump_once()
+    except RuntimeError:
+        raise
+    except Exception:
+        logger.exception("Failed to pump management UI events")
+
+
 def schedule_management_refresh(delay_ms: int = 0) -> None:
     # utils.gui sets tk_root and management_window; import FRESH on each call
     from utils.gui import tk_root, management_window
