@@ -35,6 +35,7 @@ from utils.models import (
     get_current_model_name, set_current_model_name,
     model_store_path_for, model_files_present,
     download_model_with_gui,              # opens progress window and downloads model
+    is_model_loaded,
     format_bytes,                         # optional pretty bytes
 )
 
@@ -1023,9 +1024,18 @@ class ManagementWindow:
         name = self.model_var.get()
         if name not in {"small", "large-v3"}:
             name = "large-v3"
-        if download_model_with_gui(name):
+        model_already_loaded = is_model_loaded()
+        if download_model_with_gui(
+            name,
+            block_during_download=not model_already_loaded,
+            activate_after=not model_already_loaded,
+        ):
             (model_store_path_for(name) / ".installed").touch(exist_ok=True)
-            messagebox.showinfo("Model", "Model downloaded successfully.", parent=self.window)
+            if model_already_loaded:
+                message = "Model downloaded successfully."
+            else:
+                message = "Model downloaded and activated successfully."
+            messagebox.showinfo("Model", message, parent=self.window)
         else:
             messagebox.showwarning("Model", "Model download did not complete.", parent=self.window)
         self.refresh_status()

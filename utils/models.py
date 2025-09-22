@@ -9,7 +9,7 @@ import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from queue import Queue, Empty
-from typing import Optional, List, Set
+from typing import Optional, List, Set, Callable
 
 import ctypes
 import ctranslate2
@@ -396,7 +396,12 @@ def _prompt_for_model_install(model_name: str) -> bool:
     return choice == "Install Now"
 
 
-def download_model_with_gui(model_short: Optional[str] = None) -> bool:
+def download_model_with_gui(
+    model_short: Optional[str] = None,
+    *,
+    block_during_download: bool = False,
+    activate_after: bool = False,
+) -> bool:
     """
     Download the selected model (or the argument provided) with a simple progress dialog.
     Keeps files under %APPDATA%/CtrlSpeak/models/<model>.
@@ -435,9 +440,40 @@ def download_model_with_gui(model_short: Optional[str] = None) -> bool:
 
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
-    result = dialog.run()
-    thread.join(timeout=0.5)
-    return result == "success"
+    def _run() -> bool:
+        result = dialog.run()
+        thread.join(timeout=0.5)
+        return result == "success"
+
+    if not block_during_download:
+        return _run()
+
+    with activation_guard(
+        "downloading the Whisper model",
+        busy_message="CtrlSpeak is downloading the Whisper model. Please wait for the download to finish before using CtrlSpeak.",
+        success_message="The Whisper model download completed successfully.",
+        failure_message="CtrlSpeak could not download the Whisper model. Please try again.",
+    ) as finalize:
+        success = _run()
+        if not success:
+            finalize(False, "CtrlSpeak could not download the Whisper model. Please try again.")
+            return False
+
+        if not activate_after:
+            finalize(True, "The Whisper model download completed successfully.")
+            return True
+
+        try:
+            ui_show_activation_popup("The Whisper model has been downloaded. Activating it now…")
+        except Exception:
+            logger.exception("Failed to update activation popup before model activation")
+
+        activated = initialize_transcriber(
+            force=True,
+            allow_client=True,
+            activation_finalizer=finalize,
+        )
+        return activated is not None
 
 
 # ---------------- Transcriber ----------------
@@ -452,7 +488,12 @@ _activation_event = threading.Event()
 _activation_lock = threading.Lock()
 _activation_reasons: list[str] = []
 
+  
+def is_model_loaded() -> bool:
+    with model_lock:
+        return whisper_model is not None
 
+      
 def _activation_busy_message(reason: str) -> str:
     clean = reason.rstrip(". ")
     return (
@@ -617,7 +658,11 @@ def _ensure_model_available_active(interactive: bool = True) -> bool:
         if not _prompt_for_model_install(name):
             notify("CtrlSpeak cannot transcribe without the Whisper model. You can install it next time you start the app.")
             return False
-        if not download_model_with_gui(name):
+        block_download = whisper_model is None
+        if not download_model_with_gui(
+            name,
+            block_during_download=block_download,
+        ):
             notify("The Whisper model was not installed. Try again later or check your internet connection.")
             return False
     if model_files_present(store):
@@ -654,19 +699,75 @@ def initialize_transcriber(
     allow_client: bool = False,
     preferred_device: Optional[str] = None,
     interactive: bool = True,
+    activation_finalizer: Optional[Callable[[bool, Optional[str]], None]] = None,
 ) -> Optional[WhisperModel]:
     """
     Loads the Whisper model selected in settings into faster-whisper with the active device choice.
     """
     global whisper_model, warned_cuda_unavailable
+
+    def perform_activation(finalize: Callable[[bool, Optional[str]], None]) -> Optional[WhisperModel]:
+        nonlocal device, compute_type, model_name
+        global whisper_model, warned_cuda_unavailable
+
+        if device == "cpu":
+            _force_cpu_env()
+
+        try:
+            whisper_model = WhisperModel(
+                model_name,
+                device=device,
+                compute_type=compute_type,
+                download_root=str(MODEL_ROOT_PATH),
+            )
+            print(f"Whisper model '{model_name}' ready on {device} ({compute_type})")
+            finalize(True, f"The Whisper model '{model_name}' is ready on {device.upper()} ({compute_type}).")
+            return whisper_model
+        except Exception as exc:
+            print(f"Failed to load model on {device}: {exc}")
+            logger.exception("Failed to load Whisper model on %s", device)
+            if device != "cpu":
+                try:
+                    whisper_model = WhisperModel(
+                        model_name,
+                        device="cpu",
+                        compute_type="int8",
+                        download_root=str(MODEL_ROOT_PATH),
+                    )
+                    notify("Running CtrlSpeak transcription on CPU fallback. Set CTRLSPEAK_DEVICE=cpu to suppress this message.")
+                    warned_cuda_unavailable = True
+                    finalize(
+                        True,
+                        f"The Whisper model '{model_name}' is ready on CPU fallback. CtrlSpeak will continue using the CPU.",
+                    )
+                    return whisper_model
+                except Exception as cpu_exc:
+                    print(f"CPU fallback failed: {cpu_exc}")
+                    logger.exception("CPU fallback model load failed")
+            notify("Unable to initialize the transcription model. Please check your installation and try again.")
+            finalize(
+                False,
+                "CtrlSpeak was unable to activate the Whisper model. Please check your installation and try again.",
+            )
+            whisper_model = None
+            return None
+
     with model_lock:
         if whisper_model is not None and not force:
+            if activation_finalizer is not None:
+                activation_finalizer(True, None)
             return whisper_model
+
         with settings_lock:
             mode = settings.get("mode")
         if not allow_client and mode != "client_server":
+            if activation_finalizer is not None:
+                activation_finalizer(False, "CtrlSpeak is not running in local transcription mode.")
             return None
+
         if not _ensure_model_available_active(interactive=interactive):
+            if activation_finalizer is not None:
+                activation_finalizer(False, "CtrlSpeak could not find the Whisper model files.")
             return None
 
         device = preferred_device or resolve_device()
@@ -685,54 +786,16 @@ def initialize_transcriber(
         compute_type = resolve_compute_type(device)
         model_name = get_current_model_name()
 
-        with activation_guard(
-            "activating the Whisper model",
-            busy_message="CtrlSpeak is activating the Whisper model. Please wait for the model to finish preparing.",
-            success_message="The Whisper model is ready. You may now use CtrlSpeak.",
-            failure_message="CtrlSpeak could not activate the Whisper model."
-        ) as complete:
-            if device == "cpu":
-                _force_cpu_env()
+        if activation_finalizer is None:
+            with activation_guard(
+                "activating the Whisper model",
+                busy_message="CtrlSpeak is activating the Whisper model. Please wait for the model to finish preparing.",
+                success_message="The Whisper model is ready. You may now use CtrlSpeak.",
+                failure_message="CtrlSpeak could not activate the Whisper model.",
+            ) as complete:
+                return perform_activation(complete)
 
-            try:
-                whisper_model = WhisperModel(
-                    model_name,
-                    device=device,
-                    compute_type=compute_type,
-                    download_root=str(MODEL_ROOT_PATH),
-                )
-                print(f"Whisper model '{model_name}' ready on {device} ({compute_type})")
-                complete(True, f"The Whisper model '{model_name}' is ready on {device.upper()} ({compute_type}).")
-                return whisper_model
-            except Exception as exc:
-                print(f"Failed to load model on {device}: {exc}")
-                logger.exception("Failed to load Whisper model on %s", device)
-                if device != "cpu":
-                    try:
-                        whisper_model = WhisperModel(
-                            model_name,
-                            device="cpu",
-                            compute_type="int8",
-                            download_root=str(MODEL_ROOT_PATH),
-                        )
-                        notify("Running CtrlSpeak transcription on CPU fallback. Set CTRLSPEAK_DEVICE=cpu to suppress this message.")
-                        warned_cuda_unavailable = True
-                        complete(
-                            True,
-                            f"The Whisper model '{model_name}' is ready on CPU fallback. CtrlSpeak will continue using the CPU.",
-                        )
-                        return whisper_model
-                    except Exception as cpu_exc:
-                        print(f"CPU fallback failed: {cpu_exc}")
-                        logger.exception("CPU fallback model load failed")
-                notify("Unable to initialize the transcription model. Please check your installation and try again.")
-                complete(
-                    False,
-                    "CtrlSpeak was unable to activate the Whisper model. Please check your installation and try again.",
-                )
-                whisper_model = None
-                return None
-
+        return perform_activation(activation_finalizer)
 
 # ---------------- Transcription API ----------------
 def collect_text_from_segments(segments) -> str:
