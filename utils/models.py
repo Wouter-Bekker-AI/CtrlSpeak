@@ -33,7 +33,6 @@ from utils.system import (
     start_processing_feedback, stop_processing_feedback,
     ui_show_activation_popup, ui_close_activation_popup,
     ui_show_lockout_window, ui_update_lockout_message, ui_close_lockout_window,
-    ui_remind_activation_popup, ui_update_activation_progress,
     pump_management_events_once,
 )
 from utils.system import get_best_server, CLIENT_ONLY_BUILD
@@ -611,7 +610,11 @@ def download_model_with_gui(
 
             api = HfApi()
             try:
-                model_info = api.model_info(repo_id)
+                try:
+                    model_info = api.model_info(repo_id, files_metadata=True)
+                except TypeError:
+                    # Older huggingface-hub versions do not accept files_metadata
+                    model_info = api.model_info(repo_id)
             except Exception as exc:
                 progress_queue.put(("error", f"Failed to query repository: {exc}"))
                 logger.exception("Unable to query Hugging Face model info for %s", repo_id)
@@ -638,6 +641,11 @@ def download_model_with_gui(
                 return
 
             files.sort(key=lambda item: item["path"])
+
+            if total_bytes <= 0:
+                expected = EXPECTED_MODEL_BYTES.get(model_name)
+                if expected is not None and expected > 0:
+                    total_bytes = expected
 
             progress_queue.put(("stage", f"Downloading {model_name} model files…"))
             downloaded_bytes = 0
@@ -820,150 +828,6 @@ def download_model_with_gui(
             activation_thread.join(timeout=0.5)
 
         return activation_success["value"]
-
-
-# ---------------- Activation progress tracking ----------------
-class ActivationProgressMonitor:
-    def __init__(self, model_short: str):
-        self.model_short = model_short
-        self._cache_path = _model_activation_cache_path(model_short)
-        self._store_path = model_store_path_for(model_short)
-        self._stop_event = threading.Event()
-        self._stopped = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-        self._expected_bytes = float(EXPECTED_MODEL_BYTES.get(model_short) or 0.0)
-        self._goal_bytes = 0.0
-        self._start_time = 0.0
-        self._last_percent: Optional[float] = None
-        self._baseline_cache_bytes = 0.0
-        self._baseline_store_bytes = 0.0
-        self._baseline_combined_bytes = 0.0
-        self._determinate_started = False
-
-    def start(self) -> None:
-        self._start_time = time.time()
-        self._baseline_store_bytes = float(_measure_directory_size(self._store_path))
-        self._baseline_cache_bytes = float(_measure_directory_size(self._cache_path))
-        self._baseline_combined_bytes = max(self._baseline_store_bytes, self._baseline_cache_bytes)
-        self._goal_bytes = max(self._expected_bytes, self._baseline_combined_bytes)
-        self._determinate_started = self._goal_bytes > 0.0
-        try:
-            ui_remind_activation_popup()
-        except Exception:
-            logger.exception("Failed to bring activation popup to foreground")
-        if self._determinate_started and self._goal_bytes > 0.0:
-            initial_percent = max(
-                0.0,
-                min((self._baseline_combined_bytes / self._goal_bytes) * 100.0, 100.0),
-            )
-        else:
-            initial_percent = None
-        try:
-            ui_update_activation_progress(initial_percent, 0.0, None)
-        except Exception:
-            logger.exception("Failed to initialize activation progress display")
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def _current_cache_bytes(self) -> float:
-        return float(_measure_directory_size(self._cache_path))
-
-    def _current_store_bytes(self) -> float:
-        return float(_measure_directory_size(self._store_path))
-
-    def _calculate_progress(
-        self,
-        current_bytes: float,
-        elapsed: float,
-    ) -> tuple[Optional[float], Optional[float]]:
-        goal = max(self._goal_bytes, 0.0)
-        if goal <= 0.0:
-            return None, None
-
-        if not self._determinate_started:
-            return None, None
-
-        capped_bytes = min(max(current_bytes, 0.0), goal)
-        percent = max(0.0, min((capped_bytes / goal) * 100.0, 100.0))
-        effective_added = max(capped_bytes - self._baseline_combined_bytes, 0.0)
-        speed = effective_added / elapsed if elapsed > 0.0 else 0.0
-        remaining = max(goal - capped_bytes, 0.0)
-        eta = (remaining / speed) if speed > 0.0 else None
-        return percent, eta
-
-    def _run(self) -> None:
-        while not self._stop_event.wait(1.0):
-            try:
-                cache_bytes = self._current_cache_bytes()
-            except Exception:
-                logger.exception("Failed to measure activation cache size")
-                cache_bytes = self._baseline_cache_bytes
-            try:
-                store_bytes = self._current_store_bytes()
-            except Exception:
-                logger.exception("Failed to measure activation store size")
-                store_bytes = self._baseline_store_bytes
-            current_bytes = max(cache_bytes, store_bytes, self._baseline_combined_bytes)
-            self._goal_bytes = max(
-                self._goal_bytes,
-                store_bytes,
-                cache_bytes,
-                self._expected_bytes,
-                self._baseline_combined_bytes,
-            )
-            if self._goal_bytes > 0.0:
-                self._determinate_started = True
-            elapsed = max(time.time() - self._start_time, 0.0)
-            percent, eta = self._calculate_progress(current_bytes, elapsed)
-            try:
-                ui_update_activation_progress(percent, elapsed, eta)
-            except Exception:
-                logger.exception("Failed to update activation progress display")
-            if percent is not None:
-                self._last_percent = percent
-
-    def stop(self, success: bool) -> None:
-        if self._stopped.is_set():
-            return
-        self._stopped.set()
-        self._stop_event.set()
-        if self._thread is not None and self._thread.is_alive():
-            try:
-                self._thread.join(timeout=2.5)
-            except Exception:
-                logger.exception("Failed to join activation progress monitor thread")
-        elapsed = max(time.time() - self._start_time, 0.0)
-        try:
-            cache_bytes = self._current_cache_bytes()
-        except Exception:
-            cache_bytes = self._baseline_cache_bytes
-        try:
-            store_bytes = self._current_store_bytes()
-        except Exception:
-            store_bytes = self._baseline_store_bytes
-        current_bytes = max(cache_bytes, store_bytes, self._baseline_combined_bytes)
-        self._goal_bytes = max(
-            self._goal_bytes,
-            self._expected_bytes,
-            self._baseline_store_bytes,
-            self._baseline_cache_bytes,
-            self._baseline_combined_bytes,
-            store_bytes,
-            cache_bytes,
-        )
-        if self._goal_bytes > 0.0:
-            self._determinate_started = True
-        percent, eta = self._calculate_progress(current_bytes, elapsed)
-        if success:
-            percent = 100.0
-            eta = 0.0
-        elif percent is None:
-            percent = self._last_percent
-            eta = None
-        try:
-            ui_update_activation_progress(percent, elapsed, eta)
-        except Exception:
-            logger.exception("Failed to finalize activation progress display")
 
 
 # ---------------- Transcriber ----------------
@@ -1238,14 +1102,6 @@ def initialize_transcriber(
         if device == "cpu":
             _force_cpu_env()
 
-        progress_monitor: Optional[ActivationProgressMonitor] = None
-        try:
-            progress_monitor = ActivationProgressMonitor(model_name)
-            progress_monitor.start()
-        except Exception:
-            logger.exception("Failed to start activation progress monitor")
-            progress_monitor = None
-
         try:
             whisper_model = WhisperModel(
                 model_name,
@@ -1268,8 +1124,6 @@ def initialize_transcriber(
                     print(f"CPU fallback failed: {cpu_exc}")
                     logger.exception("CPU fallback model load failed")
                 else:
-                    if progress_monitor is not None:
-                        progress_monitor.stop(success=True)
                     notify(
                         "Running CtrlSpeak transcription on CPU fallback. "
                         "Set CTRLSPEAK_DEVICE=cpu to suppress this message."
@@ -1283,8 +1137,6 @@ def initialize_transcriber(
                         ),
                     )
                     return whisper_model
-            if progress_monitor is not None:
-                progress_monitor.stop(success=False)
             notify("Unable to initialize the transcription model. Please check your installation and try again.")
             finalize(
                 False,
@@ -1293,8 +1145,6 @@ def initialize_transcriber(
             whisper_model = None
             return None
         else:
-            if progress_monitor is not None:
-                progress_monitor.stop(success=True)
             print(f"Whisper model '{model_name}' ready on {device} ({compute_type})")
             finalize(
                 True,
