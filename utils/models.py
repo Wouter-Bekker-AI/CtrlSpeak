@@ -420,24 +420,23 @@ class DownloadDialog:
             "elapsed": tk.StringVar(),
         }
 
-        for row, (label_text, key) in enumerate([
+        for label_text, key in [
             ("Progress", "progress"),
             ("File size", "file_size"),
             ("Downloaded", "downloaded"),
             ("Average speed", "speed"),
             ("ETA", "eta"),
             ("Elapsed", "elapsed"),
-        ]):
-            ttk.Label(metrics, text=f"{label_text}:", style="Caption.TLabel").grid(
-                row=row, column=0, sticky=tk.W, pady=(0, 2)
-            )
-            ttk.Label(metrics, textvariable=self.metric_vars[key], style="Caption.TLabel").grid(
-                row=row, column=1, sticky=tk.W, padx=(12, 0), pady=(0, 2)
-            )
+        ]:
+            column_frame = ttk.Frame(metrics, style="ModernCardInner.TFrame")
+            column_frame.pack(side=tk.LEFT, padx=(0, 24))
 
-        metrics.grid_columnconfigure(0, weight=0)
-        metrics.grid_columnconfigure(1, weight=1)
-
+            ttk.Label(column_frame, text=f"{label_text}:", style="Caption.TLabel").pack(anchor=tk.W)
+            ttk.Label(
+                column_frame,
+                textvariable=self.metric_vars[key],
+                style="Caption.TLabel",
+            ).pack(anchor=tk.W)
         self.status_var = tk.StringVar(value="")
         ttk.Label(card, textvariable=self.status_var, style="Caption.TLabel", wraplength=360,
                   justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 0))
