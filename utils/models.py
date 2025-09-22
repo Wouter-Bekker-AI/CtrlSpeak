@@ -406,7 +406,9 @@ class DownloadDialog:
                                         style="Modern.Horizontal.TProgressbar")
         self.progress.pack(fill=tk.X, pady=(12, 8))
 
-        self.status_var = tk.StringVar(value="")
+        self._start_time = time.time()
+
+        self.status_var = tk.StringVar(value=self._placeholder_status_text())
         ttk.Label(card, textvariable=self.status_var, style="Caption.TLabel").pack(anchor=tk.W)
 
         actions = ttk.Frame(card, style="ModernCardInner.TFrame")
@@ -416,7 +418,6 @@ class DownloadDialog:
         self.cancel_button.pack(side=tk.RIGHT)
 
         self.root.protocol("WM_DELETE_WINDOW", self.cancel)
-        self._start_time = time.time()
         self._last_progress_was_bytes = False
         self._progress_updates_started = False
         self._placeholder_after_id: Optional[str] = None
