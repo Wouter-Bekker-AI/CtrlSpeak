@@ -11,6 +11,9 @@ GUI- and model-heavy integration checks.
   ```bash
   python -m pytest -m core_headless
   ```
+  Pytest is configured (via `pytest.ini`) to only discover tests inside this
+  repository's `tests/` folder so the command works even inside a virtual
+  environment without tripping over third-party packages.
 * **Expected runtime:** a few seconds.
 * **Intended environments:** any developer workstation or CI runner (Linux,
   macOS, or Windows) without GPU/audio dependencies.
