@@ -437,7 +437,6 @@ class DownloadDialog:
                 textvariable=self.metric_vars[key],
                 style="Caption.TLabel",
             ).pack(anchor=tk.W)
-
         self.status_var = tk.StringVar(value="")
         ttk.Label(card, textvariable=self.status_var, style="Caption.TLabel", wraplength=360,
                   justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 0))
