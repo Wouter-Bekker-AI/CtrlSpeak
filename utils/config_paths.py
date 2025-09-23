@@ -23,6 +23,7 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "preferred_server_host": None,
     "preferred_server_port": None,
     "device_preference": "cpu",
+    "input_device": None,
     "model_name": "small",
 }
 

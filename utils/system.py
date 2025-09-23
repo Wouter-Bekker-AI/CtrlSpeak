@@ -15,7 +15,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Queue
-from typing import Dict, Optional, Tuple, Callable
+from typing import Dict, Optional, Tuple, Callable, List
 import subprocess
 import uuid
 import traceback
@@ -585,9 +585,102 @@ def play_model_ready_sound_once() -> None:
 
     threading.Thread(target=_worker, name="CtrlSpeakReadySound", daemon=True).start()
 
+
+def list_input_audio_devices() -> List[Tuple[str, str]]:
+    """Return a list of (device_name, display_label) for input-capable devices."""
+    devices: List[Tuple[str, str]] = []
+    pa_instance: Optional[pyaudio.PyAudio] = None
+    try:
+        pa_instance = pyaudio.PyAudio()
+        host_names: Dict[int, str] = {}
+        try:
+            for host_index in range(pa_instance.get_host_api_count()):
+                host_info = pa_instance.get_host_api_info_by_index(host_index)
+                host_names[host_index] = str(host_info.get("name", ""))
+        except Exception:
+            logger.exception("Failed to enumerate audio host APIs")
+
+        for index in range(pa_instance.get_device_count()):
+            try:
+                info = pa_instance.get_device_info_by_index(index)
+            except Exception:
+                logger.exception("Failed to read audio device info for index %s", index)
+                continue
+            if int(info.get("maxInputChannels", 0)) <= 0:
+                continue
+            name = str(info.get("name", f"Device {index}"))
+            host_name = host_names.get(info.get("hostApi"), "")
+            label = name
+            if host_name:
+                label = f"{label} · {host_name}"
+            devices.append((name, label))
+    except Exception:
+        logger.exception("Failed to enumerate input audio devices")
+        return []
+    finally:
+        if pa_instance is not None:
+            try:
+                pa_instance.terminate()
+            except Exception:
+                logger.exception("Failed to terminate PyAudio after device enumeration")
+    return devices
+
+
+def get_input_device_preference() -> Optional[str]:
+    """Return the stored input device name, or None for system default."""
+    with settings_lock:
+        preferred = settings.get("input_device")
+    if isinstance(preferred, str) and preferred.strip():
+        return preferred
+    return None
+
+
+def set_input_device_preference(device_name: Optional[str]) -> None:
+    """Persist the preferred input device name (None for default)."""
+    cleaned = device_name.strip() if isinstance(device_name, str) else None
+    with settings_lock:
+        settings["input_device"] = cleaned if cleaned else None
+    save_settings()
+
+
+def _resolve_input_device_index(pa_instance: pyaudio.PyAudio, preferred: Optional[str] = None) -> Optional[int]:
+    """Return the PyAudio index for the preferred device, if available."""
+    target = preferred if preferred is not None else get_input_device_preference()
+    if not target:
+        return None
+    try:
+        for index in range(pa_instance.get_device_count()):
+            info = pa_instance.get_device_info_by_index(index)
+            if int(info.get("maxInputChannels", 0)) <= 0:
+                continue
+            if str(info.get("name")) == target:
+                return index
+    except Exception:
+        logger.exception("Failed to resolve preferred input audio device index")
+    return None
+
+
 def record_audio(target_path: Path) -> None:
     pyaudio_instance = pyaudio.PyAudio()
-    stream = pyaudio_instance.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNKSIZE)
+    stream_kwargs = dict(
+        format=FORMAT,
+        channels=CHANNELS,
+        rate=RATE,
+        input=True,
+        frames_per_buffer=CHUNKSIZE,
+    )
+    preferred_index = _resolve_input_device_index(pyaudio_instance)
+    if preferred_index is not None:
+        stream_kwargs["input_device_index"] = preferred_index
+    try:
+        stream = pyaudio_instance.open(**stream_kwargs)
+    except Exception:
+        if "input_device_index" in stream_kwargs:
+            logger.exception("Failed to open preferred input device; falling back to system default")
+            stream_kwargs.pop("input_device_index", None)
+            stream = pyaudio_instance.open(**stream_kwargs)
+        else:
+            raise
     frames = []
     try:
         while recording:

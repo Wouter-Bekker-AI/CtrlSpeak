@@ -23,6 +23,7 @@ from utils.system import (
     manual_discovery_refresh,
     schedule_management_refresh, enqueue_management_task,
     start_server, shutdown_server, initiate_self_uninstall,
+    list_input_audio_devices, get_input_device_preference, set_input_device_preference,
 )
 # IMPORTANT: import the module so we always see the *current* values
 from utils import system as sysmod
@@ -1318,6 +1319,44 @@ class ManagementWindow:
         self.model_status = tk.StringVar()
         ttk.Label(model_card, textvariable=self.model_status, style="Caption.TLabel").pack(anchor=tk.W, pady=(10, 0))
 
+        # Input audio device selection
+        audio_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
+        audio_card.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(audio_card, text="Input audio device", style="SectionHeading.TLabel").pack(anchor=tk.W)
+        audio_accent = ttk.Frame(audio_card, style="AccentLine.TFrame")
+        audio_accent.configure(height=2)
+        audio_accent.pack(fill=tk.X, pady=(10, 12))
+        audio_row = ttk.Frame(audio_card, style="ModernCardInner.TFrame")
+        audio_row.pack(fill=tk.X, pady=(14, 12))
+        self.audio_device_var = tk.StringVar()
+        self.audio_device_combo = ttk.Combobox(
+            audio_row,
+            textvariable=self.audio_device_var,
+            state="readonly",
+            style="Modern.TCombobox",
+            width=40,
+        )
+        self.audio_device_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(
+            audio_row,
+            text="Refresh list",
+            style="Subtle.TButton",
+            command=self._refresh_audio_devices,
+        ).pack(side=tk.LEFT, padx=(12, 0))
+        audio_buttons = ttk.Frame(audio_card, style="ModernCardInner.TFrame")
+        audio_buttons.pack(fill=tk.X, pady=(4, 0))
+        self.apply_audio_device_btn = ttk.Button(
+            audio_buttons,
+            text="Apply input device",
+            style="Accent.TButton",
+            command=self._apply_audio_device,
+        )
+        self.apply_audio_device_btn.pack(side=tk.LEFT)
+        self.audio_device_status = tk.StringVar()
+        ttk.Label(audio_card, textvariable=self.audio_device_status, style="Caption.TLabel").pack(anchor=tk.W, pady=(10, 0))
+        self._audio_device_map: dict[str, Optional[str]] = {}
+        self._refresh_audio_devices(initial=True)
+
         # Client/server controls
         control_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
         control_card.pack(fill=tk.BOTH, expand=True)
@@ -1616,6 +1655,65 @@ class ManagementWindow:
                 finish()
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _refresh_audio_devices(self, initial: bool = False) -> None:
+        entries: list[tuple[str, Optional[str]]] = [("System default (OS managed)", None)]
+        try:
+            for name, label in list_input_audio_devices():
+                display = label or name
+                entries.append((display, name))
+        except Exception:
+            logger.exception("Failed to refresh audio device list")
+
+        if not entries:
+            entries = [("System default (OS managed)", None)]
+
+        self._audio_device_map = {display: value for display, value in entries}
+        self.audio_device_combo.configure(values=[display for display, _ in entries])
+
+        preferred = get_input_device_preference()
+        selected_display = entries[0][0]
+        found = False
+        if preferred:
+            for display, value in entries:
+                if value == preferred:
+                    selected_display = display
+                    found = True
+                    break
+        self.audio_device_var.set(selected_display)
+
+        if not any(value is not None for _, value in entries[1:]):
+            message = "No microphone devices detected."
+        elif preferred and found:
+            message = f"Preferred device: {selected_display}"
+        elif preferred and not found:
+            message = "Preferred device not found. Using system default input device."
+        else:
+            message = "Using system default input device."
+
+        if initial or not self.audio_device_status.get() or not preferred:
+            self.audio_device_status.set(message)
+        elif not initial:
+            self.audio_device_status.set(message)
+
+    # --- device actions ---
+    def _apply_audio_device(self) -> None:
+        try:
+            selection = self.audio_device_var.get()
+        except Exception:
+            selection = ""
+        device_name = self._audio_device_map.get(selection)
+        try:
+            set_input_device_preference(device_name)
+        except Exception:
+            logger.exception("Failed to save preferred audio input device")
+            self.audio_device_status.set("Unable to save audio device preference. See logs for details.")
+            return
+
+        if device_name:
+            self.audio_device_status.set(f"Input device preference saved: {selection}")
+        else:
+            self.audio_device_status.set("Using system default input device.")
 
     # --- device actions ---
     def _apply_device(self):
