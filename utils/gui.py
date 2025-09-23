@@ -22,7 +22,7 @@ from utils.system import (
     start_client_listener, stop_client_listener,
     manual_discovery_refresh,
     schedule_management_refresh, enqueue_management_task,
-    shutdown_server, initiate_self_uninstall,
+    start_server, shutdown_server, initiate_self_uninstall,
 )
 # IMPORTANT: import the module so we always see the *current* values
 from utils import system as sysmod
@@ -36,6 +36,7 @@ from utils.models import (
     get_current_model_name, set_current_model_name,
     model_store_path_for, model_files_present,
     download_model_with_gui,              # opens progress window and downloads model
+    ensure_model_ready_for_local_server,
     is_model_loaded,
     format_bytes,                         # optional pretty bytes
 )
@@ -843,7 +844,7 @@ def show_splash_screen(duration_ms: int) -> None:
     root.mainloop()
 
 # ---------------- First-run mode ----------------
-def prompt_initial_mode() -> Optional[str]:
+def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
     from utils.system import AUTO_MODE_PROFILE
     if AUTO_MODE_PROFILE:
         return AUTO_MODE_PROFILE
@@ -851,17 +852,30 @@ def prompt_initial_mode() -> Optional[str]:
 
     def choose(mode: str) -> None:
         result["mode"] = mode
-        root.destroy()
+        window.destroy()
 
-    root = tk.Tk()
-    apply_modern_theme(root)
-    root.title("Welcome to CtrlSpeak")
-    root.geometry("560x420")
-    root.minsize(520, 360)
-    root.resizable(True, True)
-    root.attributes("-topmost", True)
+    owns_root = parent is None
+    if owns_root:
+        window = tk.Tk()
+    else:
+        window = tk.Toplevel(parent)
+        try:
+            window.transient(parent)
+        except Exception:
+            pass
+        try:
+            window.grab_set()
+        except Exception:
+            logger.exception("Failed to grab mode selection dialog")
 
-    container = ttk.Frame(root, style="Modern.TFrame", padding=(28, 26))
+    apply_modern_theme(window)
+    window.title("Welcome to CtrlSpeak")
+    window.geometry("560x420")
+    window.minsize(520, 360)
+    window.resizable(True, True)
+    window.attributes("-topmost", True)
+
+    container = ttk.Frame(window, style="Modern.TFrame", padding=(28, 26))
     container.pack(fill=tk.BOTH, expand=True)
 
     intro = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
@@ -910,18 +924,28 @@ def prompt_initial_mode() -> Optional[str]:
     )
 
     def cancel() -> None:
-        root.destroy()
+        window.destroy()
 
     ttk.Button(container, text="Quit Setup", style="Subtle.TButton",
                command=cancel).pack(fill=tk.X, pady=(8, 0))
-    root.protocol("WM_DELETE_WINDOW", cancel)
-    root.update_idletasks()
-    req_w = root.winfo_reqwidth()
-    req_h = root.winfo_reqheight()
-    root.geometry(f"{req_w}x{req_h}")
-    root.minsize(req_w, req_h)
-    root.after(200, lambda: root.attributes("-topmost", False))
-    root.mainloop()
+    window.protocol("WM_DELETE_WINDOW", cancel)
+    window.update_idletasks()
+    req_w = window.winfo_reqwidth()
+    req_h = window.winfo_reqheight()
+    window.geometry(f"{req_w}x{req_h}")
+    window.minsize(req_w, req_h)
+    window.after(200, lambda: window.attributes("-topmost", False))
+
+    if owns_root:
+        window.mainloop()
+    else:
+        try:
+            window.wait_window()
+        finally:
+            try:
+                window.grab_release()
+            except Exception:
+                pass
     return result["mode"]
 
 
@@ -1169,8 +1193,39 @@ class ManagementWindow:
         self._activation_busy = False
         self._activation_status_var: Optional[tk.StringVar] = None
 
-        container = ttk.Frame(self.window, style="Modern.TFrame", padding=(30, 26))
-        container.pack(fill=tk.BOTH, expand=True)
+        body = ttk.Frame(self.window, style="Modern.TFrame")
+        body.pack(fill=tk.BOTH, expand=True)
+
+        self._scroll_canvas = tk.Canvas(
+            body,
+            highlightthickness=0,
+            background=BACKGROUND,
+        )
+        self._scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self._scroll_canvas.yview)
+        self._scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self._scroll_canvas.configure(yscrollcommand=self._scrollbar.set)
+
+        self._scroll_content = ttk.Frame(
+            self._scroll_canvas,
+            style="Modern.TFrame",
+            padding=(30, 26),
+        )
+        self._scroll_window = self._scroll_canvas.create_window(
+            (0, 0),
+            window=self._scroll_content,
+            anchor="nw",
+        )
+
+        self._scroll_content.bind("<Configure>", self._update_scroll_region)
+        self._scroll_canvas.bind("<Configure>", self._sync_scroll_width)
+
+        self._mousewheel_bound = False
+        self._scroll_content.bind("<Enter>", self._bind_mousewheel)
+        self._scroll_content.bind("<Leave>", self._unbind_mousewheel)
+
+        container = self._scroll_content
 
         header = ttk.Frame(container, style="ModernCard.TFrame", padding=(26, 24))
         header.pack(fill=tk.X)
@@ -1281,6 +1336,14 @@ class ManagementWindow:
         self.refresh_button = ttk.Button(controls, text="Refresh servers", style="Subtle.TButton",
                                          command=self.refresh_servers)
         self.refresh_button.pack(fill=tk.X, pady=4)
+        self.change_mode_button = ttk.Button(controls, text="Change mode", style="Subtle.TButton",
+                                             command=self.change_mode)
+        self.change_mode_button.pack(fill=tk.X, pady=4)
+        if CLIENT_ONLY_BUILD:
+            try:
+                self.change_mode_button.state(["disabled"])
+            except Exception:
+                logger.exception("Failed to disable change mode button for client-only build")
         exit_label = "Exit CtrlSpeak" if CLIENT_ONLY_BUILD else "Stop everything"
         self.stop_all_button = ttk.Button(controls, text=exit_label, style="Danger.TButton",
                                           command=self.stop_everything)
@@ -1299,8 +1362,7 @@ class ManagementWindow:
         # --- Auto-size window to fit content once everything is laid out ---
         self.window.update_idletasks()
         req_w = max(self.window.winfo_reqwidth(), 580)
-        req_h = max(self.window.winfo_reqheight(), 560)
-        self.window.minsize(req_w, req_h)
+        self.window.minsize(req_w, 560)
 
         self.bring_to_front()
 
@@ -1313,6 +1375,56 @@ class ManagementWindow:
         self.window.deiconify(); self.window.lift(); self.window.focus_force()
         self.window.attributes("-topmost", True)
         self.window.after(150, lambda: self.window.attributes("-topmost", False))
+
+    def _update_scroll_region(self, _event: Optional[tk.Event] = None) -> None:
+        if not self.is_open():
+            return
+        try:
+            self._scroll_canvas.configure(scrollregion=self._scroll_canvas.bbox("all"))
+        except Exception:
+            logger.exception("Failed to update management window scroll region")
+
+    def _sync_scroll_width(self, event: tk.Event) -> None:
+        if not self.is_open():
+            return
+        try:
+            self._scroll_canvas.itemconfigure(self._scroll_window, width=event.width)
+        except Exception:
+            logger.exception("Failed to sync management window scroll width")
+
+    def _on_mousewheel(self, event: tk.Event) -> None:
+        if not self.is_open():
+            return
+
+        delta = 0
+        if hasattr(event, "delta") and event.delta:
+            delta = int(event.delta)
+        elif getattr(event, "num", None) in (4, 5):
+            delta = 120 if event.num == 4 else -120
+
+        if delta == 0:
+            return
+
+        direction = -1 if delta > 0 else 1
+        self._scroll_canvas.yview_scroll(direction, "units")
+
+    def _bind_mousewheel(self, _event: tk.Event) -> None:
+        if self._mousewheel_bound:
+            return
+        widget = self.window
+        widget.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
+        widget.bind_all("<Button-4>", self._on_mousewheel, add="+")
+        widget.bind_all("<Button-5>", self._on_mousewheel, add="+")
+        self._mousewheel_bound = True
+
+    def _unbind_mousewheel(self, _event: Optional[tk.Event]) -> None:
+        if not self._mousewheel_bound:
+            return
+        widget = self.window
+        widget.unbind_all("<MouseWheel>")
+        widget.unbind_all("<Button-4>")
+        widget.unbind_all("<Button-5>")
+        self._mousewheel_bound = False
 
     # --- state refresh ---
     def refresh_status(self) -> None:
@@ -1610,6 +1722,78 @@ class ManagementWindow:
         self.refresh_button.state(["!disabled"]); self.refresh_button.config(text="Refresh Servers")
         self.refresh_status()
 
+    def change_mode(self) -> None:
+        if CLIENT_ONLY_BUILD:
+            messagebox.showinfo(
+                "Mode",
+                "This build only supports the client mode.",
+                parent=self.window,
+            )
+            return
+
+        if not self.is_open():
+            return
+
+        try:
+            self.change_mode_button.state(["disabled"])
+        except Exception:
+            logger.exception("Failed to disable change mode button before dialog")
+
+        with settings_lock:
+            current_mode = settings.get("mode")
+
+        try:
+            choice = prompt_initial_mode(self.window)
+        finally:
+            try:
+                self.change_mode_button.state(["!disabled"])
+            except Exception:
+                logger.exception("Failed to re-enable change mode button after dialog")
+
+        if not choice or choice == current_mode:
+            return
+
+        if choice == "client_server":
+            if not ensure_model_ready_for_local_server():
+                messagebox.showwarning(
+                    "Mode not changed",
+                    "CtrlSpeak could not prepare the local transcription engine.",
+                    parent=self.window,
+                )
+                return
+            start_server()
+            if not (sysmod.server_thread and sysmod.server_thread.is_alive()):
+                messagebox.showerror(
+                    "Mode not changed",
+                    "CtrlSpeak could not start the local server.",
+                    parent=self.window,
+                )
+                return
+        else:
+            shutdown_server()
+            try:
+                manual_discovery_refresh()
+            except Exception:
+                logger.exception("Failed to refresh discovery after switching to client mode")
+
+        with settings_lock:
+            settings["mode"] = choice
+        save_settings()
+
+        try:
+            self._icon.title = f"CtrlSpeak ({choice})"
+        except Exception:
+            logger.exception("Failed to update tray icon title after mode change")
+
+        self.refresh_status()
+
+        mode_label = "Client + Server" if choice == "client_server" else "Client Only"
+        messagebox.showinfo(
+            "Mode updated",
+            f"CtrlSpeak will now operate in {mode_label} mode.",
+            parent=self.window,
+        )
+
     def stop_everything(self) -> None:
         stop_client_listener(); shutdown_server()
         self.refresh_status()
@@ -1625,5 +1809,7 @@ class ManagementWindow:
 
     def close(self) -> None:
         global management_window
-        if self.is_open(): self.window.destroy()
+        if self.is_open():
+            self._unbind_mousewheel(None)
+            self.window.destroy()
         management_window = None
