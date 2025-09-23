@@ -34,6 +34,7 @@ from utils.system import (
     ui_show_activation_popup, ui_close_activation_popup,
     ui_show_lockout_window, ui_update_lockout_message, ui_close_lockout_window,
     pump_management_events_once,
+    play_model_ready_sound_once,
 )
 from utils.system import get_best_server, CLIENT_ONLY_BUILD
 from utils.ui_theme import apply_modern_theme
@@ -1221,6 +1222,7 @@ def initialize_transcriber(
                             f"The Whisper model '{model_name}' is running on the CPU fallback."
                         ),
                     )
+                    play_model_ready_sound_once()
                     return whisper_model
             notify("Unable to initialize the transcription model. Please check your installation and try again.")
             finalize(
@@ -1238,12 +1240,14 @@ def initialize_transcriber(
                     f"The Whisper model '{model_name}' is ready on {device.upper()} ({compute_type})."
                 ),
             )
+            play_model_ready_sound_once()
             return whisper_model
 
     with model_lock:
         if whisper_model is not None and not force:
             if activation_finalizer is not None:
                 activation_finalizer(True, None)
+            play_model_ready_sound_once()
             return whisper_model
 
         with settings_lock:
