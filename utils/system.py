@@ -128,6 +128,8 @@ processing_sound_thread: Optional[threading.Thread] = None
 processing_sound_stop_event = threading.Event()
 processing_sound_data: Optional[bytes] = None
 processing_sound_settings: Optional[Dict[str, int]] = None
+_ready_sound_lock = threading.Lock()
+_ready_sound_played = False
 
 recording_temp_dir_name = "temp"
 AUTO_MODE = False
@@ -545,6 +547,43 @@ def stop_processing_feedback():
     if processing_sound_thread and processing_sound_thread.is_alive():
         processing_sound_thread.join(timeout=1.0)
     processing_sound_thread = None
+
+
+def play_model_ready_sound_once() -> None:
+    global _ready_sound_played
+    with _ready_sound_lock:
+        if _ready_sound_played:
+            return
+        _ready_sound_played = True
+
+    def _worker() -> None:
+        pa_instance = None
+        stream = None
+        try:
+            data, settings_audio = load_processing_sound()
+            pa_instance = pyaudio.PyAudio()
+            stream = pa_instance.open(
+                format=pyaudio.get_format_from_width(settings_audio["width"]),
+                channels=settings_audio["channels"],
+                rate=settings_audio["rate"],
+                output=True,
+            )
+            stream.write(data)
+        except Exception:
+            logger.exception("Failed to play model ready sound")
+        finally:
+            try:
+                if stream is not None:
+                    stream.stop_stream(); stream.close()
+            except Exception:
+                logger.exception("Failed to close ready sound stream cleanly")
+            if pa_instance is not None:
+                try:
+                    pa_instance.terminate()
+                except Exception:
+                    logger.exception("Failed to terminate PyAudio after ready sound")
+
+    threading.Thread(target=_worker, name="CtrlSpeakReadySound", daemon=True).start()
 
 def record_audio(target_path: Path) -> None:
     pyaudio_instance = pyaudio.PyAudio()
