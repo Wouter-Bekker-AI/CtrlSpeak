@@ -966,7 +966,15 @@ def ensure_initial_model_installation() -> bool:
     """Auto-install the default model on first run without prompting the user."""
 
     with settings_lock:
+        mode = settings.get("mode")
         auto_install_needed = not bool(settings.get("model_auto_install_complete"))
+
+    if mode == "client":
+        trace_model_download_step(
+            "ensure_initial_model_installation: client mode",
+            "skip auto install",
+        )
+        return True
 
     if not auto_install_needed:
         trace_model_download_step(
