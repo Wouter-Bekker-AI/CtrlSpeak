@@ -21,8 +21,12 @@ from utils.system import (
     apply_auto_setup,
 )
 
-from utils.gui import show_splash_screen, ensure_mode_selected
-from utils.models import initialize_transcriber, ensure_model_ready_for_local_server
+from utils.gui import show_splash_screen, ensure_mode_selected, ensure_management_ui_thread
+from utils.models import (
+    initialize_transcriber,
+    ensure_model_ready_for_local_server,
+    ensure_initial_model_installation,
+)
 
 
 def main(argv: list[str]) -> int:
@@ -55,8 +59,15 @@ def main(argv: list[str]) -> int:
     # Splash
     show_splash_screen(SPLASH_DURATION_MS)
 
+    # Prepare the shared management UI root before any background tasks need it
+    ensure_management_ui_thread()
+
     # Ensure mode selected (client or client_server)
     ensure_mode_selected()
+
+    # Auto-install the default speech model on first launch
+    if not ensure_initial_model_installation():
+        return 0
 
     # Determine the selected mode now that setup is complete
     with settings_lock:
