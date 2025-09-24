@@ -101,6 +101,36 @@ After updates you can re-run `--auto-setup client_server` to refresh the install
 - Test audio files such as `part1.wav` are intentionally excluded from Git to avoid large binaries.
 - Use the tray menu to manage the client/server lifecycle or to uninstall (`Delete CtrlSpeak`).
 
+## Automation Flow
+
+Run the regression harness to validate a workstation without touching the GUI:
+
+```powershell
+python main.py --automation-flow
+```
+
+The command performs a staged health-check entirely inside %APPDATA%\CtrlSpeak:
+
+1. Ensure the default Whisper model is present under %APPDATA%\CtrlSpeak\models (downloading it when missing).
+2. Copy any existing NVIDIA CUDA runtime wheels (nvidia-cuda-runtime-cu12, nvidia-cublas-cu12, nvidia-cudnn-cu12) into %APPDATA%\CtrlSpeak\cuda, installing them first if needed.
+3. Transcribe assets/test.wav on the CPU.
+4. Transcribe the same clip on the GPU using the DLLs staged in %APPDATA%\CtrlSpeak\cuda.
+5. Simulate each text-injection strategy (direct insert, SendInput paste, clipboard paste, PyAutoGUI typing) and write a consolidated report to %APPDATA%\CtrlSpeak\automation\artifacts.
+
+If any stage fails the workflow stops at that checkpoint and leaves detailed logs plus the partially populated automation_state.json in the same automation folder. Fix the underlying system issue (drivers, CUDA DLLs, networking, etc.) and re-run the flag - the script resumes where it left off.
+
+### Handing the checklist to another operator or AI agent
+
+Provide your helper with the single command above and the acceptance criteria:
+
+- All stages complete without errors on a single pass.
+- %APPDATA%\CtrlSpeak\automation\artifacts contains a report named automation_run_*.txt whose injection sections echo the canonical transcript.
+- %APPDATA%\CtrlSpeak\cuda holds the CUDA DLLs and `python main.py` can select both CPU and GPU devices without warnings.
+
+An agent can loop on `python main.py --automation-flow`, examine automation_state.json, and only make host-level changes (install drivers, adjust PATH, etc.) until the run succeeds - no code edits are required.
+
+
+
 ## License
 
 This project is released under the MIT License:
