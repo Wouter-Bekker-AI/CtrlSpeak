@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from datetime import datetime
+
 import atexit
 import argparse
 import http.client
@@ -15,7 +17,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Queue
-from typing import Dict, Optional, Tuple, Callable, List
+from typing import Dict, Optional, Tuple, Callable, List, TYPE_CHECKING
 import subprocess
 import uuid
 import traceback
@@ -141,11 +143,15 @@ management_ui_queue: "Queue[tuple[Callable[..., None], tuple, dict]]" = Queue()
 tk_root: Optional[tk.Tk] = None
 management_window: Optional["ManagementWindow"] = None  # created in utils.gui
 
+if TYPE_CHECKING:
+    from utils.gui import ManagementWindow
+
 # ---------------- IMPORTS from new split modules (and re-exports) ----------------
 
 # Win32 text insertion / clipboard
 from utils.winio import (
-    insert_text_into_focus, set_force_sendinput, is_console_window
+    insert_text_into_focus, set_force_sendinput, is_console_window,
+    set_clipboard_text,
 )
 
 # LAN discovery (single source of truth for ServerInfo)
@@ -247,6 +253,22 @@ def ui_close_lockout_window(message: str | None = None) -> None:
         logger.exception("Failed to close lockout window")
 
 
+def write_error_log(context: str, snippet: str) -> None:
+    try:
+        logs_dir = get_logs_dir()
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        error_path = logs_dir / ERROR_LOG_FILENAME
+        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        with error_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{timestamp}] {context}\n{snippet}\n\n")
+    except Exception:
+        logger.exception("Failed to write error log entry")
+
+
+def copy_to_clipboard(text: str) -> None:
+    try:
+        if not set_clipboard_text(text):
+            logger.warning("Failed to stage clipboard text")
     except Exception:
         logger.exception("Failed to copy text to clipboard")
 
@@ -1097,3 +1119,4 @@ def apply_auto_setup(profile: str) -> None:
     logger.info("Applying auto-setup profile: %s", profile)
     with settings_lock: settings["mode"] = profile
     save_settings()
+

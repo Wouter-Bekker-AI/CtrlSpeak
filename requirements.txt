@@ -11,3 +11,5 @@ pynput
 pystray
 tqdm
 pytest
+pylint
+pyright

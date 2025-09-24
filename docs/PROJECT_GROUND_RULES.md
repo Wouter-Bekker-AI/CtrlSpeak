@@ -48,7 +48,7 @@
 
 ## Testing obligations before submitting changes
 - Run the compile smoke test to ensure every module still compiles to bytecode: `python -m compileall .`.
-- Execute the core headless pytest suite on every change: `python -m pytest -m core_headless`. This fast suite guards configuration helpers, CLI parsing, and discovery utilities.【F:tests/TESTING.md†L1-L34】
+- Execute the core headless pytest suite on every change: `python -m pytest -m core_headless`. This fast suite guards configuration helpers, CLI parsing, and discovery utilities. The run must succeed; if it fails, stop, investigate, and explain the failure in your status update before proceeding.【F:tests/TESTING.md†L1-L34】
 - Regularly run the full GUI/integration suite (`CTRLSPEAK_RUN_FULL_TESTS=1 python -m pytest -m full_gui`) and the combined run (`CTRLSPEAK_RUN_FULL_TESTS=1 python -m pytest`) to catch regressions that span the entire pipeline.【F:tests/TESTING.md†L18-L52】
 
 ## Documentation synchronization
