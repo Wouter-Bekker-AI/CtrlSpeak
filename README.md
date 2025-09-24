@@ -24,7 +24,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-GPU acceleration requires an NVIDIA CUDA-capable GPU with compatible drivers. Whisper models are downloaded on demand when the application starts in server mode.
+GPU acceleration requires an NVIDIA CUDA-capable GPU with compatible drivers, but CtrlSpeak always boots in CPU mode and skips CUDA validation unless you opt in. The Whisper `small` model is downloaded automatically on first launch so a fresh install is usable immediately. Use the management window or `python main.py --setup-cuda` later if you want to stage GPU support.
 
 ## Running from Source
 
@@ -38,6 +38,7 @@ On first launch you will be prompted to choose between **Client + Server** or **
 
 - `--auto-setup {client,client_server}` – pre-select the startup mode without showing the GUI prompts.
 - `--force-sendinput` – force the AnyDesk-compatible synthetic keystroke path.
+- `--setup-cuda` – stage CUDA runtime support (reuse existing files or download the NVIDIA wheels) and exit.
 - `--transcribe <wav>` – batch process an audio file without the hotkey workflow.
 - `--uninstall` – remove the application data and executable (used by the packaged build).
 
@@ -112,7 +113,7 @@ python main.py --automation-flow
 The command performs a staged health-check entirely inside %APPDATA%\CtrlSpeak:
 
 1. Ensure the default Whisper model is present under %APPDATA%\CtrlSpeak\models (downloading it when missing).
-2. Copy any existing NVIDIA CUDA runtime wheels (nvidia-cuda-runtime-cu12, nvidia-cublas-cu12, nvidia-cudnn-cu12) into %APPDATA%\CtrlSpeak\cuda, installing them first if needed.
+2. Reuse or install the NVIDIA CUDA runtime (nvidia-cuda-runtime-cu12, nvidia-cublas-cu12, nvidia-cudnn-cu12) so the DLLs live under %APPDATA%\CtrlSpeak\cuda when GPU testing is required.
 3. Transcribe assets/test.wav on the CPU.
 4. Transcribe the same clip on the GPU using the DLLs staged in %APPDATA%\CtrlSpeak\cuda.
 5. Simulate each text-injection strategy (direct insert, SendInput paste, clipboard paste, PyAutoGUI typing) and write a consolidated report to %APPDATA%\CtrlSpeak\automation\artifacts.

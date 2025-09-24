@@ -6,6 +6,7 @@ import sys
 import time
 import threading
 import subprocess
+import shutil
 from datetime import datetime
 from pathlib import Path
 from queue import Queue, Empty
@@ -85,19 +86,29 @@ def trace_model_download_step(current_step: str, expected_next: Optional[str] = 
 
 # ---------------- Settings-backed getters/setters ----------------
 def get_device_preference() -> str:
-    """Returns 'cpu' | 'cuda' | 'auto' (settings first, env fallback)."""
+    """Return the persisted compute device preference, defaulting to CPU."""
+
+    valid = {"cpu", "cuda"}
     with settings_lock:
         pref = settings.get("device_preference")
-    if pref in {"cpu", "cuda", "auto"}:
-        return str(pref)
-    return ENV_DEVICE_PREF if ENV_DEVICE_PREF in {"cpu", "cuda", "auto"} else "auto"
+
+    if isinstance(pref, str) and pref in valid:
+        return pref
+
+    env_pref = ENV_DEVICE_PREF if ENV_DEVICE_PREF in valid else None
+    if env_pref:
+        return env_pref
+
+    with settings_lock:
+        settings["device_preference"] = "cpu"
+    save_settings()
+    return "cpu"
 
 
 def set_device_preference(pref: str) -> None:
-    if pref not in {"cpu", "cuda", "auto"}:
-        pref = "auto"
+    normalized = "cuda" if pref == "cuda" else "cpu"
     with settings_lock:
-        settings["device_preference"] = pref
+        settings["device_preference"] = normalized
     save_settings()
 
 
@@ -234,29 +245,215 @@ def configure_cuda_paths() -> None:
     cuda_paths_initialized = True
 
 
-def cuda_runtime_ready(*, ignore_preference: bool = False) -> bool:
-    # ⬅️ New: never probe CUDA when the user picked CPU — avoids native crash
+def cuda_runtime_ready(*, ignore_preference: bool = False, quiet: bool = False) -> bool:
+    """Validate that CUDA DLLs can be loaded for GPU inference."""
+
     try:
         if not ignore_preference and get_device_preference() == "cpu":
             return False
     except Exception:
-        logger.exception("Failed to read device preference while checking CUDA readiness")
-        # If settings aren't ready yet, fall through safely.
+        if quiet:
+            logger.debug("Failed to read device preference while checking CUDA readiness", exc_info=True)
+        else:
+            logger.exception("Failed to read device preference while checking CUDA readiness")
+        # Fall back to attempting detection in case settings are not ready yet.
+
     configure_cuda_paths()
+
     try:
         if ctranslate2.get_cuda_device_count() <= 0:
             return False
     except Exception:
-        logger.exception("CUDA device probe failed")
+        if quiet:
+            logger.debug("CUDA device probe failed", exc_info=True)
+        else:
+            logger.exception("CUDA device probe failed")
         return False
+
     if sys.platform.startswith("win"):
         for dll in ("cudnn_ops64_9.dll", "cublas64_12.dll"):
             try:
                 ctypes.windll.LoadLibrary(dll)
             except OSError as exc:
-                logger.warning("Failed to load CUDA DLL %s: %s", dll, exc)
+                if quiet:
+                    logger.debug("Failed to load CUDA DLL %s: %s", dll, exc)
+                else:
+                    logger.warning("Failed to load CUDA DLL %s: %s", dll, exc)
                 return False
+
     return True
+
+
+
+def _cuda_destination_root() -> Path:
+    dest_root = get_config_dir() / "cuda"
+    dest_root.mkdir(parents=True, exist_ok=True)
+    return dest_root
+
+
+def cuda_runtime_files_present() -> bool:
+    """Return True when essential CUDA runtime files exist under the app data folder."""
+
+    root = get_config_dir() / "cuda"
+    if not root.exists():
+        return False
+
+    if sys.platform.startswith("win"):
+        required = (
+            "cudart64_*.dll",
+            "cublas64_*.dll",
+            "cublasLt64_*.dll",
+            "cudnn*.dll",
+        )
+    else:
+        required = (
+            "libcudart.so*",
+            "libcublas.so*",
+            "libcudnn*.so*",
+        )
+
+    for pattern in required:
+        if not any(root.rglob(pattern)):
+            return False
+    return True
+
+
+def _copy_from_nvidia_packages(dest_root: Path) -> bool:
+    staged = False
+    prefixes = {Path(sys.prefix)}
+    base_prefix = getattr(sys, "base_prefix", None)
+    if base_prefix:
+        prefixes.add(Path(base_prefix))
+
+    for prefix in prefixes:
+        package_root = prefix / "Lib" / "site-packages" / "nvidia"
+        if not package_root.exists():
+            continue
+
+        for component in ("cuda_runtime", "cudnn", "cublas"):
+            src = package_root / component
+            if not src.exists():
+                continue
+            dest = dest_root / component
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(src, dest)
+            staged = True
+
+        runtime_bin = dest_root / "cuda_runtime" / "bin"
+        dest_bin = dest_root / "bin"
+        if runtime_bin.exists():
+            if dest_bin.exists():
+                shutil.rmtree(dest_bin)
+            shutil.copytree(runtime_bin, dest_bin)
+            staged = True
+
+    return staged
+
+
+def _collect_system_cuda_bin_dirs() -> list[Path]:
+    candidates: list[Path] = []
+
+    def _extend(path_value: str | os.PathLike[str] | None) -> None:
+        if not path_value:
+            return
+        base = Path(path_value)
+        if not base.exists():
+            return
+        for sub in ("bin", "lib", "lib64"):
+            candidate = base / sub
+            if candidate.exists():
+                candidates.append(candidate)
+
+    for key, value in os.environ.items():
+        upper = key.upper()
+        if upper.startswith("CUDA_PATH") or upper in {"CUDA_HOME", "CUDA_ROOT"}:
+            _extend(value)
+
+    for env_key in ("ProgramFiles", "ProgramFiles(x86)"):
+        base_val = os.environ.get(env_key)
+        if not base_val:
+            continue
+        toolkit_root = Path(base_val) / "NVIDIA GPU Computing Toolkit" / "CUDA"
+        if not toolkit_root.exists():
+            continue
+        for child in sorted(toolkit_root.iterdir()):
+            if child.is_dir():
+                _extend(child)
+
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate not in seen:
+            seen.add(candidate)
+            unique.append(candidate)
+    return unique
+
+
+def _copy_from_system_cuda(dest_root: Path) -> bool:
+    candidates = _collect_system_cuda_bin_dirs()
+    if not candidates:
+        return False
+
+    dest_bin = dest_root / "bin"
+    if dest_bin.exists():
+        shutil.rmtree(dest_bin)
+    dest_bin.mkdir(parents=True, exist_ok=True)
+
+    staged = False
+    patterns = (
+        "cudart64_*.dll",
+        "cublas64_*.dll",
+        "cublasLt64_*.dll",
+        "nvblas64_*.dll",
+        "cudnn*.dll",
+        "libcudart.so*",
+        "libcublas.so*",
+        "libcudnn*.so*",
+    )
+    for source_dir in candidates:
+        for pattern in patterns:
+            for file in source_dir.glob(pattern):
+                try:
+                    shutil.copy2(file, dest_bin / file.name)
+                    staged = True
+                except Exception:
+                    logger.debug("Failed to copy CUDA file %s", file, exc_info=True)
+    return staged
+
+
+def stage_cuda_runtime_from_existing() -> bool:
+    dest_root = _cuda_destination_root()
+
+    if cuda_runtime_files_present() and cuda_runtime_ready(ignore_preference=True, quiet=True):
+        return True
+
+    staged = False
+    try:
+        staged = _copy_from_nvidia_packages(dest_root) or staged
+        if not staged:
+            staged = _copy_from_system_cuda(dest_root)
+    except Exception:
+        logger.exception("Failed to reuse existing CUDA runtime files")
+        return False
+
+    if not staged:
+        return False
+
+    global cuda_paths_initialized
+    cuda_paths_initialized = False
+    if not cuda_runtime_ready(ignore_preference=True, quiet=True):
+        logger.debug("CUDA runtime validation failed after staging existing assets")
+        return False
+
+    return True
+
+
+def ensure_cuda_runtime_from_existing() -> bool:
+    if stage_cuda_runtime_from_existing():
+        logger.info("Reused existing CUDA runtime assets for CtrlSpeak.")
+        return True
+    return False
 
 
 
@@ -281,53 +478,78 @@ def _run_cmd_stream(cmd: List[str], timeout: int | None = None) -> int:
 
 
 def install_cuda_runtime_with_progress(parent=None) -> bool:
-    """
-    Headless CUDA installer (pip NVIDIA wheels). GUI wrappers can messagebox around it.
-    Looks in %APPDATA%\\CtrlSpeak\\cuda as well afterwards.
-    """
+    """Install or repair CUDA runtime support for CtrlSpeak."""
+
+    if ensure_cuda_runtime_from_existing():
+        return True
+
+    try:
+        import pip  # type: ignore
+    except ModuleNotFoundError:
+        logger.info("pip module not found; bootstrapping ensurepip before CUDA install")
+        ensure_rc = _run_cmd_stream([sys.executable, "-m", "ensurepip", "--upgrade"], timeout=300)
+        if ensure_rc != 0:
+            notify("CUDA runtime installation failed because pip could not be bootstrapped.")
+            try:
+                ui_close_lockout_window("CtrlSpeak could not install pip. GPU support remains unavailable; continuing with CPU.")
+            except Exception:
+                logger.exception("Failed to close lockout window after ensurepip failure")
+            return False
+
     pkgs = ["nvidia-cuda-runtime-cu12", "nvidia-cublas-cu12", "nvidia-cudnn-cu12"]
     cmd = [
-        sys.executable, "-m", "pip", "install",
-        "--quiet", "--disable-pip-version-check",
-        "--extra-index-url", "https://pypi.nvidia.com",
-        *pkgs
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--quiet",
+        "--disable-pip-version-check",
+        "--extra-index-url",
+        "https://pypi.nvidia.com",
+        *pkgs,
     ]
+
+    lockout_open = False
     try:
         ui_show_lockout_window(
             "CtrlSpeak is installing CUDA runtime components required for GPU transcription. "
             "Please wait for this to finish."
         )
+        lockout_open = True
     except Exception:
         logger.exception("Failed to show lockout window during CUDA installation")
 
     rc = _run_cmd_stream(cmd, timeout=600)
     if rc != 0:
         notify("CUDA runtime installation failed (pip returned non-zero).")
-        try:
-            ui_close_lockout_window("CUDA runtime installation failed. CtrlSpeak will continue using the CPU.")
-        except Exception:
-            logger.exception("Failed to close lockout window after CUDA installation failure")
+        if lockout_open:
+            try:
+                ui_close_lockout_window("CUDA runtime installation failed. CtrlSpeak will continue using the CPU.")
+            except Exception:
+                logger.exception("Failed to close lockout window after CUDA installation failure")
         return False
 
-    # refresh DLL search path + verify
-    time.sleep(0.5)
-    ready = cuda_runtime_ready(ignore_preference=True)
-    if not ready:
+    if not ensure_cuda_runtime_from_existing():
+        notify("CUDA runtime installation completed, but validation failed. CtrlSpeak will continue using the CPU.")
+        if lockout_open:
+            try:
+                ui_close_lockout_window(
+                    "CUDA runtime installation completed, but validation failed. CtrlSpeak will continue using the CPU."
+                )
+            except Exception:
+                logger.exception("Failed to close lockout window after CUDA validation failure")
+        return False
+
+    if lockout_open:
         try:
             ui_close_lockout_window(
-                "CtrlSpeak installed the CUDA runtime but could not validate the GPU libraries."
+                "CUDA runtime components were installed successfully. CtrlSpeak will continue preparing the Whisper model."
             )
         except Exception:
-            logger.exception("Failed to close lockout window after CUDA validation failure")
-        return False
+            logger.exception("Failed to close lockout window after CUDA installation")
 
-    try:
-        ui_close_lockout_window(
-            "CUDA runtime components were installed successfully. CtrlSpeak will continue preparing the Whisper model."
-        )
-    except Exception:
-        logger.exception("Failed to close lockout window after CUDA installation")
     return True
+
 
 
 # ---------------- Download dialog (GUI) ----------------
@@ -969,18 +1191,10 @@ def _ensure_model_files(interactive: bool = True) -> bool:
 
 
 def ensure_initial_model_installation() -> bool:
-    """Auto-install the default model on first run without prompting the user."""
+    """Ensure the default Whisper model is installed so CtrlSpeak is immediately usable."""
 
     with settings_lock:
-        mode = settings.get("mode")
         auto_install_needed = not bool(settings.get("model_auto_install_complete"))
-
-    if mode == "client":
-        trace_model_download_step(
-            "ensure_initial_model_installation: client mode",
-            "skip auto install",
-        )
-        return True
 
     if not auto_install_needed:
         trace_model_download_step(
@@ -993,19 +1207,19 @@ def ensure_initial_model_installation() -> bool:
         "ensure_initial_model_installation: beginning auto install",
         "call _ensure_model_files",
     )
+    set_current_model_name(DEFAULT_MODEL_NAME)
     return _ensure_model_files(interactive=True)
 
 
 def resolve_device() -> str:
     if CLIENT_ONLY_BUILD:
         return "cpu"
+
     preference = get_device_preference()
-    if preference == "cpu":
-        return "cpu"
-    if preference == "cuda":
-        return "cuda" if cuda_runtime_ready() else "cpu"
-    # auto
-    return "cuda" if cuda_runtime_ready() else "cpu"
+    if preference == "cuda" and cuda_runtime_ready(quiet=True):
+        return "cuda"
+
+    return "cpu"
 
 
 def resolve_compute_type(device: str) -> str:
@@ -1068,14 +1282,11 @@ def initialize_transcriber(
         )
         if (
             device == "cpu"
-            and get_device_preference() in {"auto", "cuda"}
+            and get_device_preference() == "cuda"
             and not warned_cuda_unavailable
             and preferred_device is None
         ):
-            notify(
-                "CUDA dependencies were not detected. CtrlSpeak will run Whisper on the CPU instead. "
-                "Open the CtrlSpeak management window from the system tray to install GPU support."
-            )
+            logger.info("CUDA runtime not available; continuing on CPU.")
             warned_cuda_unavailable = True
 
         compute_type = resolve_compute_type(device)
@@ -1116,10 +1327,7 @@ def initialize_transcriber(
                     whisper_model = None
                     return None
                 else:
-                    notify(
-                        "Running CtrlSpeak transcription on CPU fallback. "
-                        "Set CTRLSPEAK_DEVICE=cpu to suppress this message."
-                    )
+                    logger.info("CUDA runtime not available; using CPU fallback.")
                     warned_cuda_unavailable = True
                     trace_model_download_step(
                         "initialize_transcriber: cpu fallback succeeded",
@@ -1272,3 +1480,5 @@ def transcribe_audio(file_path: str, play_feedback: bool = True) -> Optional[str
     else:
         notify("CtrlSpeak mode is not configured. Restart the application.")
         return None
+
+

@@ -53,6 +53,14 @@ def main(argv: list[str]) -> int:
     # Load settings early
     load_settings()
 
+    if getattr(args, "setup_cuda", False):
+        from utils.models import ensure_cuda_runtime_from_existing, install_cuda_runtime_with_progress
+
+        success = ensure_cuda_runtime_from_existing()
+        if not success:
+            success = install_cuda_runtime_with_progress(parent=None) and ensure_cuda_runtime_from_existing()
+        return 0 if success else 1
+
     if args.auto_setup:
         apply_auto_setup(args.auto_setup)
 

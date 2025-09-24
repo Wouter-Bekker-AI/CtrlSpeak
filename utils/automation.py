@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -33,6 +32,7 @@ from utils.models import (
     transcribe_local,
     unload_transcriber,
     cuda_runtime_ready,
+    ensure_cuda_runtime_from_existing,
     install_cuda_runtime_with_progress,
 )
 
@@ -118,41 +118,6 @@ def _config_dir_path() -> Path:
     else:
         base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     return base / "CtrlSpeak"
-
-
-# ---------------------------------------------------------------------------
-# CUDA helpers
-# ---------------------------------------------------------------------------
-
-
-def _sync_cuda_runtime_to_appdata() -> Path:
-    dest_root = _config_dir_path() / "cuda"
-    site_packages_root = Path(sys.prefix) / "Lib" / "site-packages" / "nvidia"
-    dest_root.mkdir(parents=True, exist_ok=True)
-
-    copied_any = False
-    if site_packages_root.exists():
-        for component in ("cuda_runtime", "cudnn", "cublas"):
-            src = site_packages_root / component
-            if not src.exists():
-                continue
-            dest = dest_root / component
-            if dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(src, dest)
-            copied_any = True
-
-    runtime_bin = dest_root / "cuda_runtime" / "bin"
-    dest_bin = dest_root / "bin"
-    if runtime_bin.exists():
-        if dest_bin.exists():
-            shutil.rmtree(dest_bin)
-        shutil.copytree(runtime_bin, dest_bin)
-        copied_any = True
-
-    if not copied_any:
-        _log("CUDA runtime components not found in site-packages; nothing copied.")
-    return dest_root
 
 
 # ---------------------------------------------------------------------------
@@ -251,17 +216,15 @@ def _stage_model(state: Dict[str, Any]) -> None:
 
 def _stage_cuda(state: Dict[str, Any]) -> None:
     _ensure_settings_loaded()
-    _sync_cuda_runtime_to_appdata()
-    if not cuda_runtime_ready(ignore_preference=True):
+    if ensure_cuda_runtime_from_existing():
+        state["cuda"]["details"] = "reused"
+    else:
         _log("CUDA runtime not detected; installing NVIDIA CUDA components")
         if not install_cuda_runtime_with_progress(parent=None):
             raise AutomationError("CUDA runtime installation failed")
-        _sync_cuda_runtime_to_appdata()
-        if not cuda_runtime_ready(ignore_preference=True):
+        if not ensure_cuda_runtime_from_existing():
             raise AutomationError("CUDA runtime validation failed after installation")
         state["cuda"]["details"] = "installed"
-    else:
-        state["cuda"]["details"] = "reused"
     state["cuda"]["done"] = True
     _save_state(state)
 
@@ -280,7 +243,7 @@ def _stage_gpu(state: Dict[str, Any]) -> None:
     _ensure_settings_loaded()
     test_wav = _ensure_test_audio()
     set_device_preference("cuda")
-    _sync_cuda_runtime_to_appdata()
+    ensure_cuda_runtime_from_existing()
     if not cuda_runtime_ready(ignore_preference=True):
         raise AutomationError("CUDA runtime is not ready; cannot execute GPU transcription")
     gpu_text = _transcribe_with_device(test_wav, "cuda")
@@ -381,3 +344,6 @@ def run_automation_flow() -> int:
         shutdown_all()
         unload_transcriber()
         time.sleep(0.2)
+
+
+

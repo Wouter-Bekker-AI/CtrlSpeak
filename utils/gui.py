@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import sys
@@ -33,6 +33,8 @@ from utils.models import (
     AVAILABLE_MODELS,
     cuda_runtime_ready,
     install_cuda_runtime_with_progress,   # opens progress window and installs nvidia wheels
+    ensure_cuda_runtime_from_existing,
+    cuda_runtime_files_present,
     get_device_preference, set_device_preference,
     get_current_model_name, set_current_model_name,
     model_store_path_for, model_files_present,
@@ -165,7 +167,7 @@ def show_lockout_window(message: str) -> None:
 
     if _lockout_win is None or not _lockout_win.winfo_exists():
         _lockout_win = tk.Toplevel(tk_root)
-        _lockout_win.title("CtrlSpeak · Preparing CtrlSpeak")
+        _lockout_win.title("CtrlSpeak Â· Preparing CtrlSpeak")
         _lockout_win.geometry("720x340")
         _lockout_win.minsize(580, 300)
         _lockout_win.resizable(True, True)
@@ -275,11 +277,11 @@ def close_lockout_window(message: Optional[str] = None) -> None:
         _destroy_lockout_window()
 def _format_duration(seconds: Optional[float]) -> str:
     if seconds is None:
-        return "—"
+        return "â€”"
     try:
         total = max(float(seconds), 0.0)
     except (TypeError, ValueError):
-        return "—"
+        return "â€”"
     minutes, secs = divmod(int(total + 0.5), 60)
     hours, minutes = divmod(minutes, 60)
     if hours:
@@ -297,7 +299,7 @@ _waveform_provider: Optional[Callable[[], "np.ndarray"]] = None
 
 # NEW: simple state for live vs processing
 _waveform_mode: str = "live"         # "live" | "processing"
-_waveform_msg: str = "Processing…"
+_waveform_msg: str = "Processingâ€¦"
 _pulse_phase: float = 0.0            # animation phase
 _waveform_closing: bool = False
 
@@ -341,7 +343,7 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
             nonlocal processing_error_logged
             """Redraw the overlay every ~33 ms.
             - LIVE mode: polyline waveform from recent audio samples.
-            - PROCESSING mode: pulsing circular ring with 'Processing…' label.
+            - PROCESSING mode: pulsing circular ring with 'Processingâ€¦' label.
             """
             global _pulse_phase
             if _waveform_win is None or not _waveform_win.winfo_exists():
@@ -362,7 +364,7 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
                         data = _waveform_provider()
                         if data is not None and getattr(data, "size", 0) > 0:
                             # DYNAMIC SCALE WITH UPPER CAP
-                            # Aim to keep the current frame’s peak around ~0.9, but never amplify above 8x.
+                            # Aim to keep the current frameâ€™s peak around ~0.9, but never amplify above 8x.
                             TARGET_PEAK = 0.90
                             MAX_GAIN = 8.0
 
@@ -390,7 +392,7 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
                                 last_x, last_y = X, Y
 
                 else:
-                    # PROCESSING — audio-driven radius + circular wiggle
+                    # PROCESSING â€” audio-driven radius + circular wiggle
                     _pulse_phase = (_pulse_phase + 0.06) % (2 * np.pi)  # subtle motion only
                     # 1) Read the current amplitude + recent waveform of loading.wav
 
@@ -411,13 +413,13 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
                     else:
                         ring_wave = np.zeros(720, dtype=np.float32)
 
-                    # 2) Map amplitude to base radius scaling (more “one-to-one” feel)
-                    #    Increase LEVEL_GAIN to make size swings stronger (try 0.6–1.0)
+                    # 2) Map amplitude to base radius scaling (more â€œone-to-oneâ€ feel)
+                    #    Increase LEVEL_GAIN to make size swings stronger (try 0.6â€“1.0)
                     LEVEL_GAIN = 0.75
                     pulse = 1.0 + LEVEL_GAIN * level
 
                     # 3) Wiggle strength around the ring (how spiky the line looks)
-                    #    Try 0.20–0.40 for pronounced wiggle
+                    #    Try 0.20â€“0.40 for pronounced wiggle
                     WIGGLE_GAIN = 0.30
                     w = max(1, _waveform_canvas.winfo_width())
                     h = max(1, _waveform_canvas.winfo_height())
@@ -473,11 +475,11 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
     except Exception:
         logger.exception("Failed to open waveform overlay window")
 
-def set_waveform_processing(message: str = "Processing…") -> None:
+def set_waveform_processing(message: str = "Processingâ€¦") -> None:
     global _waveform_mode, _waveform_msg, _pulse_phase
     _waveform_mode = "processing"
     _waveform_msg = message
-    _pulse_phase = 0.0   # ← new
+    _pulse_phase = 0.0   # â† new
 
 def hide_waveform_overlay() -> None:
     global _waveform_win, _waveform_canvas, _waveform_job, _waveform_provider
@@ -502,7 +504,7 @@ def hide_waveform_overlay() -> None:
         _waveform_job = None
         _waveform_provider = None
         _waveform_mode = "live"
-        _waveform_msg = "Processing…"
+        _waveform_msg = "Processingâ€¦"
 
 # ---------------- Splash (1s) ----------------
 def show_splash_screen(duration_ms: int) -> None:
@@ -557,7 +559,7 @@ def show_splash_screen(duration_ms: int) -> None:
     accent = ttk.Frame(content, style="AccentLine.TFrame")
     accent.configure(height=2)
     accent.pack(fill=tk.X, pady=(8, 16))
-    ttk.Label(content, text="Initializing voice systems…", style="Subtitle.TLabel",
+    ttk.Label(content, text="Initializing voice systemsâ€¦", style="Subtitle.TLabel",
               wraplength=240, justify=tk.CENTER).pack(pady=(0, 16))
 
     progress = ttk.Progressbar(content, mode="indeterminate", length=220,
@@ -660,7 +662,7 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
     def make_card(title: str, desc: str, mode_value: str, primary: bool) -> None:
         card = ttk.Frame(cards, style="ModernCard.TFrame", padding=(22, 20))
         card.pack(fill=tk.X, pady=8)
-        label_text = f"MODE · {mode_value.replace('_', ' ').upper()}"
+        label_text = f"MODE Â· {mode_value.replace('_', ' ').upper()}"
         ttk.Label(card, text=label_text, style="PillMuted.TLabel").pack(anchor=tk.W)
         accent_inner = ttk.Frame(card, style="AccentLine.TFrame")
         accent_inner.configure(height=2)
@@ -1069,7 +1071,7 @@ class ManagementWindow:
         header.pack(fill=tk.X)
         ttk.Label(header, text="CtrlSpeak Control", style="Title.TLabel").pack(anchor=tk.W)
         build_label = "Client Only" if CLIENT_ONLY_BUILD else "Client + Server"
-        ttk.Label(header, text=f"Build {APP_VERSION} · {build_label}", style="Subtitle.TLabel").pack(anchor=tk.W, pady=(10, 0))
+        ttk.Label(header, text=f"Build {APP_VERSION} Â· {build_label}", style="Subtitle.TLabel").pack(anchor=tk.W, pady=(10, 0))
         header_accent = ttk.Frame(header, style="AccentLine.TFrame")
         header_accent.configure(height=2)
         header_accent.pack(fill=tk.X, pady=(18, 0))
@@ -1307,36 +1309,42 @@ class ManagementWindow:
         with settings_lock:
             mode = settings.get("mode") or "unknown"
         device_pref = get_device_preference()
-        cuda_available = cuda_runtime_ready(ignore_preference=True)
+        self.device_var.set(device_pref)
+        has_cuda_files = cuda_runtime_files_present()
+        cuda_ready = False
+        if device_pref == "cuda" and has_cuda_files:
+            cuda_ready = cuda_runtime_ready(ignore_preference=True, quiet=True)
         model_name = get_current_model_name()
-        self.mode_badge.configure(text=f"MODE · {mode.upper()}", style="PillAccent.TLabel")
+        self.mode_badge.configure(text=f"MODE \uFFFD {mode.upper()}", style="PillAccent.TLabel")
         network_label = describe_server_status()
         if "Not connected" in network_label:
             badge_style = "PillDanger.TLabel"
-            badge_text = "NETWORK · OFFLINE"
+            badge_text = "NETWORK \uFFFD OFFLINE"
         elif network_label.startswith("Serving"):
             badge_style = "PillAccent.TLabel"
-            badge_text = "SERVER · ONLINE"
+            badge_text = "SERVER \uFFFD ONLINE"
         elif network_label.startswith("Connected") or network_label.startswith("Discovered"):
             badge_style = "PillAccent.TLabel"
-            badge_text = "NETWORK · LINKED"
+            badge_text = "NETWORK \uFFFD LINKED"
         else:
             badge_style = "PillMuted.TLabel"
-            badge_text = "NETWORK · READY"
+            badge_text = "NETWORK \uFFFD READY"
         self.network_badge.configure(text=badge_text, style=badge_style)
         status_parts = [
-            f"• Mode: {mode}",
-            f"• Client: {'active' if sysmod.client_enabled else 'stopped'}",
-            f"• Server thread: {'running' if sysmod.server_thread and sysmod.server_thread.is_alive() else 'not running'}",
+            f"\u2022 Mode: {mode}",
+            f"\u2022 Client: {'active' if sysmod.client_enabled else 'stopped'}",
+            f"\u2022 Server thread: {'running' if sysmod.server_thread and sysmod.server_thread.is_alive() else 'not running'}",
+            f"\u2022 Device: {device_pref}",
         ]
         self.status_var.set("\n".join(status_parts))
         self.server_status_var.set(f"Network: {describe_server_status()}")
-        if not cuda_available:
-            cuda_text = "CUDA runtime not detected."
-        elif device_pref == "cuda":
-            cuda_text = "CUDA runtime active."
+        if device_pref == "cuda":
+            cuda_text = ("CUDA runtime active." if cuda_ready
+                         else "CUDA runtime not ready; using CPU instead.")
+        elif has_cuda_files:
+            cuda_text = "CUDA runtime staged. Switch to GPU to enable it."
         else:
-            cuda_text = "CUDA runtime available."
+            cuda_text = "CUDA runtime not staged."
         self.cuda_status.set(cuda_text)
 
         model_statuses: dict[str, dict[str, object]] = {}
@@ -1547,32 +1555,54 @@ class ManagementWindow:
     # --- device actions ---
     def _apply_device(self):
         from utils.models import set_device_preference
-        choice = self.device_var.get()
-        if choice not in {"cpu", "cuda", "auto"}:
-            choice = "auto"
-        set_device_preference(choice)
 
-        # Offer to install CUDA if they chose GPU and it isn't ready
-        if choice == "cuda" and not cuda_runtime_ready():
-            if messagebox.askyesno(
-                    "CUDA not ready",
-                    "CUDA runtime not detected.\n\nInstall now for GPU acceleration?",
-                    parent=self.window
-            ):
-                if install_cuda_runtime_with_progress(self.window):
-                    messagebox.showinfo("CUDA", "CUDA runtime installed successfully.", parent=self.window)
-                else:
-                    messagebox.showwarning("CUDA", "Failed to prepare CUDA. Staying on CPU.", parent=self.window)
+        requested = self.device_var.get()
+        if requested != "cuda":
+            requested = "cpu"
+
+        if requested == "cuda":
+            staged = cuda_runtime_files_present()
+            if not staged:
+                staged = ensure_cuda_runtime_from_existing()
+
+            if not staged:
+                logger.warning("CUDA device selection requested but no runtime files were staged; staying on CPU.")
+                self.device_var.set("cpu")
+                set_device_preference("cpu")
+                self.cuda_status.set("CUDA runtime not staged. Use Install or repair CUDA to configure it.")
+                self._reload_transcriber_async(
+                    progress_message="Applying device preference...",
+                    status_var=self.cuda_status,
+                    notify_context="Device setup failed",
+                )
+                return
+
+            if not cuda_runtime_ready(ignore_preference=True, quiet=True):
+                logger.warning("CUDA runtime files were staged but validation failed; staying on CPU.")
+                self.device_var.set("cpu")
+                set_device_preference("cpu")
+                self.cuda_status.set("CUDA runtime not ready; using CPU instead.")
+                self._reload_transcriber_async(
+                    progress_message="Applying device preference...",
+                    status_var=self.cuda_status,
+                    notify_context="Device setup failed",
+                )
+                return
+
+        set_device_preference(requested)
 
         # Reload the model with the new device without blocking the UI
         self._reload_transcriber_async(
-            progress_message="Applying device preference…",
+            progress_message="Applying device preference...",
             status_var=self.cuda_status,
             notify_context="Device setup failed",
         )
 
+
     def _install_cuda(self):
-        if install_cuda_runtime_with_progress(self.window):
+        if ensure_cuda_runtime_from_existing():
+            messagebox.showinfo("CUDA", "Reused existing CUDA runtime for CtrlSpeak.", parent=self.window)
+        elif install_cuda_runtime_with_progress(self.window):
             messagebox.showinfo("CUDA", "CUDA runtime installed successfully.", parent=self.window)
         else:
             messagebox.showwarning("CUDA", "Failed to prepare CUDA. You can try again.", parent=self.window)
@@ -1600,7 +1630,7 @@ class ManagementWindow:
             messagebox.showinfo("Model", f"Active model set to {name}.", parent=self.window)
 
         self._reload_transcriber_async(
-            progress_message="Loading model…",
+            progress_message="Loading modelâ€¦",
             status_var=self.model_status,
             notify_context="Model load failed",
             success_callback=on_success,
@@ -1631,8 +1661,8 @@ class ManagementWindow:
         stop_client_listener(); self.refresh_status()
 
     def refresh_servers(self) -> None:
-        self.refresh_button.state(["disabled"]); self.refresh_button.config(text="Scanning…")
-        self.server_status_var.set("Scanning for servers…")
+        self.refresh_button.state(["disabled"]); self.refresh_button.config(text="Scanningâ€¦")
+        self.server_status_var.set("Scanning for serversâ€¦")
 
         def worker() -> None:
             try:
@@ -1738,3 +1768,9 @@ class ManagementWindow:
             self._unbind_mousewheel(None)
             self.window.destroy()
         management_window = None
+
+
+
+
+
+
