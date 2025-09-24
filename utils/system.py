@@ -167,7 +167,7 @@ __all__ = [
     "get_config_dir", "get_config_file_path", "get_temp_dir",
     "create_recording_file_path", "cleanup_recording_file", "resource_path",
     "insert_text_into_focus", "set_force_sendinput", "is_console_window",
-    "ServerInfo",
+    "ServerInfo", "format_exception_details",
 ]
 
 # Keep a single shared discovery listener and last_connected_server here
@@ -190,26 +190,6 @@ def notify(message: str, title: str = "CtrlSpeak") -> None:
             logger.exception("Failed to print fallback notification '%s'", title)
 
 
-def ui_show_activation_popup(message: str) -> None:
-    """Show (or update) the activation-in-progress popup."""
-    try:
-        from utils.gui import (
-            ensure_management_ui_thread,
-            show_activation_popup,
-            is_management_ui_thread,
-        )
-
-        ensure_management_ui_thread()
-        if is_management_ui_thread():
-            show_activation_popup(message)
-        else:
-            enqueue_management_task(show_activation_popup, message)
-    except Exception:
-        logger.exception("Failed to show activation popup")
-        try:
-            print(f"CtrlSpeak: {message}")
-        except Exception:
-            logger.exception("Failed to print activation popup fallback message")
 
 
 def ui_show_lockout_window(message: str) -> None:
@@ -234,20 +214,6 @@ def ui_show_lockout_window(message: str) -> None:
             logger.exception("Failed to print lockout window fallback message")
 
 
-def ui_remind_activation_popup(message: str | None = None) -> None:
-    """Bring the activation popup to the foreground (optionally updating its text)."""
-    try:
-        from utils.gui import ensure_management_ui_thread, focus_activation_popup
-
-        ensure_management_ui_thread()
-        enqueue_management_task(focus_activation_popup, message)
-    except Exception:
-        logger.exception("Failed to focus activation popup")
-        if message:
-            try:
-                print(f"CtrlSpeak: {message}")
-            except Exception:
-                logger.exception("Failed to print activation popup focus message")
 
 
 def ui_update_lockout_message(message: str) -> None:
@@ -261,27 +227,6 @@ def ui_update_lockout_message(message: str) -> None:
         logger.exception("Failed to update lockout message")
 
 
-def ui_close_activation_popup(message: str | None = None) -> None:
-    """Close the activation popup, optionally leaving a completion message first."""
-    try:
-        from utils.gui import (
-            ensure_management_ui_thread,
-            close_activation_popup,
-            is_management_ui_thread,
-        )
-
-        ensure_management_ui_thread()
-        if is_management_ui_thread():
-            close_activation_popup(message)
-        else:
-            enqueue_management_task(close_activation_popup, message)
-    except Exception:
-        logger.exception("Failed to close activation popup")
-        if message:
-            try:
-                print(f"CtrlSpeak: {message}")
-            except Exception:
-                logger.exception("Failed to print activation popup completion message")
 
 
 def ui_close_lockout_window(message: str | None = None) -> None:
@@ -302,39 +247,6 @@ def ui_close_lockout_window(message: str | None = None) -> None:
         logger.exception("Failed to close lockout window")
 
 
-def ui_update_activation_progress(
-    progress: float | None,
-    elapsed: float | None,
-    eta: float | None,
-) -> None:
-    """Update the activation popup progress bar and timing information."""
-    try:
-        from utils.gui import ensure_management_ui_thread, update_activation_progress
-
-        ensure_management_ui_thread()
-        enqueue_management_task(update_activation_progress, progress, elapsed, eta)
-    except Exception:
-        logger.exception("Failed to schedule activation popup progress update")
-
-def format_exception_details(exc: Exception) -> str:
-    return "".join(traceback.format_exception_only(type(exc), exc)).strip()
-
-def write_error_log(context: str, details: str) -> None:
-    try:
-        log_path = get_logs_dir() / ERROR_LOG_FILENAME
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        cleaned = (details or "").strip() or "Unknown error"
-        entry = "[{}] {}\n{}\n{}\n".format(timestamp, context, cleaned, "-" * 60)
-        with log_path.open("a", encoding="utf-8") as handle:
-            handle.write(entry)
-        logger.error("%s | %s", context, cleaned)
-    except Exception:
-        logger.exception("Failed to write error log entry for %s", context)
-
-def copy_to_clipboard(text: str) -> None:
-    try:
-        root = tk.Tk(); root.withdraw()
-        root.clipboard_clear(); root.clipboard_append(text); root.update(); root.destroy()
     except Exception:
         logger.exception("Failed to copy text to clipboard")
 
@@ -344,6 +256,20 @@ def notify_error(context: str, details: str) -> None:
     write_error_log(context, snippet)
     copy_to_clipboard(message)
     notify(message, title="CtrlSpeak Error")
+
+
+def format_exception_details(exc: BaseException | None) -> str:
+    """Return a readable error summary including traceback details when possible."""
+    if exc is None:
+        return "Unknown error"
+
+    try:
+        return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
+    except Exception:
+        try:
+            return f"{exc.__class__.__name__}: {exc}".strip()
+        except Exception:
+            return "Unknown error"
 
 # ---------------- Resource helpers ----------------
 def create_icon_image():
@@ -699,14 +625,8 @@ def record_audio(target_path: Path) -> None:
 
 # ---------------- Client keyboard listener ----------------
 def on_press(key):
-    from utils.models import describe_activation_block, is_activation_in_progress  # on-demand to avoid circulars
     global recording, recording_thread, recording_file_path
-    if not client_enabled: return
-    if is_activation_in_progress():
-        message = describe_activation_block()
-        if not message:
-            message = "CtrlSpeak is busy preparing resources. Please wait before using the hotkey again."
-        ui_remind_activation_popup(message)
+    if not client_enabled:
         return
     if key == keyboard.Key.ctrl_r and not recording:
         recording = True
@@ -721,7 +641,7 @@ def on_press(key):
 
 
 def on_release(key):
-    from utils.models import describe_activation_block, is_activation_in_progress, transcribe_audio
+    from utils.models import transcribe_audio
     global recording, recording_thread, recording_file_path
     if key == keyboard.Key.ctrl_r:
         if recording:
@@ -729,22 +649,6 @@ def on_release(key):
             if recording_thread:
                 recording_thread.join(); recording_thread = None
             path = recording_file_path
-            block_message = None
-            try:
-                if is_activation_in_progress():
-                    block_message = describe_activation_block()
-            except Exception:
-                logger.exception("Failed to check activation status before transcription")
-            if block_message:
-                ui_remind_activation_popup(block_message)
-                try:
-                    from utils.gui import hide_waveform_overlay
-                    enqueue_management_task(hide_waveform_overlay)
-                except Exception:
-                    logger.exception("Failed to hide waveform overlay after activation block")
-                cleanup_recording_file(path)
-                recording_file_path = None
-                return
             # switch overlay into “processing” mode
             try:
                 from utils.gui import set_waveform_processing
@@ -1147,6 +1051,7 @@ def parse_cli_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--uninstall", action="store_true", help="Remove CtrlSpeak and all local data")
     parser.add_argument("--auto-setup", choices=["client", "client_server"], help="Configure CtrlSpeak without prompts")
     parser.add_argument("--force-sendinput", action="store_true", help="Force SendInput-based insertion (debug)")
+    parser.add_argument("--automation-flow", action="store_true", help="Run the automated end-to-end regression workflow")
     args, _ = parser.parse_known_args(argv[1:])
     return args
 

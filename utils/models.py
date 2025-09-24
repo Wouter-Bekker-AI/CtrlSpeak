@@ -6,13 +6,10 @@ import sys
 import time
 import threading
 import subprocess
-from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from queue import Queue, Empty
-from typing import Optional, List, Set, Callable, Tuple
-from urllib.parse import quote
-from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
+from typing import Optional, List, Set
 
 import ctypes
 import ctranslate2
@@ -22,7 +19,7 @@ try:  # pragma: no cover - optional dependency rarely installed
 except ImportError:
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
-from huggingface_hub import HfApi
+from huggingface_hub import snapshot_download
 import tkinter as tk
 from tkinter import ttk
 
@@ -31,8 +28,7 @@ from utils.system import (
     notify, notify_error, format_exception_details,
     get_config_dir, save_settings,
     start_processing_feedback, stop_processing_feedback,
-    ui_show_activation_popup, ui_close_activation_popup,
-    ui_show_lockout_window, ui_update_lockout_message, ui_close_lockout_window,
+    ui_show_lockout_window, ui_close_lockout_window,
     pump_management_events_once,
     play_model_ready_sound_once,
 )
@@ -52,12 +48,7 @@ MODEL_REPO_OVERRIDE   = os.environ.get("CTRLSPEAK_MODEL_REPO")
 
 # All model content under %APPDATA%/CtrlSpeak/models
 MODEL_ROOT_PATH = get_config_dir() / "models"
-
-# Hard-coded download targets (bytes) for progress tracking
-EXPECTED_MODEL_BYTES: dict[str, int] = {
-    "small": 463 * (1024 ** 2),
-    "large-v3": int(2.87 * (1024 ** 3)),
-}
+MODEL_TRACE_PATH = get_config_dir() / "logs" / "model_download_trace.log"
 
 CUDA_RUNTIME_EXPECTED_BYTES = int(1.2 * (1024 ** 3))
 
@@ -65,6 +56,31 @@ CUDA_RUNTIME_EXPECTED_BYTES = int(1.2 * (1024 ** 3))
 cuda_paths_initialized = False
 
 logger = get_logger(__name__)
+_trace_lock = threading.Lock()
+
+
+def trace_model_download_step(current_step: str, expected_next: Optional[str] = None) -> None:
+    """Append a human-readable trace entry for the model download workflow."""
+
+    step = current_step.strip()
+    next_step = (expected_next or "").strip()
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S.%f")
+
+    try:
+        with _trace_lock:
+            try:
+                MODEL_TRACE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                logger.exception("Failed to ensure trace log directory exists")
+                return
+
+            with MODEL_TRACE_PATH.open("a", encoding="utf-8") as handle:
+                if next_step:
+                    handle.write(f"{timestamp} | {step} | next: {next_step}\n")
+                else:
+                    handle.write(f"{timestamp} | {step}\n")
+    except Exception:
+        logger.exception("Failed to write model download trace entry")
 
 
 # ---------------- Settings-backed getters/setters ----------------
@@ -130,8 +146,12 @@ def set_current_model_name(name: str) -> None:
 
 
 # ---------------- Model storage (AppData/CtrlSpeak/models) ----------------
-def model_store_path_for(model_short: str) -> Path:
+def _legacy_model_store_path(model_short: str) -> Path:
     return MODEL_ROOT_PATH / model_short
+
+
+def model_store_path_for(model_short: str) -> Path:
+    return _model_activation_cache_path(model_short)
 
 
 def model_files_present(model_path: Path) -> bool:
@@ -141,10 +161,23 @@ def model_files_present(model_path: Path) -> bool:
     return any(model_path.rglob("*.bin"))
 
 
+def _iter_model_candidate_paths(model_short: str):
+    primary = model_store_path_for(model_short)
+    seen: Set[Path] = set()
+    if primary not in seen:
+        seen.add(primary)
+        yield primary
+    legacy = _legacy_model_store_path(model_short)
+    if legacy not in seen:
+        seen.add(legacy)
+        yield legacy
+
+
 def _is_model_installed(model_short: str) -> bool:
-    store = model_store_path_for(model_short)
-    marker = store / ".installed"
-    return model_files_present(store) and marker.exists()
+    for candidate in _iter_model_candidate_paths(model_short):
+        if model_files_present(candidate):
+            return True
+    return False
 
 
 def _model_repo_id(model_short: str) -> str:
@@ -152,6 +185,12 @@ def _model_repo_id(model_short: str) -> str:
         return MODEL_REPO_OVERRIDE
     # Your builds use Systran/faster-whisper-<name>
     return f"Systran/faster-whisper-{model_short}"
+
+
+
+def get_model_repo_id(model_short: str) -> str:
+    """Expose the Hugging Face repo id used for the given Whisper model."""
+    return _model_repo_id(model_short)
 
 
 def _model_activation_cache_path(model_short: str) -> Path:
@@ -253,32 +292,42 @@ def install_cuda_runtime_with_progress(parent=None) -> bool:
         "--extra-index-url", "https://pypi.nvidia.com",
         *pkgs
     ]
-    with activation_guard(
-        "installing CUDA runtime components",
-        busy_message=(
+    try:
+        ui_show_lockout_window(
             "CtrlSpeak is installing CUDA runtime components required for GPU transcription. "
             "Please wait for this to finish."
-        ),
-        success_message=(
-            "CUDA runtime components are ready. CtrlSpeak will continue preparing the Whisper model."
-        ),
-        failure_message=(
-            "CUDA runtime installation did not complete. CtrlSpeak will continue without GPU acceleration."
-        ),
-    ) as complete:
-        rc = _run_cmd_stream(cmd, timeout=600)
-        if rc != 0:
-            notify("CUDA runtime installation failed (pip returned non-zero).")
-            complete(False, "CUDA runtime installation failed. CtrlSpeak will continue using the CPU.")
-            return False
-        # refresh DLL search path + verify
-        time.sleep(0.5)
-        ready = cuda_runtime_ready(ignore_preference=True)
-        if not ready:
-            complete(False, "CtrlSpeak installed the CUDA runtime but could not validate the GPU libraries.")
-            return False
-        complete(True, "CUDA runtime components were installed successfully. Continuing activation…")
-        return True
+        )
+    except Exception:
+        logger.exception("Failed to show lockout window during CUDA installation")
+
+    rc = _run_cmd_stream(cmd, timeout=600)
+    if rc != 0:
+        notify("CUDA runtime installation failed (pip returned non-zero).")
+        try:
+            ui_close_lockout_window("CUDA runtime installation failed. CtrlSpeak will continue using the CPU.")
+        except Exception:
+            logger.exception("Failed to close lockout window after CUDA installation failure")
+        return False
+
+    # refresh DLL search path + verify
+    time.sleep(0.5)
+    ready = cuda_runtime_ready(ignore_preference=True)
+    if not ready:
+        try:
+            ui_close_lockout_window(
+                "CtrlSpeak installed the CUDA runtime but could not validate the GPU libraries."
+            )
+        except Exception:
+            logger.exception("Failed to close lockout window after CUDA validation failure")
+        return False
+
+    try:
+        ui_close_lockout_window(
+            "CUDA runtime components were installed successfully. CtrlSpeak will continue preparing the Whisper model."
+        )
+    except Exception:
+        logger.exception("Failed to close lockout window after CUDA installation")
+    return True
 
 
 # ---------------- Download dialog (GUI) ----------------
@@ -297,8 +346,6 @@ def format_bytes(value: float) -> str:
 
 
 MB_DIVISOR = 1024.0 * 1024.0
-DOWNLOAD_CHUNK_BYTES = 1024 * 1024
-DOWNLOAD_USER_AGENT = "CtrlSpeak Downloader/1.0"
 
 
 def format_duration(seconds: float) -> str:
@@ -310,60 +357,6 @@ def format_duration(seconds: float) -> str:
     if minutes:
         return f"{minutes:d}m {secs:02d}s"
     return f"{secs:d}s"
-
-
-_dir_size_command_failures: Set[str] = set()
-
-
-def _measure_directory_size_python(path: Path) -> int:
-    total = 0
-    try:
-        iterator = path.rglob("*")
-    except Exception:
-        return 0
-    for entry in iterator:
-        try:
-            if entry.is_file():
-                total += entry.stat().st_size
-        except OSError:
-            continue
-    return total
-
-
-def _measure_directory_size(path: Path) -> int:
-    if not path.exists():
-        return 0
-
-    command_key = "win" if os.name.startswith("nt") else "posix"
-    try:
-        if os.name.startswith("nt"):
-            path_str = str(path)
-            safe_path = path_str.replace("'", "''")
-            command = [
-                "powershell",
-                "-NoLogo",
-                "-NoProfile",
-                "-Command",
-                (
-                    "(Get-ChildItem -LiteralPath '"
-                    f"{safe_path}"
-                    "' -Recurse -Force -File | Measure-Object -Property Length -Sum).Sum"
-                ),
-            ]
-            result = subprocess.run(command, capture_output=True, text=True, check=True)
-            output = result.stdout.strip()
-            return int(output) if output else 0
-
-        command = ["du", "-sb", str(path)]
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
-        output = result.stdout.strip()
-        size_str = output.split("\t", 1)[0].strip()
-        return int(size_str) if size_str else 0
-    except Exception:
-        if command_key not in _dir_size_command_failures:
-            logger.exception("Failed to measure directory size via system command: %s", path)
-            _dir_size_command_failures.add(command_key)
-        return _measure_directory_size_python(path)
 
 
 class DownloadDialog:
@@ -447,6 +440,10 @@ class DownloadDialog:
         self.cancel_button = ttk.Button(actions, text="Cancel download", style="Danger.TButton",
                                         command=self.cancel)
         self.cancel_button.pack(side=tk.RIGHT)
+        try:
+            self.cancel_button.configure(state=tk.DISABLED)
+        except Exception:
+            pass
 
         self.root.protocol("WM_DELETE_WINDOW", self.cancel)
         self._last_progress_was_bytes = False
@@ -657,17 +654,43 @@ class DownloadDialog:
             except Exception:
                 logger.exception("Failed to schedule management UI pump during download")
 
-def _prompt_for_model_install(model_name: str) -> bool:
-    # Small confirm; default to Install if headless
-    prompt = (f"CtrlSpeak needs to download the Whisper speech model '{model_name}' (~GBs). "
-              "Do you want to start the download now?")
+def _prompt_for_model_install(model_name: str, *, auto_accept: bool = False) -> bool:
+    """Request user confirmation before downloading a Whisper model."""
+
+    prompt = (
+        f"CtrlSpeak needs to download the Whisper speech model '{model_name}' (~GBs). "
+        "Do you want to start the download now?"
+    )
+
+    if auto_accept:
+        logger.info("Auto-approving Whisper model download prompt for '%s'", model_name)
+        trace_model_download_step(
+            "_prompt_for_model_install: auto-accept triggered",
+            "proceed to download",
+        )
+        return True
+
     try:
         import pyautogui
-        choice = pyautogui.confirm(text=prompt, title="CtrlSpeak Setup", buttons=["Install Now", "Quit"])
+
+        trace_model_download_step(
+            "_prompt_for_model_install: showing confirmation dialog",
+            "await user selection",
+        )
+        choice = pyautogui.confirm(
+            text=prompt,
+            title="CtrlSpeak Setup",
+            buttons=["Install Now", "Quit"],
+        )
     except Exception:
         logger.exception("Failed to display model installation prompt via GUI")
         print(prompt)
         choice = "Install Now"
+
+    trace_model_download_step(
+        "_prompt_for_model_install: user selection processed",
+        "return result",
+    )
     return choice == "Install Now"
 
 
@@ -675,251 +698,106 @@ def download_model_with_gui(
     model_short: Optional[str] = None,
     *,
     block_during_download: bool = False,
-    activate_after: bool = False,
 ) -> bool:
-    """
-    Download the selected model (or the argument provided) with a simple progress dialog.
-    Keeps files under %APPDATA%/CtrlSpeak/models/<model>.
-    """
+    """Download the selected model snapshot with a simple progress dialog."""
+
     model_name = (model_short or get_current_model_name()).strip()
     progress_queue: Queue = Queue()
     cancel_event = threading.Event()
     dialog = DownloadDialog(model_name, progress_queue, cancel_event)
 
+    trace_model_download_step(
+        "download_model_with_gui: start",
+        "spawn worker thread",
+    )
+
     def worker() -> None:
-        success = False
         try:
             repo_id = _model_repo_id(model_name)
-            progress_queue.put(("stage", f"Connecting to Hugging Face ({repo_id})"))
+            trace_model_download_step(
+                "download_model_with_gui.worker: prepared repo id",
+                "announce stage and ensure directory",
+            )
+            progress_queue.put(("stage", f"Preparing download from Hugging Face ({repo_id})"))
             store_path = model_store_path_for(model_name)
             store_path.mkdir(parents=True, exist_ok=True)
-
-            api = HfApi()
-            try:
-                try:
-                    model_info = api.model_info(repo_id, files_metadata=True)
-                except TypeError:
-                    # Older huggingface-hub versions do not accept files_metadata
-                    model_info = api.model_info(repo_id)
-            except Exception as exc:
-                progress_queue.put(("error", f"Failed to query repository: {exc}"))
-                logger.exception("Unable to query Hugging Face model info for %s", repo_id)
-                return
-
-            files: list[dict[str, Optional[int]]] = []
-            total_bytes = 0
-            for sibling in getattr(model_info, "siblings", []) or []:
-                path = getattr(sibling, "rfilename", None)
-                if not path:
-                    continue
-                size = getattr(sibling, "size", None)
-                size_value: Optional[int]
-                try:
-                    size_value = int(size) if size is not None else None
-                except (TypeError, ValueError):
-                    size_value = None
-                if size_value is not None and size_value > 0:
-                    total_bytes += size_value
-                files.append({"path": path, "size": size_value})
-
-            if not files:
-                progress_queue.put(("error", "No files available for download."))
-                return
-
-            files.sort(key=lambda item: item["path"])
-
-            if total_bytes <= 0:
-                expected = EXPECTED_MODEL_BYTES.get(model_name)
-                if expected is not None and expected > 0:
-                    total_bytes = expected
-
-            progress_queue.put(("stage", f"Downloading {model_name} model files…"))
-            downloaded_bytes = 0
-            progress_queue.put(("progress", "", float(downloaded_bytes), float(total_bytes), True))
-
-            encoded_repo = quote(repo_id, safe="/")
-
-            for entry in files:
-                if cancel_event.is_set():
-                    raise CancelledDownload()
-                rel_path = entry["path"]
-                file_size = entry["size"]
-                dest_path = store_path / rel_path
-                dest_path.parent.mkdir(parents=True, exist_ok=True)
-                temp_path = dest_path.with_name(dest_path.name + ".part")
-                encoded_rel = quote(rel_path.replace("\\", "/"))
-                url = f"https://huggingface.co/{encoded_repo}/resolve/main/{encoded_rel}?download=true"
-
-                if temp_path.exists():
-                    try:
-                        temp_path.unlink()
-                    except Exception:
-                        logger.debug("Unable to remove stale partial file %s", temp_path)
-
-                if file_size is None:
-                    try:
-                        head_req = Request(url, method="HEAD", headers={"User-Agent": DOWNLOAD_USER_AGENT})
-                        with urlopen(head_req) as head_resp:
-                            cl = head_resp.headers.get("Content-Length") or head_resp.getheader("Content-Length")
-                            if cl:
-                                file_size = int(cl)
-                                entry["size"] = file_size
-                                total_bytes += file_size
-                                progress_queue.put(("progress", "", float(downloaded_bytes), float(total_bytes), True))
-                    except Exception:
-                        file_size = None
-
-                if dest_path.exists():
-                    try:
-                        dest_path.unlink()
-                    except Exception:
-                        logger.debug("Unable to remove existing file %s before download", dest_path)
-
-                try:
-                    req = Request(url, method="GET", headers={"User-Agent": DOWNLOAD_USER_AGENT})
-                    with urlopen(req) as response, open(temp_path, "wb") as output:
-                        while True:
-                            chunk = response.read(DOWNLOAD_CHUNK_BYTES)
-                            if not chunk:
-                                break
-                            if cancel_event.is_set():
-                                raise CancelledDownload()
-                            output.write(chunk)
-                            chunk_len = len(chunk)
-                            downloaded_bytes += chunk_len
-                            progress_queue.put(("progress", rel_path, float(downloaded_bytes), float(total_bytes), True))
-                    temp_path.replace(dest_path)
-                except CancelledDownload:
-                    try:
-                        if temp_path.exists():
-                            temp_path.unlink()
-                    except Exception:
-                        logger.debug("Failed to remove partial download %s", temp_path)
-                    raise
-                except HTTPError as exc:
-                    try:
-                        if temp_path.exists():
-                            temp_path.unlink()
-                    except Exception:
-                        logger.debug("Failed to remove partial download %s after HTTP error", temp_path)
-                    progress_queue.put(("error", f"HTTP error while downloading {rel_path}: {exc.code} {exc.reason}"))
-                    return
-                except URLError as exc:
-                    try:
-                        if temp_path.exists():
-                            temp_path.unlink()
-                    except Exception:
-                        logger.debug("Failed to remove partial download %s after network error", temp_path)
-                    progress_queue.put(("error", f"Network error while downloading {rel_path}: {exc.reason}"))
-                    return
-                except Exception as exc:
-                    try:
-                        if temp_path.exists():
-                            temp_path.unlink()
-                    except Exception:
-                        logger.debug("Failed to remove partial download %s after error", temp_path)
-                    progress_queue.put(("error", f"Failed downloading {rel_path}: {exc}"))
-                    logger.exception("Error downloading %s from %s", rel_path, repo_id)
-                    return
-
-            if cancel_event.is_set():
-                raise CancelledDownload()
-
-            (store_path / ".installed").touch(exist_ok=True)
-            success = True
-        except CancelledDownload:
-            progress_queue.put(("cancelled",))
-            return
+            trace_model_download_step(
+                "download_model_with_gui.worker: starting snapshot_download",
+                "wait for huggingface client to finish",
+            )
+            snapshot_download(
+                repo_id,
+                local_dir=str(store_path),
+                local_dir_use_symlinks=False,
+                resume_download=True,
+            )
         except Exception as exc:
             progress_queue.put(("error", f"Failed: {exc}"))
             logger.exception("Model download failed")
+            trace_model_download_step(
+                "download_model_with_gui.worker: snapshot_download raised exception",
+                "report error to user",
+            )
             return
 
-        if success:
-            progress_queue.put(("done",))
+        trace_model_download_step(
+            "download_model_with_gui.worker: snapshot_download completed",
+            "signal stage completion",
+        )
+        progress_queue.put(("stage", "Download complete."))
+        progress_queue.put(("done",))
 
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
+
     def _run() -> bool:
         result = dialog.run()
         thread.join(timeout=0.5)
         return result == "success"
 
     if not block_during_download:
+        trace_model_download_step(
+            "download_model_with_gui: running dialog without lockout",
+            "wait for dialog result",
+        )
         return _run()
 
-    with activation_guard(
-        "downloading the Whisper model",
-        busy_message="CtrlSpeak is downloading the Whisper model. Please wait for the download to finish before using CtrlSpeak.",
-        success_message="The Whisper model download completed successfully.",
-        failure_message="CtrlSpeak could not download the Whisper model. Please try again.",
-        lockout=True,
-    ) as finalize:
-        success = _run()
-        if not success:
-            finalize(False, "CtrlSpeak could not download the Whisper model. Please try again.")
-            return False
-
-        if not activate_after:
-            finalize(True, "The Whisper model download completed successfully.")
-            return True
-
-        try:
-            ui_update_lockout_message(
-                "CtrlSpeak is activating the Whisper model. Please wait for activation to complete before using CtrlSpeak."
-            )
-        except Exception:
-            logger.exception("Failed to update lockout window before model activation")
-
-        try:
-            ui_show_activation_popup(
-                "CtrlSpeak is activating the Whisper model. Please wait while the model starts up…"
-            )
-        except Exception:
-            logger.exception("Failed to update activation popup before model activation")
-
-        activation_done = threading.Event()
-        activation_success = {"value": False}
-
-        def _activate() -> None:
-            try:
-                activated = initialize_transcriber(
-                    force=True,
-                    allow_client=True,
-                    activation_finalizer=finalize,
-                )
-                activation_success["value"] = activated is not None
-            finally:
-                activation_done.set()
-
-        activation_thread = threading.Thread(
-            target=_activate,
-            name="CtrlSpeakActivation",
-            daemon=True,
+    try:
+        ui_show_lockout_window(
+            "CtrlSpeak is downloading the Whisper model. Please wait for the download to finish before using CtrlSpeak."
         )
-        activation_thread.start()
+    except Exception:
+        logger.exception("Failed to show lockout window during model download")
+        trace_model_download_step(
+            "download_model_with_gui: lockout window failed",
+            "continue waiting for dialog result",
+        )
 
-        # Keep the activation popup responsive while the model initializes.
-        try:
-            pump_management_events_once()
-            while not activation_done.wait(0.05):
-                pump_management_events_once()
+    success = _run()
 
-            # Give the completion message a brief opportunity to display and dismiss.
-            end_time = time.time() + 0.6
-            while time.time() < end_time:
-                pump_management_events_once()
-                time.sleep(0.05)
-        finally:
-            activation_thread.join(timeout=0.5)
+    try:
+        if success:
+            ui_close_lockout_window("The Whisper model download completed successfully.")
+        else:
+            ui_close_lockout_window("CtrlSpeak could not download the Whisper model. Please try again.")
+    except Exception:
+        logger.exception("Failed to close lockout window after model download")
+        trace_model_download_step(
+            "download_model_with_gui: closing lockout failed",
+            "finish with dialog result",
+        )
 
-        return activation_success["value"]
+    trace_model_download_step(
+        "download_model_with_gui: completed",
+        "return success flag",
+    )
+
+    return success
 
 
 # ---------------- Transcriber ----------------
 model_lock = threading.Lock()
 whisper_model: Optional[WhisperModel] = None
-model_ready = threading.Event()
 warned_cuda_unavailable = False
 _missing_model_notified: Set[str] = set()
 
@@ -927,152 +805,24 @@ _missing_model_notified: Set[str] = set()
 def ensure_model_ready_for_local_server() -> bool:
     """Ensure a Whisper model is available and activated for local server mode."""
 
+    trace_model_download_step(
+        "ensure_model_ready_for_local_server: requested",
+        "check in-memory model",
+    )
     with model_lock:
         if whisper_model is not None:
+            trace_model_download_step(
+                "ensure_model_ready_for_local_server: model already loaded",
+                "return True",
+            )
             return True
 
-    model_name = get_current_model_name()
-    store = model_store_path_for(model_name)
-    marker = store / ".installed"
-
-    if model_files_present(store) and marker.exists():
-        return True
-
-    return download_model_with_gui(
-        model_name,
-        block_during_download=True,
-        activate_after=True,
+    trace_model_download_step(
+        "ensure_model_ready_for_local_server: loading from disk",
+        "call _ensure_model_files",
     )
+    return _ensure_model_files(interactive=True)
 
-# Track long-running activation/installation work so the hotkey can be gated.
-_activation_event = threading.Event()
-_activation_lock = threading.Lock()
-_activation_reasons: list[Tuple[str, bool]] = []
-
-  
-def is_model_loaded() -> bool:
-    with model_lock:
-        return whisper_model is not None
-
-      
-def _activation_busy_message(reason: str) -> str:
-    clean = reason.rstrip(". ")
-    return (
-        "CtrlSpeak is busy "
-        f"{clean}. Please wait for this to finish before using CtrlSpeak."
-    )
-
-
-def _activation_success_message(reason: str) -> str:
-    clean = reason.rstrip(". ")
-    return f"Finished {clean}. CtrlSpeak is ready to use."
-
-
-def _activation_failure_message(reason: str) -> str:
-    clean = reason.rstrip(". ")
-    return (
-        f"CtrlSpeak could not finish {clean}. "
-        "Please review the logs or try again."
-    )
-
-
-def _begin_activation(reason: str, busy_message: str, *, lockout: bool) -> None:
-    with _activation_lock:
-        _activation_reasons.append((reason, lockout))
-        _activation_event.set()
-    try:
-        if lockout:
-            ui_show_lockout_window(busy_message)
-        else:
-            ui_show_activation_popup(busy_message)
-    except Exception:
-        logger.exception("Failed to present activation busy popup")
-
-
-def _end_activation(reason: str, *, success: bool, message: Optional[str]) -> None:
-    new_top: Optional[Tuple[str, bool]] = None
-    popped_lockout = False
-    with _activation_lock:
-        if _activation_reasons:
-            _reason, popped_lockout = _activation_reasons.pop()
-        if _activation_reasons:
-            new_top = _activation_reasons[-1]
-        else:
-            _activation_event.clear()
-    if new_top:
-        next_reason, is_lockout = new_top
-        try:
-            if is_lockout:
-                ui_show_lockout_window(_activation_busy_message(next_reason))
-            else:
-                ui_show_activation_popup(_activation_busy_message(next_reason))
-        except Exception:
-            logger.exception("Failed to refresh activation popup message")
-        return
-
-    final_text = message
-    if final_text is None:
-        final_text = (
-            _activation_success_message(reason)
-            if success else _activation_failure_message(reason)
-        )
-    try:
-        if popped_lockout:
-            ui_close_lockout_window(final_text)
-            ui_close_activation_popup(final_text)
-        else:
-            ui_close_activation_popup(final_text)
-    except Exception:
-        logger.exception("Failed to close activation popup")
-
-
-@contextmanager
-def activation_guard(
-    reason: str,
-    *,
-    busy_message: Optional[str] = None,
-    success_message: Optional[str] = None,
-    failure_message: Optional[str] = None,
-    lockout: bool = False,
-):
-    """Track long-running activation work and drive the busy popup lifecycle."""
-    busy = busy_message or _activation_busy_message(reason)
-    _begin_activation(reason, busy, lockout=lockout)
-    outcome = {"success": True, "message": success_message}
-
-    def finalize(success: bool, message: Optional[str] = None) -> None:
-        outcome["success"] = bool(success)
-        outcome["message"] = message
-
-    try:
-        yield finalize
-    except Exception:
-        _end_activation(reason, success=False, message=failure_message)
-        raise
-    else:
-        final_message = outcome["message"]
-        if outcome["success"]:
-            if final_message is None:
-                final_message = _activation_success_message(reason)
-        else:
-            if final_message is None:
-                final_message = failure_message or _activation_failure_message(reason)
-        _end_activation(reason, success=outcome["success"], message=final_message)
-
-
-def is_activation_in_progress() -> bool:
-    return _activation_event.is_set()
-
-
-def describe_activation_block() -> Optional[str]:
-    if not _activation_event.is_set():
-        return None
-    with _activation_lock:
-        entry = _activation_reasons[-1] if _activation_reasons else None
-    if entry:
-        reason, _ = entry
-        return _activation_busy_message(reason)
-    return "CtrlSpeak is preparing resources. Please wait before using the app."
 
 def _force_cpu_env() -> None:
     """
@@ -1099,7 +849,6 @@ def unload_transcriber() -> None:
             except Exception:
                 logger.exception("Failed to delete whisper model instance")
             whisper_model = None
-        model_ready.clear()
     # Encourage fast cleanup for large model memory and CUDA contexts
     try:
         import gc
@@ -1111,40 +860,140 @@ def unload_transcriber() -> None:
 
 
 
-def _ensure_model_available_active(interactive: bool = True) -> bool:
-    """Checks/installs the model selected in settings."""
+def _ensure_model_files(interactive: bool = True) -> bool:
+    """Ensure the selected model snapshot exists locally."""
+
+    trace_model_download_step(
+        "_ensure_model_files: entry",
+        "determine installed path",
+    )
     name = get_current_model_name()
-    store = model_store_path_for(name)
-    marker = store / ".installed"
-    if model_ready.is_set() and model_files_present(store):
+
+    candidates = list(_iter_model_candidate_paths(name))
+    installed_path = next((path for path in candidates if model_files_present(path)), None)
+
+    with settings_lock:
+        auto_install_complete = bool(settings.get("model_auto_install_complete"))
+
+    if installed_path is not None:
+        trace_model_download_step(
+            "_ensure_model_files: files already installed",
+            "update auto_install flag if needed",
+        )
+        if not auto_install_complete:
+            with settings_lock:
+                settings["model_auto_install_complete"] = True
+            save_settings()
         return True
-    if not model_files_present(store) or not marker.exists():
-        if not interactive:
-            if name not in _missing_model_notified:
-                notify(
-                    (
-                        f"The Whisper model '{name}' is not installed. "
-                        "Right-click the CtrlSpeak tray icon and choose 'Manage CtrlSpeak' "
-                        "to download it."
-                    )
+
+    if auto_install_complete:
+        trace_model_download_step(
+            "_ensure_model_files: auto-install flag reset",
+            "prompt or auto-accept install",
+        )
+        with settings_lock:
+            settings["model_auto_install_complete"] = False
+        save_settings()
+        auto_install_complete = False
+
+    if not interactive:
+        trace_model_download_step(
+            "_ensure_model_files: non-interactive missing model",
+            "notify user about missing model",
+        )
+        if name not in _missing_model_notified:
+            notify(
+                (
+                    f"The Whisper model '{name}' is not installed. "
+                    "Right-click the CtrlSpeak tray icon and choose 'Manage CtrlSpeak' "
+                    "to download it."
                 )
-                _missing_model_notified.add(name)
-            return False
-        if not _prompt_for_model_install(name):
-            notify("CtrlSpeak cannot transcribe without the Whisper model. You can install it next time you start the app.")
-            return False
-        block_download = whisper_model is None
-        if not download_model_with_gui(
-            name,
-            block_during_download=block_download,
-        ):
-            notify("The Whisper model was not installed. Try again later or check your internet connection.")
-            return False
-    if model_files_present(store):
-        model_ready.set()
+            )
+            _missing_model_notified.add(name)
+        return False
+
+    auto_install = not auto_install_complete
+
+    trace_model_download_step(
+        "_ensure_model_files: prompting for install",
+        "download model" if auto_install else "await user confirmation",
+    )
+    if not _prompt_for_model_install(name, auto_accept=auto_install):
+        trace_model_download_step(
+            "_ensure_model_files: user declined install",
+            "notify cancellation",
+        )
+        if not auto_install:
+            notify(
+                "CtrlSpeak cannot transcribe without the Whisper model. You can install it next time you start the app."
+            )
+        return False
+
+    block_download = whisper_model is None
+    trace_model_download_step(
+        "_ensure_model_files: initiating download",
+        "wait for download to finish",
+    )
+    if not download_model_with_gui(
+        name,
+        block_during_download=block_download,
+    ):
+        trace_model_download_step(
+            "_ensure_model_files: download returned failure",
+            "notify user about failure",
+        )
+        notify("The Whisper model was not installed. Try again later or check your internet connection.")
+        return False
+
+    trace_model_download_step(
+        "_ensure_model_files: verifying downloaded files",
+        "mark install complete if files exist",
+    )
+
+    if model_files_present(model_store_path_for(name)):
+        trace_model_download_step(
+            "_ensure_model_files: verification succeeded",
+            "set auto-install flag and return True",
+        )
+        with settings_lock:
+            settings["model_auto_install_complete"] = True
+        save_settings()
         return True
+
+    trace_model_download_step(
+        "_ensure_model_files: verification failed",
+        "notify user about missing files",
+    )
     notify("Model download completed, but the files were not found. Please try again.")
     return False
+
+
+def ensure_initial_model_installation() -> bool:
+    """Auto-install the default model on first run without prompting the user."""
+
+    with settings_lock:
+        mode = settings.get("mode")
+        auto_install_needed = not bool(settings.get("model_auto_install_complete"))
+
+    if mode == "client":
+        trace_model_download_step(
+            "ensure_initial_model_installation: client mode",
+            "skip auto install",
+        )
+        return True
+
+    if not auto_install_needed:
+        trace_model_download_step(
+            "ensure_initial_model_installation: already complete",
+            "return True",
+        )
+        return True
+
+    trace_model_download_step(
+        "ensure_initial_model_installation: beginning auto install",
+        "call _ensure_model_files",
+    )
+    return _ensure_model_files(interactive=True)
 
 
 def resolve_device() -> str:
@@ -1174,95 +1023,49 @@ def initialize_transcriber(
     allow_client: bool = False,
     preferred_device: Optional[str] = None,
     interactive: bool = True,
-    activation_finalizer: Optional[Callable[[bool, Optional[str]], None]] = None,
 ) -> Optional[WhisperModel]:
-    """
-    Loads the Whisper model selected in settings into faster-whisper with the active device choice.
-    """
+    """Load the configured Whisper model into memory if it is not already active."""
+
     global whisper_model, warned_cuda_unavailable
 
-    def perform_activation(finalize: Callable[[bool, Optional[str]], None]) -> Optional[WhisperModel]:
-        nonlocal device, compute_type, model_name
-        global whisper_model, warned_cuda_unavailable
-
-        if device == "cpu":
-            _force_cpu_env()
-
-        try:
-            whisper_model = WhisperModel(
-                model_name,
-                device=device,
-                compute_type=compute_type,
-                download_root=str(MODEL_ROOT_PATH),
-            )
-        except Exception as exc:
-            print(f"Failed to load model on {device}: {exc}")
-            logger.exception("Failed to load Whisper model on %s", device)
-            if device != "cpu":
-                try:
-                    whisper_model = WhisperModel(
-                        model_name,
-                        device="cpu",
-                        compute_type="int8",
-                        download_root=str(MODEL_ROOT_PATH),
-                    )
-                except Exception as cpu_exc:
-                    print(f"CPU fallback failed: {cpu_exc}")
-                    logger.exception("CPU fallback model load failed")
-                else:
-                    notify(
-                        "Running CtrlSpeak transcription on CPU fallback. "
-                        "Set CTRLSPEAK_DEVICE=cpu to suppress this message."
-                    )
-                    warned_cuda_unavailable = True
-                    finalize(
-                        True,
-                        (
-                            "Activation complete! You can now use CtrlSpeak. "
-                            f"The Whisper model '{model_name}' is running on the CPU fallback."
-                        ),
-                    )
-                    play_model_ready_sound_once()
-                    return whisper_model
-            notify("Unable to initialize the transcription model. Please check your installation and try again.")
-            finalize(
-                False,
-                "CtrlSpeak was unable to activate the Whisper model. Please check your installation and try again.",
-            )
-            whisper_model = None
-            return None
-        else:
-            print(f"Whisper model '{model_name}' ready on {device} ({compute_type})")
-            finalize(
-                True,
-                (
-                    "Activation complete! You can now use CtrlSpeak. "
-                    f"The Whisper model '{model_name}' is ready on {device.upper()} ({compute_type})."
-                ),
-            )
-            play_model_ready_sound_once()
-            return whisper_model
-
+    trace_model_download_step(
+        "initialize_transcriber: entry",
+        "check cached whisper model",
+    )
     with model_lock:
         if whisper_model is not None and not force:
-            if activation_finalizer is not None:
-                activation_finalizer(True, None)
+            trace_model_download_step(
+                "initialize_transcriber: model already loaded",
+                "return existing instance",
+            )
             play_model_ready_sound_once()
             return whisper_model
 
         with settings_lock:
             mode = settings.get("mode")
+        trace_model_download_step(
+            "initialize_transcriber: mode resolved",
+            "ensure local server if allowed",
+        )
         if not allow_client and mode != "client_server":
-            if activation_finalizer is not None:
-                activation_finalizer(False, "CtrlSpeak is not running in local transcription mode.")
+            trace_model_download_step(
+                "initialize_transcriber: not in server mode",
+                "return None",
+            )
             return None
 
-        if not _ensure_model_available_active(interactive=interactive):
-            if activation_finalizer is not None:
-                activation_finalizer(False, "CtrlSpeak could not find the Whisper model files.")
+        if not _ensure_model_files(interactive=interactive):
+            trace_model_download_step(
+                "initialize_transcriber: model files missing",
+                "abort load",
+            )
             return None
 
         device = preferred_device or resolve_device()
+        trace_model_download_step(
+            "initialize_transcriber: device resolved",
+            "notify if cpu fallback needed",
+        )
         if (
             device == "cpu"
             and get_device_preference() in {"auto", "cuda"}
@@ -1277,17 +1080,68 @@ def initialize_transcriber(
 
         compute_type = resolve_compute_type(device)
         model_name = get_current_model_name()
+        model_path = model_store_path_for(model_name)
+        trace_model_download_step(
+            "initialize_transcriber: starting WhisperModel load",
+            "construct WhisperModel instance",
+        )
 
-        if activation_finalizer is None:
-            with activation_guard(
-                "activating the Whisper model",
-                busy_message="CtrlSpeak is activating the Whisper model. Please wait for the model to finish preparing.",
-                success_message="The Whisper model is ready. You may now use CtrlSpeak.",
-                failure_message="CtrlSpeak could not activate the Whisper model.",
-            ) as complete:
-                return perform_activation(complete)
+        if device == "cpu":
+            _force_cpu_env()
 
-        return perform_activation(activation_finalizer)
+        try:
+            whisper_model = WhisperModel(
+                str(model_path),
+                device=device,
+                compute_type=compute_type,
+            )
+        except Exception as exc:
+            logger.exception("Failed to load Whisper model on %s", device)
+            trace_model_download_step(
+                "initialize_transcriber: WhisperModel raised exception",
+                "attempt cpu fallback" if device != "cpu" else "notify failure",
+            )
+            if device != "cpu":
+                try:
+                    whisper_model = WhisperModel(
+                        str(model_path),
+                        device="cpu",
+                        compute_type="int8",
+                    )
+                except Exception:
+                    logger.exception("CPU fallback model load failed")
+                    notify(
+                        "Unable to initialize the transcription model. Please check your installation and try again."
+                    )
+                    whisper_model = None
+                    return None
+                else:
+                    notify(
+                        "Running CtrlSpeak transcription on CPU fallback. "
+                        "Set CTRLSPEAK_DEVICE=cpu to suppress this message."
+                    )
+                    warned_cuda_unavailable = True
+                    trace_model_download_step(
+                        "initialize_transcriber: cpu fallback succeeded",
+                        "return fallback model",
+                    )
+                    play_model_ready_sound_once()
+                    return whisper_model
+
+            notify("Unable to initialize the transcription model. Please check your installation and try again.")
+            whisper_model = None
+            trace_model_download_step(
+                "initialize_transcriber: load failed",
+                "return None",
+            )
+            return None
+
+        trace_model_download_step(
+            "initialize_transcriber: load succeeded",
+            "return whisper model",
+        )
+        play_model_ready_sound_once()
+        return whisper_model
 
 # ---------------- Transcription API ----------------
 def collect_text_from_segments(segments) -> str:
