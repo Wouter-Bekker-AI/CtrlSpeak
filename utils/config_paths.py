@@ -121,11 +121,12 @@ def asset_path(relative_name: str) -> Path:
 
 LOGGER_NAME = "ctrlspeak"
 _LOG_HANDLER: Optional[RotatingFileHandler] = None
+_CONSOLE_HANDLER: Optional[logging.Handler] = None
 _LOG_CONFIG_LOCK = threading.Lock()
 
 
 def _configure_logging() -> logging.Logger:
-    global _LOG_HANDLER
+    global _LOG_HANDLER, _CONSOLE_HANDLER
 
     with _LOG_CONFIG_LOCK:
         ctrl_logger = logging.getLogger(LOGGER_NAME)
@@ -139,12 +140,20 @@ def _configure_logging() -> logging.Logger:
             )
             formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
             handler.setFormatter(formatter)
+            handler.setLevel(logging.DEBUG)
             _LOG_HANDLER = handler
 
             root_logger = logging.getLogger()
             root_logger.addHandler(handler)
             if root_logger.level == logging.NOTSET or root_logger.level > logging.INFO:
                 root_logger.setLevel(logging.INFO)
+
+            if _CONSOLE_HANDLER is None:
+                console_handler = logging.StreamHandler()
+                console_handler.setLevel(logging.WARNING)
+                console_handler.setFormatter(formatter)
+                root_logger.addHandler(console_handler)
+                _CONSOLE_HANDLER = console_handler
 
             logging.captureWarnings(True)
 
