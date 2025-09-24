@@ -536,8 +536,18 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
         return AUTO_MODE_PROFILE
     result = {"mode": None}
 
+    def _release_grab() -> None:
+        if window is None:
+            return
+        try:
+            window.grab_release()
+        except Exception:
+            pass
+
     def choose(mode: str) -> None:
         result["mode"] = mode
+        if not owns_root:
+            _release_grab()
         window.destroy()
 
     owns_root = parent is None
@@ -635,6 +645,8 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
     )
 
     def cancel() -> None:
+        if not owns_root:
+            _release_grab()
         window.destroy()
 
     ttk.Button(container, text="Quit Setup", style="Subtle.TButton",
@@ -648,15 +660,18 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
     window.after(200, lambda: window.attributes("-topmost", False))
 
     if owns_root:
-        window.mainloop()
-    else:
         try:
             window.wait_window()
         finally:
             try:
-                window.grab_release()
+                window.quit()
             except Exception:
                 pass
+    else:
+        try:
+            window.wait_window()
+        finally:
+            _release_grab()
     return result["mode"]
 
 
@@ -735,12 +750,20 @@ def ensure_mode_selected() -> None:
         )
         return
 
-    # 4) First-run defaults to client+server so the model setup can continue
+    # 4) Prompt the user for their preferred mode on first run
     trace_model_download_step(
-        "ensure_mode_selected: auto-selecting client_server",
-        "persist selection",
+        "ensure_mode_selected: launching mode picker",
+        "await user selection",
     )
-    choice = "client_server"
+    choice = prompt_initial_mode()
+    if choice not in {"client", "client_server"}:
+        trace_model_download_step(
+            "ensure_mode_selected: selection cancelled",
+            "exit application",
+        )
+        notify("CtrlSpeak setup was cancelled. Start CtrlSpeak again to continue setup.")
+        sys.exit(0)
+
     with settings_lock:
         settings["mode"] = choice
     save_settings()
@@ -749,7 +772,7 @@ def ensure_mode_selected() -> None:
         "ensure_mode_selected: selection saved",
         "ensure download",
     )
-    if not _ensure_server_mode_model_ready():
+    if choice == "client_server" and not _ensure_server_mode_model_ready():
         notify("CtrlSpeak will exit because the Whisper model download was cancelled.")
         sys.exit(0)
 
