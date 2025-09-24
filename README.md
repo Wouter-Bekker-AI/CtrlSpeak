@@ -7,10 +7,10 @@ Both flavours support Windows 10/11, enforce a single running instance, expose a
 ## Repository Layout
 
 - `main.py` – application entry point.
-- `build_exe.py` – helper script that runs PyInstaller with the correct data files.
 - `assets/` – static resources such as the tray icon (`icon.ico`) and processing chime (`loading.wav`).
 - `utils/` – implementation modules (GUI, models, networking, configuration helpers, etc.).
-- `serverportsetup.txt` – Windows PowerShell commands to open discovery/API firewall ports.
+- `utils/build_exe.py` – helper script that runs PyInstaller with the correct data files.
+- `packaging/` – PyInstaller spec (`CtrlSpeak.spec`) and additional build documentation.
 
 Generated folders such as `dist/` and `build/` are ignored via `.gitignore`.
 
@@ -24,7 +24,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-GPU acceleration requires an NVIDIA CUDA-capable GPU with compatible drivers. Whisper models are downloaded on demand when the application starts in server mode.
+GPU acceleration requires an NVIDIA CUDA-capable GPU with compatible drivers, but CtrlSpeak always boots in CPU mode and skips CUDA validation unless you opt in. The Whisper `small` model is downloaded automatically on first launch so a fresh install is usable immediately. Use the management window or `python main.py --setup-cuda` later if you want to stage GPU support.
 
 ## Running from Source
 
@@ -36,7 +36,9 @@ On first launch you will be prompted to choose between **Client + Server** or **
 
 ### Command-line Flags
 
+- `--auto-setup {client,client_server}` – pre-select the startup mode without showing the GUI prompts.
 - `--force-sendinput` – force the AnyDesk-compatible synthetic keystroke path.
+- `--setup-cuda` – stage CUDA runtime support (reuse existing files or download the NVIDIA wheels) and exit.
 - `--transcribe <wav>` – batch process an audio file without the hotkey workflow.
 - `--uninstall` – remove the application data and executable (used by the packaged build).
 
@@ -99,6 +101,36 @@ After updates you can re-run `--auto-setup client_server` to refresh the install
 - Temporary recordings, configuration, logs, and downloaded Whisper models live under `%APPDATA%\CtrlSpeak`.
 - Test audio files such as `part1.wav` are intentionally excluded from Git to avoid large binaries.
 - Use the tray menu to manage the client/server lifecycle or to uninstall (`Delete CtrlSpeak`).
+
+## Automation Flow
+
+Run the regression harness to validate a workstation without touching the GUI:
+
+```powershell
+python main.py --automation-flow
+```
+
+The command performs a staged health-check entirely inside %APPDATA%\CtrlSpeak:
+
+1. Ensure the default Whisper model is present under %APPDATA%\CtrlSpeak\models (downloading it when missing).
+2. Reuse or install the NVIDIA CUDA runtime (nvidia-cuda-runtime-cu12, nvidia-cublas-cu12, nvidia-cudnn-cu12) so the DLLs live under %APPDATA%\CtrlSpeak\cuda when GPU testing is required.
+3. Transcribe assets/test.wav on the CPU.
+4. Transcribe the same clip on the GPU using the DLLs staged in %APPDATA%\CtrlSpeak\cuda.
+5. Simulate each text-injection strategy (direct insert, SendInput paste, clipboard paste, PyAutoGUI typing) and write a consolidated report to %APPDATA%\CtrlSpeak\automation\artifacts.
+
+If any stage fails the workflow stops at that checkpoint and leaves detailed logs plus the partially populated automation_state.json in the same automation folder. Fix the underlying system issue (drivers, CUDA DLLs, networking, etc.) and re-run the flag - the script resumes where it left off.
+
+### Handing the checklist to another operator or AI agent
+
+Provide your helper with the single command above and the acceptance criteria:
+
+- All stages complete without errors on a single pass.
+- %APPDATA%\CtrlSpeak\automation\artifacts contains a report named automation_run_*.txt whose injection sections echo the canonical transcript.
+- %APPDATA%\CtrlSpeak\cuda holds the CUDA DLLs and `python main.py` can select both CPU and GPU devices without warnings.
+
+An agent can loop on `python main.py --automation-flow`, examine automation_state.json, and only make host-level changes (install drivers, adjust PATH, etc.) until the run succeeds - no code edits are required.
+
+
 
 ## License
 

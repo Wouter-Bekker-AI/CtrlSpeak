@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import sys
@@ -22,21 +22,26 @@ from utils.system import (
     start_client_listener, stop_client_listener,
     manual_discovery_refresh,
     schedule_management_refresh, enqueue_management_task,
-    shutdown_server, initiate_self_uninstall,
+    start_server, shutdown_server, initiate_self_uninstall,
+    list_input_audio_devices, get_input_device_preference, set_input_device_preference,
 )
 # IMPORTANT: import the module so we always see the *current* values
 from utils import system as sysmod
 
 # ---- Model/CUDA helpers kept in utils.models to avoid GUI bloat ----
 from utils.models import (
+    AVAILABLE_MODELS,
     cuda_runtime_ready,
     install_cuda_runtime_with_progress,   # opens progress window and installs nvidia wheels
+    ensure_cuda_runtime_from_existing,
+    cuda_runtime_files_present,
     get_device_preference, set_device_preference,
     get_current_model_name, set_current_model_name,
     model_store_path_for, model_files_present,
     download_model_with_gui,              # opens progress window and downloads model
-    is_model_loaded,
+    ensure_model_ready_for_local_server,
     format_bytes,                         # optional pretty bytes
+    trace_model_download_step,
 )
 
 from utils.ui_theme import (
@@ -52,171 +57,240 @@ from utils.config_paths import asset_path, get_logger
 tk_root: Optional[tk.Tk] = None
 management_window: Optional["ManagementWindow"] = None
 _management_thread_ident: Optional[int] = None
+_management_thread_lock = threading.Lock()
+_management_thread_ready = threading.Event()
+_management_queue_job: Optional[str] = None
 
 logger = get_logger(__name__)
 
+# -------- Lockout window state --------
+_lockout_win: Optional[tk.Toplevel] = None
+_lockout_message_var: Optional[tk.StringVar] = None
+_lockout_close_job: Optional[str] = None
+_lockout_progress: Optional[ttk.Progressbar] = None
+
 # -------- Notification helpers --------
-_busy_popup_win: Optional[tk.Toplevel] = None
-_busy_popup_message: Optional[tk.StringVar] = None
-_busy_popup_progress: Optional[ttk.Progressbar] = None
-_busy_popup_close_job: Optional[str] = None
+
+
+def _call_on_management_ui(callback: Callable[[], None], *, log_message: str) -> None:
+    """Execute *callback* on the management UI thread."""
+
+    root = tk_root
+    if root is None or not root.winfo_exists():
+        return
+
+    try:
+        if is_management_ui_thread():
+            callback()
+        else:
+            root.after(0, callback)
+    except Exception:
+        logger.exception(log_message)
+
+
+def _cancel_lockout_close() -> None:
+    global _lockout_close_job
+    if _lockout_win is not None and _lockout_close_job is not None:
+        try:
+            _lockout_win.after_cancel(_lockout_close_job)
+        except Exception:
+            logger.exception("Failed to cancel lockout window dismissal")
+    _lockout_close_job = None
+
+
+def _destroy_lockout_window() -> None:
+    global _lockout_win, _lockout_message_var, _lockout_close_job, _lockout_progress
+    if _lockout_win is not None and _lockout_win.winfo_exists():
+        try:
+            _lockout_win.destroy()
+        except Exception:
+            logger.exception("Failed to destroy lockout window")
+    _lockout_win = None
+    _lockout_message_var = None
+    _lockout_close_job = None
+    if _lockout_progress is not None:
+        try:
+            _lockout_progress.stop()
+        except Exception:
+            pass
+    _lockout_progress = None
 
 
 def show_notification_popup(title: str, message: str) -> None:
-    """Display a simple informational dialog."""
-    if tk_root is None or not tk_root.winfo_exists():
+    """Display a transient notification window on the management UI thread."""
+
+    root = tk_root
+    if root is None or not root.winfo_exists():
+        try:
+            print(f"{title}: {message}")
+        except Exception:
+            logger.exception("Failed to print fallback notification '%s'", title)
         return
+
+    if not is_management_ui_thread():
+        _call_on_management_ui(
+            lambda: show_notification_popup(title, message),
+            log_message="Failed to schedule notification popup",
+        )
+        return
+
     try:
-        messagebox.showinfo(title, message, parent=tk_root)
+        popup = tk.Toplevel(root)
+        popup.title(title)
+        popup.transient(root)
+        popup.resizable(False, False)
+        try:
+            popup.attributes("-topmost", True)
+        except Exception:
+            logger.debug("Topmost attribute not available for notification window")
+        frame = ttk.Frame(popup, padding=16)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=message, wraplength=420, justify="left").pack(anchor="w", fill="x")
+        ttk.Button(frame, text="Dismiss", command=popup.destroy).pack(anchor="e", pady=(12, 0))
+        popup.bind("<Escape>", lambda event: popup.destroy())
+        popup.after(12000, popup.destroy)
+        popup.after(120, popup.lift)
     except Exception:
-        logger.exception("Failed to display notification popup: %s", title)
-
-
-def _cancel_busy_popup_close() -> None:
-    global _busy_popup_close_job
-    if _busy_popup_win is not None and _busy_popup_close_job is not None:
+        logger.exception("Failed to create notification popup window for '%s'", title)
         try:
-            _busy_popup_win.after_cancel(_busy_popup_close_job)
+            print(f"{title}: {message}")
         except Exception:
-            logger.exception("Failed to cancel activation popup close timer")
-    _busy_popup_close_job = None
+            logger.exception("Failed to print fallback notification '%s'", title)
 
 
-def _destroy_busy_popup() -> None:
-    global _busy_popup_win, _busy_popup_message, _busy_popup_progress, _busy_popup_close_job
-    if _busy_popup_win is not None and _busy_popup_win.winfo_exists():
-        try:
-            _busy_popup_win.destroy()
-        except Exception:
-            logger.exception("Failed to destroy activation popup window")
-    _busy_popup_win = None
-    _busy_popup_message = None
-    _busy_popup_progress = None
-    _busy_popup_close_job = None
-
-
-def show_activation_popup(message: str) -> None:
-    """Create or update the activation progress popup."""
-    global _busy_popup_win, _busy_popup_message, _busy_popup_progress
+def show_lockout_window(message: str) -> None:
+    global _lockout_win, _lockout_message_var, _lockout_progress
     if tk_root is None or not tk_root.winfo_exists():
         return
 
-    _cancel_busy_popup_close()
+    _cancel_lockout_close()
 
-    if _busy_popup_win is None or not _busy_popup_win.winfo_exists():
-        _busy_popup_win = tk.Toplevel(tk_root)
-        _busy_popup_win.title("CtrlSpeak is preparing")
-        _busy_popup_win.geometry("420x220")
-        _busy_popup_win.resizable(False, False)
-        _busy_popup_win.attributes("-topmost", True)
+    if _lockout_win is None or not _lockout_win.winfo_exists():
+        _lockout_win = tk.Toplevel(tk_root)
+        _lockout_win.title("CtrlSpeak Â· Preparing CtrlSpeak")
+        _lockout_win.geometry("720x340")
+        _lockout_win.minsize(580, 300)
+        _lockout_win.resizable(True, True)
+        _lockout_win.attributes("-topmost", True)
         try:
-            _busy_popup_win.attributes("-toolwindow", True)
+            _lockout_win.attributes("-toolwindow", True)
         except Exception:
-            # Not all platforms support this hint
             pass
-        apply_modern_theme(_busy_popup_win)
-        _busy_popup_win.protocol("WM_DELETE_WINDOW", lambda: None)
+        apply_modern_theme(_lockout_win)
+        _lockout_win.protocol("WM_DELETE_WINDOW", lambda: None)
 
-        container = ttk.Frame(_busy_popup_win, style="Modern.TFrame", padding=(24, 22))
+        container = ttk.Frame(_lockout_win, style="Modern.TFrame", padding=(26, 24))
         container.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(container, text="Preparing CtrlSpeak", style="Title.TLabel").pack(anchor=tk.W)
+        card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
+        card.pack(fill=tk.BOTH, expand=True)
 
-        _busy_popup_message = tk.StringVar(value=message)
-        ttk.Label(
-            container,
-            textvariable=_busy_popup_message,
+        ttk.Label(card, text="Preparing CtrlSpeak", style="Title.TLabel").pack(anchor=tk.W)
+        accent = ttk.Frame(card, style="AccentLine.TFrame")
+        accent.configure(height=2)
+        accent.pack(fill=tk.X, pady=(12, 18))
+
+        _lockout_message_var = tk.StringVar(master=_lockout_win, value=message)
+        message_label = ttk.Label(
+            card,
+            textvariable=_lockout_message_var,
             style="Body.TLabel",
-            wraplength=360,
+            wraplength=540,
             justify=tk.LEFT,
-        ).pack(anchor=tk.W, pady=(12, 20))
+        )
+        message_label.pack(anchor=tk.W, fill=tk.X, expand=True)
 
-        _busy_popup_progress = ttk.Progressbar(
-            container,
+        _lockout_progress = ttk.Progressbar(
+            card,
             mode="indeterminate",
-            length=340,
+            length=380,
             style="Modern.Horizontal.TProgressbar",
         )
-        _busy_popup_progress.pack(fill=tk.X)
+        _lockout_progress.pack(fill=tk.X, pady=(20, 0))
         try:
-            _busy_popup_progress.start(12)
+            _lockout_progress.start(12)
         except Exception:
-            logger.exception("Failed to start activation popup progress bar")
+            logger.exception("Failed to start lockout spinner")
     else:
         try:
-            _busy_popup_win.deiconify()
-            _busy_popup_win.lift()
+            _lockout_win.deiconify()
+            _lockout_win.lift()
         except Exception:
-            logger.exception("Failed to raise activation popup window")
+            logger.exception("Failed to raise lockout window")
 
-    if _busy_popup_message is not None:
-        _busy_popup_message.set(message)
-    if _busy_popup_progress is not None:
+    if _lockout_message_var is not None:
         try:
-            _busy_popup_progress.config(mode="indeterminate")
-            _busy_popup_progress.start(12)
+            _lockout_message_var.set(message)
         except Exception:
-            logger.exception("Failed to restart activation popup progress bar")
+            logger.exception("Failed to set lockout message text")
 
-    try:
-        _busy_popup_win.lift()
-        _busy_popup_win.focus_force()
-    except Exception:
-        # Focus hints may fail in some environments
-        pass
-
-
-def focus_activation_popup(message: Optional[str] = None) -> None:
-    """Bring the activation popup to the foreground."""
-    if message:
-        show_activation_popup(message)
-        return
-
-    if _busy_popup_win is None or not _busy_popup_win.winfo_exists():
-        return
-
-    _cancel_busy_popup_close()
-    try:
-        _busy_popup_win.deiconify()
-        _busy_popup_win.lift()
-        _busy_popup_win.focus_force()
-    except Exception:
-        pass
-
-
-def close_activation_popup(message: Optional[str] = None) -> None:
-    """Stop the busy popup and close it, optionally after showing a final message."""
-    global _busy_popup_close_job
-    if _busy_popup_win is None or not _busy_popup_win.winfo_exists():
-        if message:
-            show_notification_popup("CtrlSpeak", message)
-        return
-
-    _cancel_busy_popup_close()
-
-    if _busy_popup_progress is not None:
+    if _lockout_progress is not None:
         try:
-            _busy_popup_progress.stop()
-            _busy_popup_progress.config(mode="determinate", maximum=100, value=100)
-        except Exception:
-            logger.exception("Failed to update activation popup progress state")
-
-    if message and _busy_popup_message is not None:
-        _busy_popup_message.set(message)
-
-    if message:
-        try:
-            _busy_popup_win.lift()
+            _lockout_progress.start(12)
         except Exception:
             pass
-        # Leave the completion message visible briefly before closing
+
+    try:
+        _lockout_win.lift()
+        _lockout_win.focus_force()
+    except Exception:
+        pass
+
+
+def update_lockout_message(message: str) -> None:
+    _call_on_management_ui(
+        lambda: show_lockout_window(message),
+        log_message="Failed to update lockout message text",
+    )
+
+
+def close_lockout_window(message: Optional[str] = None) -> None:
+    global _lockout_close_job
+    if _lockout_win is None or not _lockout_win.winfo_exists():
+        return
+
+    _cancel_lockout_close()
+
+    if _lockout_message_var is not None and message:
         try:
-            _busy_popup_close_job = _busy_popup_win.after(2400, _destroy_busy_popup)
+            _lockout_message_var.set(message)
         except Exception:
-            logger.exception("Failed to schedule activation popup dismissal")
-            _destroy_busy_popup()
+            logger.exception("Failed to set lockout completion message")
+
+    if _lockout_progress is not None:
+        try:
+            _lockout_progress.stop()
+        except Exception:
+            pass
+
+    if message:
+        try:
+            _lockout_win.lift()
+        except Exception:
+            pass
+        try:
+            _lockout_close_job = _lockout_win.after(2400, _destroy_lockout_window)
+        except Exception:
+            logger.exception("Failed to schedule lockout window dismissal")
+            _destroy_lockout_window()
     else:
-        _destroy_busy_popup()
+        _destroy_lockout_window()
+def _format_duration(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "â€”"
+    try:
+        total = max(float(seconds), 0.0)
+    except (TypeError, ValueError):
+        return "â€”"
+    minutes, secs = divmod(int(total + 0.5), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes:d}m {secs:02d}s"
+    return f"{secs:d}s"
+
+
 # -------- Voice Waveform Overlay --------
 _waveform_win: Optional[tk.Toplevel] = None
 _waveform_canvas: Optional[tk.Canvas] = None
@@ -225,7 +299,7 @@ _waveform_provider: Optional[Callable[[], "np.ndarray"]] = None
 
 # NEW: simple state for live vs processing
 _waveform_mode: str = "live"         # "live" | "processing"
-_waveform_msg: str = "Processing…"
+_waveform_msg: str = "Processingâ€¦"
 _pulse_phase: float = 0.0            # animation phase
 _waveform_closing: bool = False
 
@@ -269,7 +343,7 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
             nonlocal processing_error_logged
             """Redraw the overlay every ~33 ms.
             - LIVE mode: polyline waveform from recent audio samples.
-            - PROCESSING mode: pulsing circular ring with 'Processing…' label.
+            - PROCESSING mode: pulsing circular ring with 'Processingâ€¦' label.
             """
             global _pulse_phase
             if _waveform_win is None or not _waveform_win.winfo_exists():
@@ -290,7 +364,7 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
                         data = _waveform_provider()
                         if data is not None and getattr(data, "size", 0) > 0:
                             # DYNAMIC SCALE WITH UPPER CAP
-                            # Aim to keep the current frame’s peak around ~0.9, but never amplify above 8x.
+                            # Aim to keep the current frameâ€™s peak around ~0.9, but never amplify above 8x.
                             TARGET_PEAK = 0.90
                             MAX_GAIN = 8.0
 
@@ -318,7 +392,7 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
                                 last_x, last_y = X, Y
 
                 else:
-                    # PROCESSING — audio-driven radius + circular wiggle
+                    # PROCESSING â€” audio-driven radius + circular wiggle
                     _pulse_phase = (_pulse_phase + 0.06) % (2 * np.pi)  # subtle motion only
                     # 1) Read the current amplitude + recent waveform of loading.wav
 
@@ -339,13 +413,13 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
                     else:
                         ring_wave = np.zeros(720, dtype=np.float32)
 
-                    # 2) Map amplitude to base radius scaling (more “one-to-one” feel)
-                    #    Increase LEVEL_GAIN to make size swings stronger (try 0.6–1.0)
+                    # 2) Map amplitude to base radius scaling (more â€œone-to-oneâ€ feel)
+                    #    Increase LEVEL_GAIN to make size swings stronger (try 0.6â€“1.0)
                     LEVEL_GAIN = 0.75
                     pulse = 1.0 + LEVEL_GAIN * level
 
                     # 3) Wiggle strength around the ring (how spiky the line looks)
-                    #    Try 0.20–0.40 for pronounced wiggle
+                    #    Try 0.20â€“0.40 for pronounced wiggle
                     WIGGLE_GAIN = 0.30
                     w = max(1, _waveform_canvas.winfo_width())
                     h = max(1, _waveform_canvas.winfo_height())
@@ -401,11 +475,11 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
     except Exception:
         logger.exception("Failed to open waveform overlay window")
 
-def set_waveform_processing(message: str = "Processing…") -> None:
+def set_waveform_processing(message: str = "Processingâ€¦") -> None:
     global _waveform_mode, _waveform_msg, _pulse_phase
     _waveform_mode = "processing"
     _waveform_msg = message
-    _pulse_phase = 0.0   # ← new
+    _pulse_phase = 0.0   # â† new
 
 def hide_waveform_overlay() -> None:
     global _waveform_win, _waveform_canvas, _waveform_job, _waveform_provider
@@ -430,7 +504,7 @@ def hide_waveform_overlay() -> None:
         _waveform_job = None
         _waveform_provider = None
         _waveform_mode = "live"
-        _waveform_msg = "Processing…"
+        _waveform_msg = "Processingâ€¦"
 
 # ---------------- Splash (1s) ----------------
 def show_splash_screen(duration_ms: int) -> None:
@@ -485,7 +559,7 @@ def show_splash_screen(duration_ms: int) -> None:
     accent = ttk.Frame(content, style="AccentLine.TFrame")
     accent.configure(height=2)
     accent.pack(fill=tk.X, pady=(8, 16))
-    ttk.Label(content, text="Initializing voice systems…", style="Subtitle.TLabel",
+    ttk.Label(content, text="Initializing voice systemsâ€¦", style="Subtitle.TLabel",
               wraplength=240, justify=tk.CENTER).pack(pady=(0, 16))
 
     progress = ttk.Progressbar(content, mode="indeterminate", length=220,
@@ -500,25 +574,73 @@ def show_splash_screen(duration_ms: int) -> None:
     root.mainloop()
 
 # ---------------- First-run mode ----------------
-def prompt_initial_mode() -> Optional[str]:
+def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
     from utils.system import AUTO_MODE_PROFILE
     if AUTO_MODE_PROFILE:
         return AUTO_MODE_PROFILE
     result = {"mode": None}
 
+    def _release_grab() -> None:
+        if window is None:
+            return
+        try:
+            window.grab_release()
+        except Exception:
+            pass
+
     def choose(mode: str) -> None:
         result["mode"] = mode
-        root.destroy()
+        if not owns_root:
+            _release_grab()
+        window.destroy()
 
-    root = tk.Tk()
-    apply_modern_theme(root)
-    root.title("Welcome to CtrlSpeak")
-    root.geometry("560x420")
-    root.minsize(520, 360)
-    root.resizable(True, True)
-    root.attributes("-topmost", True)
+    owns_root = parent is None
+    window: Optional[tk.Misc] = None
+    try:
+        if owns_root:
+            window = tk.Tk()
+        else:
+            window = tk.Toplevel(parent)
+            try:
+                window.transient(parent)
+            except Exception:
+                pass
+            try:
+                window.grab_set()
+            except Exception:
+                logger.exception("Failed to grab mode selection dialog")
+    except Exception:
+        logger.exception("Failed to create mode selection window")
+        trace_model_download_step(
+            "prompt_initial_mode: failed to initialize UI", "default to client_server"
+        )
+        return "client_server"
 
-    container = ttk.Frame(root, style="Modern.TFrame", padding=(28, 26))
+    if window is None:
+        trace_model_download_step(
+            "prompt_initial_mode: window creation returned None", "default to client_server"
+        )
+        return "client_server"
+
+    try:
+        apply_modern_theme(window)
+    except Exception:
+        logger.exception("Failed to apply theme to mode selection window")
+        try:
+            window.destroy()
+        except Exception:
+            pass
+        trace_model_download_step(
+            "prompt_initial_mode: theme initialization failed", "default to client_server"
+        )
+        return "client_server"
+    window.title("Welcome to CtrlSpeak")
+    window.geometry("560x420")
+    window.minsize(520, 360)
+    window.resizable(True, True)
+    window.attributes("-topmost", True)
+
+    container = ttk.Frame(window, style="Modern.TFrame", padding=(28, 26))
     container.pack(fill=tk.BOTH, expand=True)
 
     intro = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
@@ -540,7 +662,7 @@ def prompt_initial_mode() -> Optional[str]:
     def make_card(title: str, desc: str, mode_value: str, primary: bool) -> None:
         card = ttk.Frame(cards, style="ModernCard.TFrame", padding=(22, 20))
         card.pack(fill=tk.X, pady=8)
-        label_text = f"MODE · {mode_value.replace('_', ' ').upper()}"
+        label_text = f"MODE Â· {mode_value.replace('_', ' ').upper()}"
         ttk.Label(card, text=label_text, style="PillMuted.TLabel").pack(anchor=tk.W)
         accent_inner = ttk.Frame(card, style="AccentLine.TFrame")
         accent_inner.configure(height=2)
@@ -567,80 +689,297 @@ def prompt_initial_mode() -> Optional[str]:
     )
 
     def cancel() -> None:
-        root.destroy()
+        if not owns_root:
+            _release_grab()
+        window.destroy()
 
     ttk.Button(container, text="Quit Setup", style="Subtle.TButton",
                command=cancel).pack(fill=tk.X, pady=(8, 0))
-    root.protocol("WM_DELETE_WINDOW", cancel)
-    root.update_idletasks()
-    req_w = root.winfo_reqwidth()
-    req_h = root.winfo_reqheight()
-    root.geometry(f"{req_w}x{req_h}")
-    root.minsize(req_w, req_h)
-    root.after(200, lambda: root.attributes("-topmost", False))
-    root.mainloop()
+    window.protocol("WM_DELETE_WINDOW", cancel)
+    window.update_idletasks()
+    req_w = window.winfo_reqwidth()
+    req_h = window.winfo_reqheight()
+    window.geometry(f"{req_w}x{req_h}")
+    window.minsize(req_w, req_h)
+    window.after(200, lambda: window.attributes("-topmost", False))
+
+    if owns_root:
+        try:
+            window.wait_window()
+        finally:
+            try:
+                window.quit()
+            except Exception:
+                pass
+    else:
+        try:
+            window.wait_window()
+        finally:
+            _release_grab()
     return result["mode"]
+
+
+def _ensure_server_mode_model_ready() -> bool:
+    """Ensure the active Whisper model is present before running the local server."""
+
+    trace_model_download_step(
+        "_ensure_server_mode_model_ready(gui): start",
+        "check if model exists",
+    )
+    name = get_current_model_name()
+    if model_files_present(model_store_path_for(name)):
+        trace_model_download_step(
+            "_ensure_server_mode_model_ready(gui): model already present",
+            "return True",
+        )
+        return True
+
+    trace_model_download_step(
+        "_ensure_server_mode_model_ready(gui): model missing",
+        "invoke download_model_with_gui",
+    )
+    if not download_model_with_gui(name, block_during_download=True):
+        trace_model_download_step(
+            "_ensure_server_mode_model_ready(gui): download failed or cancelled",
+            "return False",
+        )
+        return False
+
+    has_files = model_files_present(model_store_path_for(name))
+    trace_model_download_step(
+        "_ensure_server_mode_model_ready(gui): verification",
+        "return True" if has_files else "report missing files",
+    )
+    return has_files
 
 
 def ensure_mode_selected() -> None:
     # 1) Load settings from disk first
+    trace_model_download_step(
+        "ensure_mode_selected: begin",
+        "load_settings",
+    )
     load_settings()
 
     # 2) If mode already set, don't prompt again
     with settings_lock:
         current_mode = settings.get("mode")
 
+    trace_model_download_step(
+        "ensure_mode_selected: mode read from settings",
+        "skip prompt if already configured",
+    )
     if current_mode in {"client", "client_server"}:
+        trace_model_download_step(
+            "ensure_mode_selected: existing mode detected",
+            "verify model if client_server",
+        )
+        if current_mode == "client_server" and not _ensure_server_mode_model_ready():
+            notify("CtrlSpeak will exit because the Whisper model download was cancelled.")
+            sys.exit(0)
         return  # nothing to do
 
     # 3) Client-only builds force 'client' once and persist
+    trace_model_download_step(
+        "ensure_mode_selected: prompting for mode",
+        "handle client-only build or prompt UI",
+    )
     if detect_client_only_build():
         with settings_lock:
             settings["mode"] = "client"
         save_settings()
+        trace_model_download_step(
+            "ensure_mode_selected: client-only build",
+            "return",
+        )
         return
 
-    # 4) First-run prompt only if still not set
+    # 4) Prompt the user for their preferred mode on first run
+    trace_model_download_step(
+        "ensure_mode_selected: launching mode picker",
+        "await user selection",
+    )
     choice = prompt_initial_mode()
-    if not choice:
-        notify("CtrlSpeak cannot continue without selecting a mode.")
+    if choice not in {"client", "client_server"}:
+        trace_model_download_step(
+            "ensure_mode_selected: selection cancelled",
+            "exit application",
+        )
+        notify("CtrlSpeak setup was cancelled. Start CtrlSpeak again to continue setup.")
         sys.exit(0)
+
     with settings_lock:
         settings["mode"] = choice
     save_settings()
 
+    trace_model_download_step(
+        "ensure_mode_selected: selection saved",
+        "ensure download",
+    )
+    if choice == "client_server" and not _ensure_server_mode_model_ready():
+        notify("CtrlSpeak will exit because the Whisper model download was cancelled.")
+        sys.exit(0)
+
 # ---------------- UI loop pump (for async updates) ----------------
-def ensure_management_ui_thread() -> None:
-    global tk_root, _management_thread_ident
-    if tk_root and tk_root.winfo_exists():
+def _process_management_queue() -> None:
+    """Process any pending management UI tasks."""
+
+    global _management_queue_job
+
+    while True:
+        try:
+            func, args, kwargs = sysmod.management_ui_queue.get_nowait()
+        except Empty:
+            break
+        try:
+            func(*args, **kwargs)
+        except Exception:
+            logger.exception("Management UI task failed")
+
+    root = tk_root
+    if root is None or not root.winfo_exists():
+        _management_queue_job = None
         return
 
-    def _loop():
-        global tk_root, _management_thread_ident
-        _management_thread_ident = threading.get_ident()
-        tk_root = tk.Tk()
-        apply_modern_theme(tk_root)
-        tk_root.withdraw()
+    try:
+        _management_queue_job = root.after(120, _process_management_queue)
+    except Exception:
+        logger.exception("Failed to reschedule management UI queue processing")
+        _management_queue_job = None
 
-        def process_queue() -> None:
-            # pull queue from system module (so it’s always the live one)
-            while True:
-                try:
-                    func, args, kwargs = sysmod.management_ui_queue.get_nowait()
-                except Empty:
-                    break
-                try:
-                    func(*args, **kwargs)
-                except Exception:
-                    logger.exception("Management UI task failed")
-            if tk_root is not None:
-                tk_root.after(120, process_queue)
 
-        tk_root.after(80, process_queue)
-        tk_root.mainloop()
+def _initialize_management_ui_on_main_thread() -> None:
+    """Create the hidden Tk root on the main thread."""
 
-    t = threading.Thread(target=_loop, name="CtrlSpeakManagementUI", daemon=True)
-    t.start()
+    global tk_root, _management_thread_ident, _management_queue_job
+
+    if tk_root is not None and tk_root.winfo_exists():
+        return
+
+    sysmod.management_ui_thread = None
+
+    try:
+        root = tk.Tk()
+    except Exception:
+        logger.exception("Failed to initialize management UI root")
+        _management_thread_ready.set()
+        return
+
+    tk_root = root
+    apply_modern_theme(root)
+    try:
+        root.withdraw()
+    except Exception:
+        logger.exception("Failed to withdraw management UI root window")
+
+    _management_thread_ident = threading.get_ident()
+    _management_thread_ready.set()
+    sysmod.management_ui_thread = threading.current_thread()
+
+    try:
+        _management_queue_job = root.after(80, _process_management_queue)
+    except Exception:
+        logger.exception("Failed to schedule initial management UI queue processing")
+        _management_queue_job = None
+
+
+def ensure_management_ui_thread() -> None:
+    """Ensure the management UI root exists on the main thread."""
+
+    if tk_root is not None and tk_root.winfo_exists():
+        return
+
+    with _management_thread_lock:
+        if tk_root is not None and tk_root.winfo_exists():
+            return
+
+        if threading.current_thread() is threading.main_thread():
+            _initialize_management_ui_on_main_thread()
+        else:
+            if not _management_thread_ready.wait(timeout=5.0):
+                logger.error("Management UI root was not initialized on the main thread within timeout")
+
+
+def run_management_ui_loop() -> None:
+    """Run the Tk mainloop on the main thread."""
+
+    ensure_management_ui_thread()
+
+    root = tk_root
+    if root is None or not root.winfo_exists():
+        return
+
+    try:
+        root.mainloop()
+    finally:
+        _teardown_management_ui()
+
+
+def pump_management_events_once() -> None:
+    """Process pending management UI work without entering the Tk mainloop."""
+
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("Management UI events must be pumped on the main thread")
+
+    root = tk_root
+    if root is None or not root.winfo_exists():
+        return
+
+    # Process any queued management tasks before flushing Tk events so that
+    # worker threads can update the UI while the main thread is busy.
+    _process_management_queue()
+
+    try:
+        root.update_idletasks()
+    except tk.TclError:
+        return
+
+    try:
+        root.update()
+    except tk.TclError:
+        pass
+
+
+def _teardown_management_ui() -> None:
+    """Reset management UI globals after the loop exits."""
+
+    global tk_root, management_window, _management_thread_ident, _management_queue_job
+
+    root = tk_root
+    if root is not None and _management_queue_job is not None:
+        try:
+            root.after_cancel(_management_queue_job)
+        except Exception:
+            logger.exception("Failed to cancel management UI queue job during teardown")
+    _management_queue_job = None
+
+    if root is not None:
+        try:
+            root.destroy()
+        except Exception:
+            logger.exception("Failed to destroy management UI root during teardown")
+
+    tk_root = None
+    management_window = None
+    _management_thread_ident = None
+    _management_thread_ready.clear()
+    sysmod.management_ui_thread = None
+
+
+def request_management_ui_shutdown() -> None:
+    """Request the Tk mainloop to exit."""
+
+    root = tk_root
+    if root is None or not root.winfo_exists():
+        return
+
+    def _quit() -> None:
+        try:
+            root.quit()
+        except Exception:
+            logger.exception("Failed to quit management UI mainloop")
+
+    _call_on_management_ui(_quit, log_message="Failed to schedule management UI shutdown")
 
 def is_management_ui_thread() -> bool:
     return _management_thread_ident == threading.get_ident()
@@ -694,18 +1033,45 @@ class ManagementWindow:
         except Exception:
             logger.exception("Failed to set management window icon")
 
-        # Track asynchronous activation to keep status text stable while the worker runs.
-        self._activation_busy = False
-        self._activation_status_var: Optional[tk.StringVar] = None
+        body = ttk.Frame(self.window, style="Modern.TFrame")
+        body.pack(fill=tk.BOTH, expand=True)
 
-        container = ttk.Frame(self.window, style="Modern.TFrame", padding=(30, 26))
-        container.pack(fill=tk.BOTH, expand=True)
+        self._scroll_canvas = tk.Canvas(
+            body,
+            highlightthickness=0,
+            background=BACKGROUND,
+        )
+        self._scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self._scroll_canvas.yview)
+        self._scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self._scroll_canvas.configure(yscrollcommand=self._scrollbar.set)
+
+        self._scroll_content = ttk.Frame(
+            self._scroll_canvas,
+            style="Modern.TFrame",
+            padding=(30, 26),
+        )
+        self._scroll_window = self._scroll_canvas.create_window(
+            (0, 0),
+            window=self._scroll_content,
+            anchor="nw",
+        )
+
+        self._scroll_content.bind("<Configure>", self._update_scroll_region)
+        self._scroll_canvas.bind("<Configure>", self._sync_scroll_width)
+
+        self._mousewheel_bound = False
+        self._scroll_content.bind("<Enter>", self._bind_mousewheel)
+        self._scroll_content.bind("<Leave>", self._unbind_mousewheel)
+
+        container = self._scroll_content
 
         header = ttk.Frame(container, style="ModernCard.TFrame", padding=(26, 24))
         header.pack(fill=tk.X)
         ttk.Label(header, text="CtrlSpeak Control", style="Title.TLabel").pack(anchor=tk.W)
         build_label = "Client Only" if CLIENT_ONLY_BUILD else "Client + Server"
-        ttk.Label(header, text=f"Build {APP_VERSION} · {build_label}", style="Subtitle.TLabel").pack(anchor=tk.W, pady=(10, 0))
+        ttk.Label(header, text=f"Build {APP_VERSION} Â· {build_label}", style="Subtitle.TLabel").pack(anchor=tk.W, pady=(10, 0))
         header_accent = ttk.Frame(header, style="AccentLine.TFrame")
         header_accent.configure(height=2)
         header_accent.pack(fill=tk.X, pady=(18, 0))
@@ -766,8 +1132,21 @@ class ManagementWindow:
         model_row = ttk.Frame(model_card, style="ModernCardInner.TFrame")
         model_row.pack(fill=tk.X, pady=(14, 12))
         ttk.Label(model_row, text="Whisper model", style="Body.TLabel").pack(side=tk.LEFT)
-        ttk.Combobox(model_row, textvariable=self.model_var, values=["small", "large-v3"],
-                     state="readonly", width=18, style="Modern.TCombobox").pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Combobox(
+            model_row,
+            textvariable=self.model_var,
+            values=["small", "large-v3"],
+            state="readonly",
+            width=18,
+            style="Modern.TCombobox",
+        ).pack(side=tk.LEFT, padx=(12, 0))
+
+        model_badges = ttk.Frame(model_row, style="ModernCardInner.TFrame")
+        model_badges.pack(side=tk.LEFT, padx=(16, 0))
+        self.model_small_badge = ttk.Label(model_badges, text="", style="PillMuted.TLabel")
+        self.model_small_badge.pack(anchor=tk.W)
+        self.model_large_badge = ttk.Label(model_badges, text="", style="PillMuted.TLabel")
+        self.model_large_badge.pack(anchor=tk.W, pady=(8, 0))
         model_buttons = ttk.Frame(model_card, style="ModernCardInner.TFrame")
         model_buttons.pack(fill=tk.X, pady=(4, 0))
         self.apply_model_btn = ttk.Button(model_buttons, text="Activate model", style="Accent.TButton",
@@ -778,6 +1157,44 @@ class ManagementWindow:
         self.download_model_btn.pack(side=tk.LEFT, padx=(12, 0))
         self.model_status = tk.StringVar()
         ttk.Label(model_card, textvariable=self.model_status, style="Caption.TLabel").pack(anchor=tk.W, pady=(10, 0))
+
+        # Input audio device selection
+        audio_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
+        audio_card.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(audio_card, text="Input audio device", style="SectionHeading.TLabel").pack(anchor=tk.W)
+        audio_accent = ttk.Frame(audio_card, style="AccentLine.TFrame")
+        audio_accent.configure(height=2)
+        audio_accent.pack(fill=tk.X, pady=(10, 12))
+        audio_row = ttk.Frame(audio_card, style="ModernCardInner.TFrame")
+        audio_row.pack(fill=tk.X, pady=(14, 12))
+        self.audio_device_var = tk.StringVar()
+        self.audio_device_combo = ttk.Combobox(
+            audio_row,
+            textvariable=self.audio_device_var,
+            state="readonly",
+            style="Modern.TCombobox",
+            width=40,
+        )
+        self.audio_device_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(
+            audio_row,
+            text="Refresh list",
+            style="Subtle.TButton",
+            command=self._refresh_audio_devices,
+        ).pack(side=tk.LEFT, padx=(12, 0))
+        audio_buttons = ttk.Frame(audio_card, style="ModernCardInner.TFrame")
+        audio_buttons.pack(fill=tk.X, pady=(4, 0))
+        self.apply_audio_device_btn = ttk.Button(
+            audio_buttons,
+            text="Apply input device",
+            style="Accent.TButton",
+            command=self._apply_audio_device,
+        )
+        self.apply_audio_device_btn.pack(side=tk.LEFT)
+        self.audio_device_status = tk.StringVar()
+        ttk.Label(audio_card, textvariable=self.audio_device_status, style="Caption.TLabel").pack(anchor=tk.W, pady=(10, 0))
+        self._audio_device_map: dict[str, Optional[str]] = {}
+        self._refresh_audio_devices(initial=True)
 
         # Client/server controls
         control_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
@@ -797,6 +1214,14 @@ class ManagementWindow:
         self.refresh_button = ttk.Button(controls, text="Refresh servers", style="Subtle.TButton",
                                          command=self.refresh_servers)
         self.refresh_button.pack(fill=tk.X, pady=4)
+        self.change_mode_button = ttk.Button(controls, text="Change mode", style="Subtle.TButton",
+                                             command=self.change_mode)
+        self.change_mode_button.pack(fill=tk.X, pady=4)
+        if CLIENT_ONLY_BUILD:
+            try:
+                self.change_mode_button.state(["disabled"])
+            except Exception:
+                logger.exception("Failed to disable change mode button for client-only build")
         exit_label = "Exit CtrlSpeak" if CLIENT_ONLY_BUILD else "Stop everything"
         self.stop_all_button = ttk.Button(controls, text=exit_label, style="Danger.TButton",
                                           command=self.stop_everything)
@@ -815,8 +1240,7 @@ class ManagementWindow:
         # --- Auto-size window to fit content once everything is laid out ---
         self.window.update_idletasks()
         req_w = max(self.window.winfo_reqwidth(), 580)
-        req_h = max(self.window.winfo_reqheight(), 560)
-        self.window.minsize(req_w, req_h)
+        self.window.minsize(req_w, 560)
 
         self.bring_to_front()
 
@@ -830,44 +1254,157 @@ class ManagementWindow:
         self.window.attributes("-topmost", True)
         self.window.after(150, lambda: self.window.attributes("-topmost", False))
 
+    def _update_scroll_region(self, _event: Optional[tk.Event] = None) -> None:
+        if not self.is_open():
+            return
+        try:
+            self._scroll_canvas.configure(scrollregion=self._scroll_canvas.bbox("all"))
+        except Exception:
+            logger.exception("Failed to update management window scroll region")
+
+    def _sync_scroll_width(self, event: tk.Event) -> None:
+        if not self.is_open():
+            return
+        try:
+            self._scroll_canvas.itemconfigure(self._scroll_window, width=event.width)
+        except Exception:
+            logger.exception("Failed to sync management window scroll width")
+
+    def _on_mousewheel(self, event: tk.Event) -> None:
+        if not self.is_open():
+            return
+
+        delta = 0
+        if hasattr(event, "delta") and event.delta:
+            delta = int(event.delta)
+        elif getattr(event, "num", None) in (4, 5):
+            delta = 120 if event.num == 4 else -120
+
+        if delta == 0:
+            return
+
+        direction = -1 if delta > 0 else 1
+        self._scroll_canvas.yview_scroll(direction, "units")
+
+    def _bind_mousewheel(self, _event: tk.Event) -> None:
+        if self._mousewheel_bound:
+            return
+        widget = self.window
+        widget.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
+        widget.bind_all("<Button-4>", self._on_mousewheel, add="+")
+        widget.bind_all("<Button-5>", self._on_mousewheel, add="+")
+        self._mousewheel_bound = True
+
+    def _unbind_mousewheel(self, _event: Optional[tk.Event]) -> None:
+        if not self._mousewheel_bound:
+            return
+        widget = self.window
+        widget.unbind_all("<MouseWheel>")
+        widget.unbind_all("<Button-4>")
+        widget.unbind_all("<Button-5>")
+        self._mousewheel_bound = False
+
     # --- state refresh ---
     def refresh_status(self) -> None:
         with settings_lock:
             mode = settings.get("mode") or "unknown"
         device_pref = get_device_preference()
-        cuda_ok = cuda_runtime_ready()
+        self.device_var.set(device_pref)
+        has_cuda_files = cuda_runtime_files_present()
+        cuda_ready = False
+        if device_pref == "cuda" and has_cuda_files:
+            cuda_ready = cuda_runtime_ready(ignore_preference=True, quiet=True)
         model_name = get_current_model_name()
-        present = model_files_present(model_store_path_for(model_name))
-        self.mode_badge.configure(text=f"MODE · {mode.upper()}", style="PillAccent.TLabel")
+        self.mode_badge.configure(text=f"MODE \uFFFD {mode.upper()}", style="PillAccent.TLabel")
         network_label = describe_server_status()
         if "Not connected" in network_label:
             badge_style = "PillDanger.TLabel"
-            badge_text = "NETWORK · OFFLINE"
+            badge_text = "NETWORK \uFFFD OFFLINE"
         elif network_label.startswith("Serving"):
             badge_style = "PillAccent.TLabel"
-            badge_text = "SERVER · ONLINE"
+            badge_text = "SERVER \uFFFD ONLINE"
         elif network_label.startswith("Connected") or network_label.startswith("Discovered"):
             badge_style = "PillAccent.TLabel"
-            badge_text = "NETWORK · LINKED"
+            badge_text = "NETWORK \uFFFD LINKED"
         else:
             badge_style = "PillMuted.TLabel"
-            badge_text = "NETWORK · READY"
+            badge_text = "NETWORK \uFFFD READY"
         self.network_badge.configure(text=badge_text, style=badge_style)
         status_parts = [
-            f"• Mode: {mode}",
-            f"• Client: {'active' if sysmod.client_enabled else 'stopped'}",
-            f"• Server thread: {'running' if sysmod.server_thread and sysmod.server_thread.is_alive() else 'not running'}",
+            f"\u2022 Mode: {mode}",
+            f"\u2022 Client: {'active' if sysmod.client_enabled else 'stopped'}",
+            f"\u2022 Server thread: {'running' if sysmod.server_thread and sysmod.server_thread.is_alive() else 'not running'}",
+            f"\u2022 Device: {device_pref}",
         ]
         self.status_var.set("\n".join(status_parts))
         self.server_status_var.set(f"Network: {describe_server_status()}")
-        if not (self._activation_busy and self._activation_status_var is self.cuda_status):
-            self.cuda_status.set("CUDA runtime ready." if cuda_ok else "CUDA runtime not detected.")
-        if not (self._activation_busy and self._activation_status_var is self.model_status):
-            self.model_status.set(
-                "Model installed locally." if present else "Model download required before use."
+        if device_pref == "cuda":
+            cuda_text = ("CUDA runtime active." if cuda_ready
+                         else "CUDA runtime not ready; using CPU instead.")
+        elif has_cuda_files:
+            cuda_text = "CUDA runtime staged. Switch to GPU to enable it."
+        else:
+            cuda_text = "CUDA runtime not staged."
+        self.cuda_status.set(cuda_text)
+
+        model_statuses: dict[str, dict[str, object]] = {}
+        for candidate, display in (("small", "Small"), ("large-v3", "Large V3")):
+            candidate_present = model_files_present(model_store_path_for(candidate))
+            if not candidate_present:
+                state = "Not downloaded"
+                style = "PillDanger.TLabel"
+            elif model_name == candidate:
+                state = "Active"
+                style = "PillAccent.TLabel"
+            else:
+                state = "Available"
+                style = "PillMuted.TLabel"
+            model_statuses[candidate] = {
+                "display": display,
+                "state": state,
+                "style": style,
+                "present": candidate_present,
+            }
+
+        def format_state_text(state: str) -> str:
+            return "not downloaded" if state == "Not downloaded" else state.lower()
+
+        small_info = model_statuses.get("small")
+        if small_info:
+            self.model_small_badge.configure(
+                text=f"{small_info['display']}: {format_state_text(small_info['state'])}",
+                style=str(small_info["style"]),
             )
+
+        large_info = model_statuses.get("large-v3")
+        if large_info:
+            self.model_large_badge.configure(
+                text=f"{large_info['display']}: {format_state_text(large_info['state'])}",
+                style=str(large_info["style"]),
+            )
+
+        active_info = model_statuses.get(model_name)
+        if active_info:
+            state = str(active_info["state"])
+            display = str(active_info["display"])
+            if state == "Not downloaded":
+                message = f"{display} model is not downloaded."
+            elif state == "Active":
+                message = f"{display} model is active."
+            else:
+                message = f"{display} model is available locally."
+        else:
+            present = model_files_present(model_store_path_for(model_name))
+            message = (
+                f"{model_name} model is ready." if present else f"{model_name} model status unknown."
+            )
+        self.model_status.set(message)
+
         self.device_var.set(device_pref)
-        self.model_var.set(model_name)
+        if model_name in {"small", "large-v3"}:
+            self.model_var.set(model_name)
+        else:
+            self.model_var.set("large-v3")
 
         if sysmod.client_enabled:
             self.start_button.state(["disabled"]); self.stop_button.state(["!disabled"])
@@ -909,9 +1446,6 @@ class ManagementWindow:
             except Exception:
                 logger.exception("Failed to update status text for %s", notify_context)
 
-        self._activation_busy = True
-        self._activation_status_var = status_var
-
         def worker() -> None:
             success = False
             error: Optional[Exception] = None
@@ -923,9 +1457,6 @@ class ManagementWindow:
                 logger.exception("Transcriber initialization failed while handling %s", notify_context)
 
             def finish() -> None:
-                self._activation_busy = False
-                self._activation_status_var = None
-
                 if not self.is_open():
                     return
 
@@ -962,35 +1493,116 @@ class ManagementWindow:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _refresh_audio_devices(self, initial: bool = False) -> None:
+        entries: list[tuple[str, Optional[str]]] = [("System default (OS managed)", None)]
+        try:
+            for name, label in list_input_audio_devices():
+                display = label or name
+                entries.append((display, name))
+        except Exception:
+            logger.exception("Failed to refresh audio device list")
+
+        if not entries:
+            entries = [("System default (OS managed)", None)]
+
+        self._audio_device_map = {display: value for display, value in entries}
+        self.audio_device_combo.configure(values=[display for display, _ in entries])
+
+        preferred = get_input_device_preference()
+        selected_display = entries[0][0]
+        found = False
+        if preferred:
+            for display, value in entries:
+                if value == preferred:
+                    selected_display = display
+                    found = True
+                    break
+        self.audio_device_var.set(selected_display)
+
+        if not any(value is not None for _, value in entries[1:]):
+            message = "No microphone devices detected."
+        elif preferred and found:
+            message = f"Preferred device: {selected_display}"
+        elif preferred and not found:
+            message = "Preferred device not found. Using system default input device."
+        else:
+            message = "Using system default input device."
+
+        if initial or not self.audio_device_status.get() or not preferred:
+            self.audio_device_status.set(message)
+        elif not initial:
+            self.audio_device_status.set(message)
+
+    # --- device actions ---
+    def _apply_audio_device(self) -> None:
+        try:
+            selection = self.audio_device_var.get()
+        except Exception:
+            selection = ""
+        device_name = self._audio_device_map.get(selection)
+        try:
+            set_input_device_preference(device_name)
+        except Exception:
+            logger.exception("Failed to save preferred audio input device")
+            self.audio_device_status.set("Unable to save audio device preference. See logs for details.")
+            return
+
+        if device_name:
+            self.audio_device_status.set(f"Input device preference saved: {selection}")
+        else:
+            self.audio_device_status.set("Using system default input device.")
+
     # --- device actions ---
     def _apply_device(self):
         from utils.models import set_device_preference
-        choice = self.device_var.get()
-        if choice not in {"cpu", "cuda", "auto"}:
-            choice = "auto"
-        set_device_preference(choice)
 
-        # Offer to install CUDA if they chose GPU and it isn't ready
-        if choice == "cuda" and not cuda_runtime_ready():
-            if messagebox.askyesno(
-                    "CUDA not ready",
-                    "CUDA runtime not detected.\n\nInstall now for GPU acceleration?",
-                    parent=self.window
-            ):
-                if install_cuda_runtime_with_progress(self.window):
-                    messagebox.showinfo("CUDA", "CUDA runtime installed successfully.", parent=self.window)
-                else:
-                    messagebox.showwarning("CUDA", "Failed to prepare CUDA. Staying on CPU.", parent=self.window)
+        requested = self.device_var.get()
+        if requested != "cuda":
+            requested = "cpu"
+
+        if requested == "cuda":
+            staged = cuda_runtime_files_present()
+            if not staged:
+                staged = ensure_cuda_runtime_from_existing()
+
+            if not staged:
+                logger.warning("CUDA device selection requested but no runtime files were staged; staying on CPU.")
+                self.device_var.set("cpu")
+                set_device_preference("cpu")
+                self.cuda_status.set("CUDA runtime not staged. Use Install or repair CUDA to configure it.")
+                self._reload_transcriber_async(
+                    progress_message="Applying device preference...",
+                    status_var=self.cuda_status,
+                    notify_context="Device setup failed",
+                )
+                return
+
+            if not cuda_runtime_ready(ignore_preference=True, quiet=True):
+                logger.warning("CUDA runtime files were staged but validation failed; staying on CPU.")
+                self.device_var.set("cpu")
+                set_device_preference("cpu")
+                self.cuda_status.set("CUDA runtime not ready; using CPU instead.")
+                self._reload_transcriber_async(
+                    progress_message="Applying device preference...",
+                    status_var=self.cuda_status,
+                    notify_context="Device setup failed",
+                )
+                return
+
+        set_device_preference(requested)
 
         # Reload the model with the new device without blocking the UI
         self._reload_transcriber_async(
-            progress_message="Applying device preference…",
+            progress_message="Applying device preference...",
             status_var=self.cuda_status,
-            notify_context="Device activation failed",
+            notify_context="Device setup failed",
         )
 
+
     def _install_cuda(self):
-        if install_cuda_runtime_with_progress(self.window):
+        if ensure_cuda_runtime_from_existing():
+            messagebox.showinfo("CUDA", "Reused existing CUDA runtime for CtrlSpeak.", parent=self.window)
+        elif install_cuda_runtime_with_progress(self.window):
             messagebox.showinfo("CUDA", "CUDA runtime installed successfully.", parent=self.window)
         else:
             messagebox.showwarning("CUDA", "Failed to prepare CUDA. You can try again.", parent=self.window)
@@ -1005,21 +1617,22 @@ class ManagementWindow:
         set_current_model_name(name)
 
         if not model_files_present(model_store_path_for(name)):
-            messagebox.showinfo(
-                "Model",
-                "Model files are not installed yet. Use Download/Update… to fetch them before switching.",
-                parent=self.window,
-            )
-            self.refresh_status()
-            return
+            if not download_model_with_gui(name, block_during_download=True):
+                messagebox.showwarning(
+                    "Model",
+                    "Model download was cancelled before activation could continue.",
+                    parent=self.window,
+                )
+                self.refresh_status()
+                return
 
         def on_success() -> None:
             messagebox.showinfo("Model", f"Active model set to {name}.", parent=self.window)
 
         self._reload_transcriber_async(
-            progress_message="Activating model…",
+            progress_message="Loading modelâ€¦",
             status_var=self.model_status,
-            notify_context="Model activation failed",
+            notify_context="Model load failed",
             success_callback=on_success,
         )
 
@@ -1027,18 +1640,15 @@ class ManagementWindow:
         name = self.model_var.get()
         if name not in {"small", "large-v3"}:
             name = "large-v3"
-        model_already_loaded = is_model_loaded()
         if download_model_with_gui(
             name,
-            block_during_download=not model_already_loaded,
-            activate_after=not model_already_loaded,
+            block_during_download=True,
         ):
-            (model_store_path_for(name) / ".installed").touch(exist_ok=True)
-            if model_already_loaded:
-                message = "Model downloaded successfully."
-            else:
-                message = "Model downloaded and activated successfully."
-            messagebox.showinfo("Model", message, parent=self.window)
+            messagebox.showinfo(
+                "Model",
+                "Model downloaded successfully.",
+                parent=self.window,
+            )
         else:
             messagebox.showwarning("Model", "Model download did not complete.", parent=self.window)
         self.refresh_status()
@@ -1051,8 +1661,8 @@ class ManagementWindow:
         stop_client_listener(); self.refresh_status()
 
     def refresh_servers(self) -> None:
-        self.refresh_button.state(["disabled"]); self.refresh_button.config(text="Scanning…")
-        self.server_status_var.set("Scanning for servers…")
+        self.refresh_button.state(["disabled"]); self.refresh_button.config(text="Scanningâ€¦")
+        self.server_status_var.set("Scanning for serversâ€¦")
 
         def worker() -> None:
             try:
@@ -1066,6 +1676,78 @@ class ManagementWindow:
         if not self.is_open(): return
         self.refresh_button.state(["!disabled"]); self.refresh_button.config(text="Refresh Servers")
         self.refresh_status()
+
+    def change_mode(self) -> None:
+        if CLIENT_ONLY_BUILD:
+            messagebox.showinfo(
+                "Mode",
+                "This build only supports the client mode.",
+                parent=self.window,
+            )
+            return
+
+        if not self.is_open():
+            return
+
+        try:
+            self.change_mode_button.state(["disabled"])
+        except Exception:
+            logger.exception("Failed to disable change mode button before dialog")
+
+        with settings_lock:
+            current_mode = settings.get("mode")
+
+        try:
+            choice = prompt_initial_mode(self.window)
+        finally:
+            try:
+                self.change_mode_button.state(["!disabled"])
+            except Exception:
+                logger.exception("Failed to re-enable change mode button after dialog")
+
+        if not choice or choice == current_mode:
+            return
+
+        if choice == "client_server":
+            if not ensure_model_ready_for_local_server():
+                messagebox.showwarning(
+                    "Mode not changed",
+                    "CtrlSpeak could not prepare the local transcription engine.",
+                    parent=self.window,
+                )
+                return
+            start_server()
+            if not (sysmod.server_thread and sysmod.server_thread.is_alive()):
+                messagebox.showerror(
+                    "Mode not changed",
+                    "CtrlSpeak could not start the local server.",
+                    parent=self.window,
+                )
+                return
+        else:
+            shutdown_server()
+            try:
+                manual_discovery_refresh()
+            except Exception:
+                logger.exception("Failed to refresh discovery after switching to client mode")
+
+        with settings_lock:
+            settings["mode"] = choice
+        save_settings()
+
+        try:
+            self._icon.title = f"CtrlSpeak ({choice})"
+        except Exception:
+            logger.exception("Failed to update tray icon title after mode change")
+
+        self.refresh_status()
+
+        mode_label = "Client + Server" if choice == "client_server" else "Client Only"
+        messagebox.showinfo(
+            "Mode updated",
+            f"CtrlSpeak will now operate in {mode_label} mode.",
+            parent=self.window,
+        )
 
     def stop_everything(self) -> None:
         stop_client_listener(); shutdown_server()
@@ -1082,5 +1764,13 @@ class ManagementWindow:
 
     def close(self) -> None:
         global management_window
-        if self.is_open(): self.window.destroy()
+        if self.is_open():
+            self._unbind_mousewheel(None)
+            self.window.destroy()
         management_window = None
+
+
+
+
+
+

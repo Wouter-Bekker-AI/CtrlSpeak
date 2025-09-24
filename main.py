@@ -18,10 +18,15 @@ from utils.system import (
     CLIENT_ONLY_BUILD,
     start_server,
     run_tray,
+    apply_auto_setup,
 )
 
-from utils.gui import show_splash_screen, ensure_mode_selected
-from utils.models import initialize_transcriber
+from utils.gui import show_splash_screen, ensure_mode_selected, ensure_management_ui_thread
+from utils.models import (
+    initialize_transcriber,
+    ensure_model_ready_for_local_server,
+    ensure_initial_model_installation,
+)
 
 
 def main(argv: list[str]) -> int:
@@ -36,6 +41,10 @@ def main(argv: list[str]) -> int:
         from utils.system import set_force_sendinput
         set_force_sendinput(True)
 
+    if args.automation_flow:
+        from utils.automation import run_automation_flow
+        return run_automation_flow()
+
     # Single instance
     if not acquire_single_instance_lock():
         notify("CtrlSpeak is already running.")
@@ -44,6 +53,17 @@ def main(argv: list[str]) -> int:
     # Load settings early
     load_settings()
 
+    if getattr(args, "setup_cuda", False):
+        from utils.models import ensure_cuda_runtime_from_existing, install_cuda_runtime_with_progress
+
+        success = ensure_cuda_runtime_from_existing()
+        if not success:
+            success = install_cuda_runtime_with_progress(parent=None) and ensure_cuda_runtime_from_existing()
+        return 0 if success else 1
+
+    if args.auto_setup:
+        apply_auto_setup(args.auto_setup)
+
     # CLI: offline transcription of a file
     if args.transcribe:
         return transcribe_cli(args.transcribe)
@@ -51,15 +71,27 @@ def main(argv: list[str]) -> int:
     # Splash
     show_splash_screen(SPLASH_DURATION_MS)
 
+    # Prepare the shared management UI root before any background tasks need it
+    ensure_management_ui_thread()
+
     # Ensure mode selected (client or client_server)
     ensure_mode_selected()
 
-    # Start discovery listener for client mode visibility
-    start_discovery_listener()
+    # Auto-install the default speech model on first launch
+    if not ensure_initial_model_installation():
+        return 0
 
-    # Orchestrate engine/server as needed based on mode
+    # Determine the selected mode now that setup is complete
     with settings_lock:
         mode = settings.get("mode")
+
+    # Automatically prepare local transcription assets when running the server locally
+    if mode == "client_server":
+        if not ensure_model_ready_for_local_server():
+            return 0
+
+    # Start discovery listener for client mode visibility
+    start_discovery_listener()
 
     if mode == "client_server":
         initialize_transcriber(interactive=False)   # warm-up local model when assets are ready

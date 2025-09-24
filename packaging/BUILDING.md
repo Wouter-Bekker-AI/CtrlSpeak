@@ -16,8 +16,6 @@ pyinstaller packaging/CtrlSpeak.spec
 Outputs are under `dist/CtrlSpeak/`.
 
 ## First-run behavior
-- Creates `~/.ctrlspeak/` with subfolders:
-  - `models/` for model weights
-  - `runtimes/` for downloaded installers (CUDA/cuDNN on Windows)
-- Prompts the user to download missing components with a GUI progress window showing **bytes**, **speed**, and **ETA**.
-- Does **not** automatically run platform installers; the user must execute them if needed.
+- Creates the per-user application data directory (for example `%APPDATA%\CtrlSpeak` on Windows) with subfolders `models/`, `cuda/`, `temp/`, and `logs/`.
+- Automatically downloads the default `small` Whisper model so transcription works on CPU immediately.
+- Defers CUDA preparation until the user runs `python main.py --setup-cuda` or chooses **Install or repair CUDA** in the management window; no GPU installers are run during a normal startup.

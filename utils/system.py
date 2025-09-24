@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from datetime import datetime
+
 import atexit
 import argparse
 import http.client
@@ -15,7 +17,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Queue
-from typing import Dict, Optional, Tuple, Callable
+from typing import Dict, Optional, Tuple, Callable, List, TYPE_CHECKING
 import subprocess
 import uuid
 import traceback
@@ -128,6 +130,8 @@ processing_sound_thread: Optional[threading.Thread] = None
 processing_sound_stop_event = threading.Event()
 processing_sound_data: Optional[bytes] = None
 processing_sound_settings: Optional[Dict[str, int]] = None
+_ready_sound_lock = threading.Lock()
+_ready_sound_played = False
 
 recording_temp_dir_name = "temp"
 AUTO_MODE = False
@@ -139,11 +143,15 @@ management_ui_queue: "Queue[tuple[Callable[..., None], tuple, dict]]" = Queue()
 tk_root: Optional[tk.Tk] = None
 management_window: Optional["ManagementWindow"] = None  # created in utils.gui
 
+if TYPE_CHECKING:
+    from utils.gui import ManagementWindow
+
 # ---------------- IMPORTS from new split modules (and re-exports) ----------------
 
 # Win32 text insertion / clipboard
 from utils.winio import (
-    insert_text_into_focus, set_force_sendinput, is_console_window
+    insert_text_into_focus, set_force_sendinput, is_console_window,
+    set_clipboard_text,
 )
 
 # LAN discovery (single source of truth for ServerInfo)
@@ -165,7 +173,7 @@ __all__ = [
     "get_config_dir", "get_config_file_path", "get_temp_dir",
     "create_recording_file_path", "cleanup_recording_file", "resource_path",
     "insert_text_into_focus", "set_force_sendinput", "is_console_window",
-    "ServerInfo",
+    "ServerInfo", "format_exception_details",
 ]
 
 # Keep a single shared discovery listener and last_connected_server here
@@ -188,85 +196,79 @@ def notify(message: str, title: str = "CtrlSpeak") -> None:
             logger.exception("Failed to print fallback notification '%s'", title)
 
 
-def ui_show_activation_popup(message: str) -> None:
-    """Show (or update) the activation-in-progress popup."""
+
+
+def ui_show_lockout_window(message: str) -> None:
+    """Display (or update) the first-run lockout window."""
     try:
         from utils.gui import (
             ensure_management_ui_thread,
-            show_activation_popup,
+            show_lockout_window,
             is_management_ui_thread,
         )
 
         ensure_management_ui_thread()
         if is_management_ui_thread():
-            show_activation_popup(message)
+            show_lockout_window(message)
         else:
-            enqueue_management_task(show_activation_popup, message)
+            enqueue_management_task(show_lockout_window, message)
     except Exception:
-        logger.exception("Failed to show activation popup")
+        logger.exception("Failed to show lockout window")
         try:
             print(f"CtrlSpeak: {message}")
         except Exception:
-            logger.exception("Failed to print activation popup fallback message")
+            logger.exception("Failed to print lockout window fallback message")
 
 
-def ui_remind_activation_popup(message: str | None = None) -> None:
-    """Bring the activation popup to the foreground (optionally updating its text)."""
+
+
+def ui_update_lockout_message(message: str) -> None:
+    """Update the message shown in the lockout window."""
     try:
-        from utils.gui import ensure_management_ui_thread, focus_activation_popup
+        from utils.gui import ensure_management_ui_thread, update_lockout_message
 
         ensure_management_ui_thread()
-        enqueue_management_task(focus_activation_popup, message)
+        enqueue_management_task(update_lockout_message, message)
     except Exception:
-        logger.exception("Failed to focus activation popup")
-        if message:
-            try:
-                print(f"CtrlSpeak: {message}")
-            except Exception:
-                logger.exception("Failed to print activation popup focus message")
+        logger.exception("Failed to update lockout message")
 
 
-def ui_close_activation_popup(message: str | None = None) -> None:
-    """Close the activation popup, optionally leaving a completion message first."""
+
+
+def ui_close_lockout_window(message: str | None = None) -> None:
+    """Close the lockout window, optionally after showing a completion message."""
     try:
         from utils.gui import (
             ensure_management_ui_thread,
-            close_activation_popup,
+            close_lockout_window,
             is_management_ui_thread,
         )
 
         ensure_management_ui_thread()
         if is_management_ui_thread():
-            close_activation_popup(message)
+            close_lockout_window(message)
         else:
-            enqueue_management_task(close_activation_popup, message)
+            enqueue_management_task(close_lockout_window, message)
     except Exception:
-        logger.exception("Failed to close activation popup")
-        if message:
-            try:
-                print(f"CtrlSpeak: {message}")
-            except Exception:
-                logger.exception("Failed to print activation popup completion message")
+        logger.exception("Failed to close lockout window")
 
-def format_exception_details(exc: Exception) -> str:
-    return "".join(traceback.format_exception_only(type(exc), exc)).strip()
 
-def write_error_log(context: str, details: str) -> None:
+def write_error_log(context: str, snippet: str) -> None:
     try:
-        log_path = get_logs_dir() / ERROR_LOG_FILENAME
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        cleaned = (details or "").strip() or "Unknown error"
-        entry = "[{}] {}\n{}\n{}\n".format(timestamp, context, cleaned, "-" * 60)
-        with log_path.open("a", encoding="utf-8") as handle:
-            handle.write(entry)
-        logger.error("%s | %s", context, cleaned)
+        logs_dir = get_logs_dir()
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        error_path = logs_dir / ERROR_LOG_FILENAME
+        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        with error_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"[{timestamp}] {context}\n{snippet}\n\n")
     except Exception:
-        logger.exception("Failed to write error log entry for %s", context)
+        logger.exception("Failed to write error log entry")
+
 
 def copy_to_clipboard(text: str) -> None:
     try:
-        root = tk.Tk(); root.withdraw()
-        root.clipboard_clear(); root.clipboard_append(text); root.update(); root.destroy()
+        if not set_clipboard_text(text):
+            logger.warning("Failed to stage clipboard text")
     except Exception:
         logger.exception("Failed to copy text to clipboard")
 
@@ -276,6 +278,20 @@ def notify_error(context: str, details: str) -> None:
     write_error_log(context, snippet)
     copy_to_clipboard(message)
     notify(message, title="CtrlSpeak Error")
+
+
+def format_exception_details(exc: BaseException | None) -> str:
+    """Return a readable error summary including traceback details when possible."""
+    if exc is None:
+        return "Unknown error"
+
+    try:
+        return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
+    except Exception:
+        try:
+            return f"{exc.__class__.__name__}: {exc}".strip()
+        except Exception:
+            return "Unknown error"
 
 # ---------------- Resource helpers ----------------
 def create_icon_image():
@@ -288,6 +304,21 @@ def enqueue_management_task(func: Callable[..., None], *args, **kwargs) -> None:
         management_ui_queue.put_nowait((func, args, kwargs))
     except Exception:
         logger.exception("Failed to enqueue management task %s", getattr(func, "__name__", str(func)))
+
+
+def pump_management_events_once() -> None:
+    """Process queued management UI work once without blocking."""
+
+    try:
+        from utils.gui import ensure_management_ui_thread, pump_management_events_once as _pump_once
+
+        ensure_management_ui_thread()
+        _pump_once()
+    except RuntimeError:
+        raise
+    except Exception:
+        logger.exception("Failed to pump management UI events")
+
 
 def schedule_management_refresh(delay_ms: int = 0) -> None:
     # utils.gui sets tk_root and management_window; import FRESH on each call
@@ -465,9 +496,139 @@ def stop_processing_feedback():
         processing_sound_thread.join(timeout=1.0)
     processing_sound_thread = None
 
+
+def play_model_ready_sound_once() -> None:
+    global _ready_sound_played
+    with _ready_sound_lock:
+        if _ready_sound_played:
+            return
+        _ready_sound_played = True
+
+    def _worker() -> None:
+        pa_instance = None
+        stream = None
+        try:
+            data, settings_audio = load_processing_sound()
+            pa_instance = pyaudio.PyAudio()
+            stream = pa_instance.open(
+                format=pyaudio.get_format_from_width(settings_audio["width"]),
+                channels=settings_audio["channels"],
+                rate=settings_audio["rate"],
+                output=True,
+            )
+            stream.write(data)
+        except Exception:
+            logger.exception("Failed to play model ready sound")
+        finally:
+            try:
+                if stream is not None:
+                    stream.stop_stream(); stream.close()
+            except Exception:
+                logger.exception("Failed to close ready sound stream cleanly")
+            if pa_instance is not None:
+                try:
+                    pa_instance.terminate()
+                except Exception:
+                    logger.exception("Failed to terminate PyAudio after ready sound")
+
+    threading.Thread(target=_worker, name="CtrlSpeakReadySound", daemon=True).start()
+
+
+def list_input_audio_devices() -> List[Tuple[str, str]]:
+    """Return a list of (device_name, display_label) for input-capable devices."""
+    devices: List[Tuple[str, str]] = []
+    pa_instance: Optional[pyaudio.PyAudio] = None
+    try:
+        pa_instance = pyaudio.PyAudio()
+        host_names: Dict[int, str] = {}
+        try:
+            for host_index in range(pa_instance.get_host_api_count()):
+                host_info = pa_instance.get_host_api_info_by_index(host_index)
+                host_names[host_index] = str(host_info.get("name", ""))
+        except Exception:
+            logger.exception("Failed to enumerate audio host APIs")
+
+        for index in range(pa_instance.get_device_count()):
+            try:
+                info = pa_instance.get_device_info_by_index(index)
+            except Exception:
+                logger.exception("Failed to read audio device info for index %s", index)
+                continue
+            if int(info.get("maxInputChannels", 0)) <= 0:
+                continue
+            name = str(info.get("name", f"Device {index}"))
+            host_name = host_names.get(info.get("hostApi"), "")
+            label = name
+            if host_name:
+                label = f"{label} · {host_name}"
+            devices.append((name, label))
+    except Exception:
+        logger.exception("Failed to enumerate input audio devices")
+        return []
+    finally:
+        if pa_instance is not None:
+            try:
+                pa_instance.terminate()
+            except Exception:
+                logger.exception("Failed to terminate PyAudio after device enumeration")
+    return devices
+
+
+def get_input_device_preference() -> Optional[str]:
+    """Return the stored input device name, or None for system default."""
+    with settings_lock:
+        preferred = settings.get("input_device")
+    if isinstance(preferred, str) and preferred.strip():
+        return preferred
+    return None
+
+
+def set_input_device_preference(device_name: Optional[str]) -> None:
+    """Persist the preferred input device name (None for default)."""
+    cleaned = device_name.strip() if isinstance(device_name, str) else None
+    with settings_lock:
+        settings["input_device"] = cleaned if cleaned else None
+    save_settings()
+
+
+def _resolve_input_device_index(pa_instance: pyaudio.PyAudio, preferred: Optional[str] = None) -> Optional[int]:
+    """Return the PyAudio index for the preferred device, if available."""
+    target = preferred if preferred is not None else get_input_device_preference()
+    if not target:
+        return None
+    try:
+        for index in range(pa_instance.get_device_count()):
+            info = pa_instance.get_device_info_by_index(index)
+            if int(info.get("maxInputChannels", 0)) <= 0:
+                continue
+            if str(info.get("name")) == target:
+                return index
+    except Exception:
+        logger.exception("Failed to resolve preferred input audio device index")
+    return None
+
+
 def record_audio(target_path: Path) -> None:
     pyaudio_instance = pyaudio.PyAudio()
-    stream = pyaudio_instance.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNKSIZE)
+    stream_kwargs = dict(
+        format=FORMAT,
+        channels=CHANNELS,
+        rate=RATE,
+        input=True,
+        frames_per_buffer=CHUNKSIZE,
+    )
+    preferred_index = _resolve_input_device_index(pyaudio_instance)
+    if preferred_index is not None:
+        stream_kwargs["input_device_index"] = preferred_index
+    try:
+        stream = pyaudio_instance.open(**stream_kwargs)
+    except Exception:
+        if "input_device_index" in stream_kwargs:
+            logger.exception("Failed to open preferred input device; falling back to system default")
+            stream_kwargs.pop("input_device_index", None)
+            stream = pyaudio_instance.open(**stream_kwargs)
+        else:
+            raise
     frames = []
     try:
         while recording:
@@ -486,14 +647,8 @@ def record_audio(target_path: Path) -> None:
 
 # ---------------- Client keyboard listener ----------------
 def on_press(key):
-    from utils.models import describe_activation_block, is_activation_in_progress  # on-demand to avoid circulars
     global recording, recording_thread, recording_file_path
-    if not client_enabled: return
-    if is_activation_in_progress():
-        message = describe_activation_block()
-        if not message:
-            message = "CtrlSpeak is busy preparing resources. Please wait before using the hotkey again."
-        ui_remind_activation_popup(message)
+    if not client_enabled:
         return
     if key == keyboard.Key.ctrl_r and not recording:
         recording = True
@@ -508,7 +663,7 @@ def on_press(key):
 
 
 def on_release(key):
-    from utils.models import describe_activation_block, is_activation_in_progress, transcribe_audio
+    from utils.models import transcribe_audio
     global recording, recording_thread, recording_file_path
     if key == keyboard.Key.ctrl_r:
         if recording:
@@ -516,22 +671,6 @@ def on_release(key):
             if recording_thread:
                 recording_thread.join(); recording_thread = None
             path = recording_file_path
-            block_message = None
-            try:
-                if is_activation_in_progress():
-                    block_message = describe_activation_block()
-            except Exception:
-                logger.exception("Failed to check activation status before transcription")
-            if block_message:
-                ui_remind_activation_popup(block_message)
-                try:
-                    from utils.gui import hide_waveform_overlay
-                    enqueue_management_task(hide_waveform_overlay)
-                except Exception:
-                    logger.exception("Failed to hide waveform overlay after activation block")
-                cleanup_recording_file(path)
-                recording_file_path = None
-                return
             # switch overlay into “processing” mode
             try:
                 from utils.gui import set_waveform_processing
@@ -603,13 +742,35 @@ def start_client_listener() -> None:
     schedule_management_refresh()
 
 def stop_client_listener() -> None:
-    global listener, client_enabled, recording_file_path
+    global listener, client_enabled, recording, recording_thread, recording_file_path
+    thread_to_join: Optional[threading.Thread] = None
+    cleanup_path: Optional[Path] = None
+    should_hide_waveform = False
     with listener_lock:
         client_enabled = False
         if listener is not None:
             listener.stop(); listener = None
-    cleanup_recording_file(recording_file_path)
-    recording_file_path = None
+        if recording:
+            recording = False
+            should_hide_waveform = True
+        if recording_thread is not None:
+            thread_to_join = recording_thread
+            recording_thread = None
+            should_hide_waveform = True
+        if recording_file_path is not None:
+            cleanup_path = recording_file_path
+            recording_file_path = None
+            should_hide_waveform = True
+    if thread_to_join:
+        thread_to_join.join()
+    if should_hide_waveform:
+        try:
+            from utils.gui import hide_waveform_overlay
+            enqueue_management_task(hide_waveform_overlay)
+        except Exception:
+            logger.exception("Failed to hide waveform overlay when stopping listener")
+    if cleanup_path is not None:
+        cleanup_recording_file(cleanup_path)
     schedule_management_refresh()
 
 # ---------------- Server (HTTP) ----------------
@@ -730,7 +891,13 @@ def register_manual_server(host: str, port: int, update_preference: bool = True)
 
 # ---------------- Tray ----------------
 def on_exit(icon, item):
-    stop_client_listener(); shutdown_server(); icon.stop()
+    stop_client_listener(); shutdown_server()
+    try:
+        from utils.gui import request_management_ui_shutdown
+        request_management_ui_shutdown()
+    except Exception:
+        logger.exception("Failed to request management UI shutdown during exit")
+    icon.stop()
 
 def open_management_dialog(icon, item):
     from utils.gui import ensure_management_ui_thread, _show_management_window
@@ -738,7 +905,7 @@ def open_management_dialog(icon, item):
     enqueue_management_task(_show_management_window, icon)
 
 def run_tray():
-    from utils.gui import ensure_management_ui_thread
+    from utils.gui import ensure_management_ui_thread, run_management_ui_loop, request_management_ui_shutdown
     ensure_management_ui_thread()  # make sure tk_root exists for overlay
     start_client_listener()
     with settings_lock:
@@ -748,7 +915,30 @@ def run_tray():
         pystray.MenuItem("Quit", on_exit),
     ]
     icon = pystray.Icon("CtrlSpeak", create_icon_image(), f"CtrlSpeak ({mode})", menu=pystray.Menu(*menu_items))
-    icon.run()
+    def _run_icon() -> None:
+        try:
+            icon.run()
+        finally:
+            try:
+                request_management_ui_shutdown()
+            except Exception:
+                logger.exception("Failed to shut down management UI after tray loop exited")
+
+    thread = threading.Thread(target=_run_icon, name="CtrlSpeakTray", daemon=True)
+    thread.start()
+
+    try:
+        run_management_ui_loop()
+    finally:
+        try:
+            request_management_ui_shutdown()
+        except Exception:
+            logger.exception("Failed to request management UI shutdown while leaving tray loop")
+        try:
+            icon.stop()
+        except Exception:
+            logger.exception("Failed to stop tray icon")
+        thread.join(timeout=2.0)
 
 # ---------------- Startup / single-instance ----------------
 def acquire_single_instance_lock() -> bool:
@@ -847,16 +1037,34 @@ def initiate_self_uninstall(icon: Optional[pystray.Icon]) -> None:
 # ---------------- Lifecycle helpers ----------------
 def start_discovery_listener() -> None:
     global discovery_listener
+    if discovery_listener is not None and discovery_listener.is_alive():
+        return
     with settings_lock:
         port = int(settings.get("discovery_port", 54330))
     discovery_listener = DiscoveryListener(port); discovery_listener.start()
 
+def stop_discovery_listener() -> None:
+    global discovery_listener
+    if discovery_listener is None:
+        return
+    try:
+        discovery_listener.stop()
+    except Exception:
+        logger.exception("Failed to stop discovery listener")
+    finally:
+        discovery_listener = None
+
 def shutdown_all():
     stop_client_listener(); shutdown_server()
     try:
-        if discovery_listener: discovery_listener.stop()
+        stop_discovery_listener()
     except Exception:
         logger.exception("Failed to stop discovery listener during shutdown")
+    try:
+        from utils.gui import request_management_ui_shutdown
+        request_management_ui_shutdown()
+    except Exception:
+        logger.exception("Failed to shut down management UI during shutdown")
 
 # ---------------- CLI ----------------
 def parse_cli_args(argv: list[str]) -> argparse.Namespace:
@@ -865,6 +1073,8 @@ def parse_cli_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--uninstall", action="store_true", help="Remove CtrlSpeak and all local data")
     parser.add_argument("--auto-setup", choices=["client", "client_server"], help="Configure CtrlSpeak without prompts")
     parser.add_argument("--force-sendinput", action="store_true", help="Force SendInput-based insertion (debug)")
+    parser.add_argument("--setup-cuda", action="store_true", help="Prepare CUDA runtime support without launching the UI")
+    parser.add_argument("--automation-flow", action="store_true", help="Run the automated end-to-end regression workflow")
     args, _ = parser.parse_known_args(argv[1:])
     return args
 
@@ -873,20 +1083,40 @@ def transcribe_cli(target: str) -> int:
     file_path = Path(target).expanduser()
     if not file_path.is_file():
         print(f"Audio file not found: {file_path}", file=sys.stderr); return 1
-    with settings_lock:
-        mode = settings.get("mode")
-    if mode == "client_server":
-        if initialize_transcriber() is None:
-            print("Unable to initialize the transcription engine.", file=sys.stderr); return 2
-    elif mode == "client":
-        time.sleep(1.0)
-    text = transcribe_audio(str(file_path), play_feedback=False)
-    if text is None:
-        print("Transcription produced no output.", file=sys.stderr); return 3
-    print(text); return 0
+    discovery_started = False
+    try:
+        with settings_lock:
+            mode = settings.get("mode")
+        if mode == "client_server":
+            if initialize_transcriber() is None:
+                print("Unable to initialize the transcription engine.", file=sys.stderr); return 2
+        elif mode == "client":
+            start_discovery_listener(); discovery_started = True
+            time.sleep(1.0)
+            server = get_best_server()
+            if server is not None:
+                logger.info(
+                    "CLI transcription discovered server %s:%s; skipping local fallback prompt.",
+                    server.host,
+                    server.port,
+                )
+            else:
+                logger.info(
+                    "CLI transcription did not discover a server; fallback prompt may still be shown."
+                )
+        text = transcribe_audio(str(file_path), play_feedback=False)
+        if text is None:
+            print("Transcription produced no output.", file=sys.stderr); return 3
+        print(text)
+        return 0
+    finally:
+        if discovery_started:
+            stop_discovery_listener()
 
 def apply_auto_setup(profile: str) -> None:
     global AUTO_MODE, AUTO_MODE_PROFILE
     AUTO_MODE = True; AUTO_MODE_PROFILE = profile
+    logger.info("Applying auto-setup profile: %s", profile)
     with settings_lock: settings["mode"] = profile
     save_settings()
+
