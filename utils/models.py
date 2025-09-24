@@ -187,6 +187,12 @@ def _model_repo_id(model_short: str) -> str:
     return f"Systran/faster-whisper-{model_short}"
 
 
+
+def get_model_repo_id(model_short: str) -> str:
+    """Expose the Hugging Face repo id used for the given Whisper model."""
+    return _model_repo_id(model_short)
+
+
 def _model_activation_cache_path(model_short: str) -> Path:
     repo_id = _model_repo_id(model_short)
     safe_repo = repo_id.replace("/", "--")

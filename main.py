@@ -41,6 +41,10 @@ def main(argv: list[str]) -> int:
         from utils.system import set_force_sendinput
         set_force_sendinput(True)
 
+    if args.automation_flow:
+        from utils.automation import run_automation_flow
+        return run_automation_flow()
+
     # Single instance
     if not acquire_single_instance_lock():
         notify("CtrlSpeak is already running.")
