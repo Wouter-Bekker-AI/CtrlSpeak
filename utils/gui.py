@@ -114,6 +114,48 @@ def _destroy_lockout_window() -> None:
     _lockout_progress = None
 
 
+def show_notification_popup(title: str, message: str) -> None:
+    """Display a transient notification window on the management UI thread."""
+
+    root = tk_root
+    if root is None or not root.winfo_exists():
+        try:
+            print(f"{title}: {message}")
+        except Exception:
+            logger.exception("Failed to print fallback notification '%s'", title)
+        return
+
+    if not is_management_ui_thread():
+        _call_on_management_ui(
+            lambda: show_notification_popup(title, message),
+            log_message="Failed to schedule notification popup",
+        )
+        return
+
+    try:
+        popup = tk.Toplevel(root)
+        popup.title(title)
+        popup.transient(root)
+        popup.resizable(False, False)
+        try:
+            popup.attributes("-topmost", True)
+        except Exception:
+            logger.debug("Topmost attribute not available for notification window")
+        frame = ttk.Frame(popup, padding=16)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=message, wraplength=420, justify="left").pack(anchor="w", fill="x")
+        ttk.Button(frame, text="Dismiss", command=popup.destroy).pack(anchor="e", pady=(12, 0))
+        popup.bind("<Escape>", lambda event: popup.destroy())
+        popup.after(12000, popup.destroy)
+        popup.after(120, popup.lift)
+    except Exception:
+        logger.exception("Failed to create notification popup window for '%s'", title)
+        try:
+            print(f"{title}: {message}")
+        except Exception:
+            logger.exception("Failed to print fallback notification '%s'", title)
+
+
 def show_lockout_window(message: str) -> None:
     global _lockout_win, _lockout_message_var, _lockout_progress
     if tk_root is None or not tk_root.winfo_exists():
