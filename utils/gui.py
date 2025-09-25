@@ -68,6 +68,8 @@ _lockout_win: Optional[tk.Toplevel] = None
 _lockout_message_var: Optional[tk.StringVar] = None
 _lockout_close_job: Optional[str] = None
 _lockout_progress: Optional[ttk.Progressbar] = None
+_lockout_cancel_callback: Optional[Callable[[], None]] = None
+_lockout_cancel_button: Optional[ttk.Button] = None
 
 # -------- Notification helpers --------
 
@@ -99,7 +101,12 @@ def _cancel_lockout_close() -> None:
 
 
 def _destroy_lockout_window() -> None:
-    global _lockout_win, _lockout_message_var, _lockout_close_job, _lockout_progress
+    global _lockout_win
+    global _lockout_message_var
+    global _lockout_close_job
+    global _lockout_progress
+    global _lockout_cancel_callback
+    global _lockout_cancel_button
     if _lockout_win is not None and _lockout_win.winfo_exists():
         try:
             _lockout_win.destroy()
@@ -114,6 +121,38 @@ def _destroy_lockout_window() -> None:
         except Exception:
             pass
     _lockout_progress = None
+    _lockout_cancel_callback = None
+    _lockout_cancel_button = None
+
+
+def _set_lockout_cancel_callback(callback: Optional[Callable[[], None]]) -> None:
+    global _lockout_cancel_callback
+    _lockout_cancel_callback = callback
+    if _lockout_cancel_button is not None:
+        try:
+            if callback is None:
+                _lockout_cancel_button.configure(state=tk.DISABLED)
+            else:
+                _lockout_cancel_button.configure(state=tk.NORMAL)
+        except Exception:
+            logger.exception("Failed to update lockout cancel button state")
+
+
+def _handle_lockout_cancel() -> None:
+    callback = _lockout_cancel_callback
+    if callback is None:
+        return
+    if _lockout_cancel_button is not None:
+        try:
+            _lockout_cancel_button.configure(state=tk.DISABLED)
+        except Exception:
+            logger.exception("Failed to disable lockout cancel button")
+    try:
+        callback()
+    except SystemExit:
+        raise
+    except Exception:
+        logger.exception("Lockout cancel callback failed")
 
 
 def show_notification_popup(title: str, message: str) -> None:
@@ -158,8 +197,13 @@ def show_notification_popup(title: str, message: str) -> None:
             logger.exception("Failed to print fallback notification '%s'", title)
 
 
-def show_lockout_window(message: str) -> None:
-    global _lockout_win, _lockout_message_var, _lockout_progress
+def show_lockout_window(
+    message: str,
+    on_cancel: Optional[Callable[[], None]] = None,
+    *,
+    preserve_cancel: bool = False,
+) -> None:
+    global _lockout_win, _lockout_message_var, _lockout_progress, _lockout_cancel_button
     if tk_root is None or not tk_root.winfo_exists():
         return
 
@@ -167,9 +211,24 @@ def show_lockout_window(message: str) -> None:
 
     if _lockout_win is None or not _lockout_win.winfo_exists():
         _lockout_win = tk.Toplevel(tk_root)
-        _lockout_win.title("CtrlSpeak Â· Preparing CtrlSpeak")
-        _lockout_win.geometry("720x340")
-        _lockout_win.minsize(580, 300)
+        _lockout_win.title("CtrlSpeak · Model Download")
+        base_width, base_height = 620, 240
+        scale = 1.38
+        width = int(base_width * scale)
+        height = int(base_height * scale)
+        try:
+            screen_w = _lockout_win.winfo_screenwidth()
+            screen_h = _lockout_win.winfo_screenheight()
+            max_width = max(screen_w - 40, base_width)
+            max_height = max(screen_h - 40, base_height)
+            width = min(width, max_width)
+            height = min(height, max_height)
+        except Exception:
+            logger.exception("Failed to probe screen size for lockout window")
+            width = max(width, base_width)
+            height = max(height, base_height)
+        _lockout_win.geometry(f"{width}x{height}+20+20")
+        _lockout_win.minsize(base_width, base_height)
         _lockout_win.resizable(True, True)
         _lockout_win.attributes("-topmost", True)
         try:
@@ -195,7 +254,7 @@ def show_lockout_window(message: str) -> None:
             card,
             textvariable=_lockout_message_var,
             style="Body.TLabel",
-            wraplength=540,
+            wraplength=max(width - 100, 520),
             justify=tk.LEFT,
         )
         message_label.pack(anchor=tk.W, fill=tk.X, expand=True)
@@ -203,10 +262,20 @@ def show_lockout_window(message: str) -> None:
         _lockout_progress = ttk.Progressbar(
             card,
             mode="indeterminate",
-            length=380,
+            length=480,
             style="Modern.Horizontal.TProgressbar",
         )
-        _lockout_progress.pack(fill=tk.X, pady=(20, 0))
+        _lockout_progress.pack(fill=tk.X, pady=(20, 12))
+
+        button_row = ttk.Frame(card, style="Modern.TFrame")
+        button_row.pack(fill=tk.X)
+        _lockout_cancel_button = ttk.Button(
+            button_row,
+            text="Cancel download",
+            style="Danger.TButton",
+            command=_handle_lockout_cancel,
+        )
+        _lockout_cancel_button.pack(anchor=tk.E)
         try:
             _lockout_progress.start(12)
         except Exception:
@@ -230,6 +299,11 @@ def show_lockout_window(message: str) -> None:
         except Exception:
             pass
 
+    if not preserve_cancel:
+        _set_lockout_cancel_callback(on_cancel)
+    elif on_cancel is not None:
+        _set_lockout_cancel_callback(on_cancel)
+
     try:
         _lockout_win.lift()
         _lockout_win.focus_force()
@@ -239,7 +313,7 @@ def show_lockout_window(message: str) -> None:
 
 def update_lockout_message(message: str) -> None:
     _call_on_management_ui(
-        lambda: show_lockout_window(message),
+        lambda: show_lockout_window(message, preserve_cancel=True),
         log_message="Failed to update lockout message text",
     )
 
@@ -250,6 +324,8 @@ def close_lockout_window(message: Optional[str] = None) -> None:
         return
 
     _cancel_lockout_close()
+
+    _set_lockout_cancel_callback(None)
 
     if _lockout_message_var is not None and message:
         try:

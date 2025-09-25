@@ -7,7 +7,7 @@ Both flavours support Windows 10/11, enforce a single running instance, expose a
 ## Repository Layout
 
 - `main.py` – application entry point.
-- `assets/` – static resources such as the tray icon (`icon.ico`) and processing chime (`loading.wav`).
+- `assets/` – static resources such as the intro video (`TrueAI_Intro_Video.mp4`, played at 80 % of its detected resolution and 30 fps with optional audio when the `ffpyplayer[full]` package is installed), tray icon (`icon.ico`), fun facts rotation (`fun_facts.txt`), and processing chime (`loading.wav`).
 - `utils/` – implementation modules (GUI, models, networking, configuration helpers, etc.).
 - `utils/build_exe.py` – helper script that runs PyInstaller with the correct data files.
 - `packaging/` – PyInstaller spec (`CtrlSpeak.spec`) and additional build documentation.
@@ -22,6 +22,12 @@ Create an isolated environment and install the dependencies:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+```
+
+Optional intro audio support for the welcome video requires:
+
+```powershell
+pip install ffpyplayer[full]
 ```
 
 GPU acceleration requires an NVIDIA CUDA-capable GPU with compatible drivers, but CtrlSpeak always boots in CPU mode and skips CUDA validation unless you opt in. The Whisper `small` model is downloaded automatically on first launch so a fresh install is usable immediately. Use the management window or `python main.py --setup-cuda` later if you want to stage GPU support.

@@ -198,7 +198,7 @@ def notify(message: str, title: str = "CtrlSpeak") -> None:
 
 
 
-def ui_show_lockout_window(message: str) -> None:
+def ui_show_lockout_window(message: str, *, on_cancel: Callable[[], None] | None = None) -> None:
     """Display (or update) the first-run lockout window."""
     try:
         from utils.gui import (
@@ -209,9 +209,9 @@ def ui_show_lockout_window(message: str) -> None:
 
         ensure_management_ui_thread()
         if is_management_ui_thread():
-            show_lockout_window(message)
+            show_lockout_window(message, on_cancel)
         else:
-            enqueue_management_task(show_lockout_window, message)
+            enqueue_management_task(show_lockout_window, message, on_cancel)
     except Exception:
         logger.exception("Failed to show lockout window")
         try:

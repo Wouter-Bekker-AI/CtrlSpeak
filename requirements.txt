@@ -3,6 +3,7 @@ faster-whisper
 huggingface-hub
 numpy
 opencv-python==4.10.0.84
+ffpyplayer
 Pillow
 pyautogui
 pyaudio

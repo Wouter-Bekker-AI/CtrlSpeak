@@ -39,8 +39,28 @@ def _install_runtime_stubs() -> None:
         pyautogui.confirm = lambda *a, **k: "Install Server"
     if "pyaudio" not in sys.modules:
         pyaudio = _install_stub_module("pyaudio")
-        pyaudio.PyAudio = type("PyAudio", (), {})
+        class _StubStream:
+            def write(self, *_args, **_kwargs):
+                return None
+
+            def stop_stream(self):
+                return None
+
+            def close(self):
+                return None
+
+        class _StubPyAudio:
+            def open(self, *args, **kwargs):  # noqa: ARG002 - signature parity only
+                return _StubStream()
+
+            def terminate(self):
+                return None
+
+        pyaudio.PyAudio = _StubPyAudio
         pyaudio.paInt16 = 8
+        pyaudio.paInt32 = 2
+        pyaudio.paUInt8 = 16
+        pyaudio.paFloat32 = 1
     if "pynput" not in sys.modules:
         pynput = _install_stub_module("pynput")
         keyboard_mod = types.ModuleType("pynput.keyboard")

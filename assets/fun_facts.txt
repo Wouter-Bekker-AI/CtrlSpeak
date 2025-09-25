@@ -1,0 +1,5 @@
+CtrlSpeak's welcome window doubles as a quick tour—watch the intro, then enjoy rotating tidbits while models download.
+The Whisper small and large-v3 models live under your CtrlSpeak AppData folder, keeping the install footprint lightweight.
+Holding the right Ctrl key records audio—release it to transcribe and paste the text wherever you're typing.
+You can swap between CPU and GPU inference anytime from the Manage CtrlSpeak window's device panel.
+Cancelling a download keeps your last installed model ready so you never lose access mid-session.
