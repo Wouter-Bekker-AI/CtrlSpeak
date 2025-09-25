@@ -7,7 +7,7 @@ Both flavours support Windows 10/11, enforce a single running instance, expose a
 ## Repository Layout
 
 - `main.py` – application entry point.
-- `assets/` – static resources such as the tray icon (`icon.ico`) and processing chime (`loading.wav`).
+- `assets/` – static resources such as the tray icon (`icon.ico`), the welcome video (`TrueAI_Intro_Video.mp4`), the fun-fact rotation list (`fun_facts.txt`), and the processing chime (`loading.wav`).
 - `utils/` – implementation modules (GUI, models, networking, configuration helpers, etc.).
 - `utils/build_exe.py` – helper script that runs PyInstaller with the correct data files.
 - `packaging/` – PyInstaller spec (`CtrlSpeak.spec`) and additional build documentation.
@@ -25,6 +25,8 @@ pip install -r requirements.txt
 ```
 
 GPU acceleration requires an NVIDIA CUDA-capable GPU with compatible drivers, but CtrlSpeak always boots in CPU mode and skips CUDA validation unless you opt in. The Whisper `small` model is downloaded automatically on first launch so a fresh install is usable immediately. Use the management window or `python main.py --setup-cuda` later if you want to stage GPU support.
+During the initial Whisper download, CtrlSpeak opens a centered welcome window sized to roughly 80% of a 1080p frame (about 1536×864) that plays a five-second run of `assets/TrueAI_Intro_Video.mp4` with audio before rotating onboarding tips from `assets/fun_facts.txt`. A slim lockout window remains in the top-left corner with live status text and a red **Cancel download** button; cancelling stops the download subprocess immediately, exiting entirely if no model is available or otherwise returning you to the currently staged model.
+
 
 ## Running from Source
 

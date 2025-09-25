@@ -38,9 +38,8 @@ from utils.models import (
     get_device_preference, set_device_preference,
     get_current_model_name, set_current_model_name,
     model_store_path_for, model_files_present,
-    download_model_with_gui,              # opens progress window and downloads model
+    download_model_with_gui,              # orchestrates welcome window and downloads model
     ensure_model_ready_for_local_server,
-    format_bytes,                         # optional pretty bytes
     trace_model_download_step,
 )
 
@@ -68,6 +67,8 @@ _lockout_win: Optional[tk.Toplevel] = None
 _lockout_message_var: Optional[tk.StringVar] = None
 _lockout_close_job: Optional[str] = None
 _lockout_progress: Optional[ttk.Progressbar] = None
+_lockout_cancel_button: Optional[ttk.Button] = None
+_lockout_cancel_callback: Optional[Callable[[], None]] = None
 
 # -------- Notification helpers --------
 
@@ -158,8 +159,8 @@ def show_notification_popup(title: str, message: str) -> None:
             logger.exception("Failed to print fallback notification '%s'", title)
 
 
-def show_lockout_window(message: str) -> None:
-    global _lockout_win, _lockout_message_var, _lockout_progress
+def show_lockout_window(message: str, cancel_callback: Optional[Callable[[], None]] = None) -> None:
+    global _lockout_win, _lockout_message_var, _lockout_progress, _lockout_cancel_button, _lockout_cancel_callback
     if tk_root is None or not tk_root.winfo_exists():
         return
 
@@ -168,9 +169,19 @@ def show_lockout_window(message: str) -> None:
     if _lockout_win is None or not _lockout_win.winfo_exists():
         _lockout_win = tk.Toplevel(tk_root)
         _lockout_win.title("CtrlSpeak Â· Preparing CtrlSpeak")
-        _lockout_win.geometry("720x340")
-        _lockout_win.minsize(580, 300)
-        _lockout_win.resizable(True, True)
+        width, height = 420, 240
+        geometry = f"{width}x{height}+32+32"
+        try:
+            screen_w = _lockout_win.winfo_screenwidth()
+            screen_h = _lockout_win.winfo_screenheight()
+            offset_x = max(min(32, screen_w - width), 0)
+            offset_y = max(min(32, screen_h - height), 0)
+            geometry = f"{width}x{height}+{offset_x}+{offset_y}"
+        except Exception:
+            logger.exception("Failed to query screen dimensions for lockout window")
+        _lockout_win.geometry(geometry)
+        _lockout_win.minsize(width, height)
+        _lockout_win.resizable(False, False)
         _lockout_win.attributes("-topmost", True)
         try:
             _lockout_win.attributes("-toolwindow", True)
@@ -179,44 +190,66 @@ def show_lockout_window(message: str) -> None:
         apply_modern_theme(_lockout_win)
         _lockout_win.protocol("WM_DELETE_WINDOW", lambda: None)
 
-        container = ttk.Frame(_lockout_win, style="Modern.TFrame", padding=(26, 24))
+        container = ttk.Frame(_lockout_win, style="Modern.TFrame", padding=(18, 16))
         container.pack(fill=tk.BOTH, expand=True)
 
-        card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
+        card = ttk.Frame(container, style="ModernCard.TFrame", padding=(18, 18))
         card.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(card, text="Preparing CtrlSpeak", style="Title.TLabel").pack(anchor=tk.W)
         accent = ttk.Frame(card, style="AccentLine.TFrame")
         accent.configure(height=2)
-        accent.pack(fill=tk.X, pady=(12, 18))
+        accent.pack(fill=tk.X, pady=(8, 12))
 
         _lockout_message_var = tk.StringVar(master=_lockout_win, value=message)
         message_label = ttk.Label(
             card,
             textvariable=_lockout_message_var,
             style="Body.TLabel",
-            wraplength=540,
+            wraplength=320,
             justify=tk.LEFT,
         )
-        message_label.pack(anchor=tk.W, fill=tk.X, expand=True)
+        message_label.pack(anchor=tk.W, fill=tk.X, expand=True, pady=(0, 8))
 
         _lockout_progress = ttk.Progressbar(
             card,
             mode="indeterminate",
-            length=380,
+            length=280,
             style="Modern.Horizontal.TProgressbar",
         )
-        _lockout_progress.pack(fill=tk.X, pady=(20, 0))
+        _lockout_progress.pack(fill=tk.X)
         try:
             _lockout_progress.start(12)
         except Exception:
             logger.exception("Failed to start lockout spinner")
+
+        def _invoke_cancel() -> None:
+            callback = _lockout_cancel_callback
+            if callback is None:
+                return
+            try:
+                callback()
+            except Exception:
+                logger.exception("Lockout cancel callback raised an exception")
+
+        actions = ttk.Frame(card, style="ModernCardInner.TFrame")
+        actions.pack(fill=tk.X, pady=(12, 0))
+        _lockout_cancel_button = ttk.Button(
+            actions,
+            text="Cancel download",
+            style="Danger.TButton",
+            command=_invoke_cancel,
+        )
+        _lockout_cancel_button.pack(anchor=tk.E)
     else:
         try:
             _lockout_win.deiconify()
             _lockout_win.lift()
         except Exception:
             logger.exception("Failed to raise lockout window")
+
+    if cancel_callback is not None:
+        _lockout_cancel_callback = cancel_callback
 
     if _lockout_message_var is not None:
         try:
@@ -230,6 +263,15 @@ def show_lockout_window(message: str) -> None:
         except Exception:
             pass
 
+    if _lockout_cancel_button is not None:
+        try:
+            if _lockout_cancel_callback is None:
+                _lockout_cancel_button.configure(state=tk.DISABLED)
+            else:
+                _lockout_cancel_button.configure(state=tk.NORMAL)
+        except Exception:
+            logger.exception("Failed to update lockout cancel button state")
+
     try:
         _lockout_win.lift()
         _lockout_win.focus_force()
@@ -238,14 +280,23 @@ def show_lockout_window(message: str) -> None:
 
 
 def update_lockout_message(message: str) -> None:
+    def _update() -> None:
+        if _lockout_win is None or not _lockout_win.winfo_exists() or _lockout_message_var is None:
+            show_lockout_window(message, cancel_callback=_lockout_cancel_callback)
+            return
+        try:
+            _lockout_message_var.set(message)
+        except Exception:
+            logger.exception("Failed to set lockout message text")
+
     _call_on_management_ui(
-        lambda: show_lockout_window(message),
+        _update,
         log_message="Failed to update lockout message text",
     )
 
 
 def close_lockout_window(message: Optional[str] = None) -> None:
-    global _lockout_close_job
+    global _lockout_close_job, _lockout_cancel_callback
     if _lockout_win is None or not _lockout_win.winfo_exists():
         return
 
@@ -262,6 +313,13 @@ def close_lockout_window(message: Optional[str] = None) -> None:
             _lockout_progress.stop()
         except Exception:
             pass
+
+    if _lockout_cancel_button is not None:
+        try:
+            _lockout_cancel_button.configure(state=tk.DISABLED)
+        except Exception:
+            logger.exception("Failed to disable lockout cancel button")
+    _lockout_cancel_callback = None
 
     if message:
         try:
