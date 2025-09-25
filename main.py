@@ -129,6 +129,9 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     atexit.register(release_single_instance_lock)
     atexit.register(shutdown_all)
     sys.exit(main(sys.argv))

@@ -7,6 +7,7 @@ import time
 import threading
 import subprocess
 import shutil
+import requests
 import platform
 from datetime import datetime
 from pathlib import Path
@@ -23,7 +24,7 @@ try:  # pragma: no cover - optional dependency rarely installed
 except ImportError:
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
-from huggingface_hub import snapshot_download
+from huggingface_hub import HfApi, hf_hub_url
 import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageTk
@@ -1037,6 +1038,22 @@ class WelcomeWindow:
                 _, error_text = message
                 self.result = "error"
                 self.error_message = error_text
+            elif message_type == "progress":
+                _, current, total = message
+                try:
+                    current_mb = current / (1024 * 1024)
+                    if total and total > 0:
+                        total_mb = total / (1024 * 1024)
+                        percent = max(0, min(99, int(current * 100 / total)))
+                        ui_update_lockout_message(
+                            f"Downloading Whisper model ({current_mb:.1f}/{total_mb:.1f} MB, {percent}% complete)"
+                        )
+                    else:
+                        ui_update_lockout_message(
+                            f"Downloading Whisper model ({current_mb:.1f} MB downloaded)"
+                        )
+                except Exception:
+                    logger.exception("Failed to format download progress message")
             elif message_type == "done":
                 self.result = "success"
             elif message_type == "cancelled":
@@ -1124,31 +1141,95 @@ def _model_download_worker(model_name: str, queue: MPQueue) -> None:
         _put(("stage", f"Preparing download from Hugging Face ({repo_id})"))
         store_path = model_store_path_for(model_name)
         store_path.mkdir(parents=True, exist_ok=True)
-        trace_model_download_step(
-            "download_model_with_gui.worker: starting snapshot_download",
-            "wait for huggingface client to finish",
+
+        api = HfApi()
+        try:
+            info = api.model_info(repo_id)
+            siblings = info.siblings or []
+            file_entries = [(s.rfilename, getattr(s, "size", None)) for s in siblings]
+        except Exception:
+            trace_model_download_step(
+                "download_model_with_gui.worker: model_info failed",
+                "fallback to known file list",
+            )
+            logger.exception("Failed to fetch model metadata; falling back to default file list")
+            file_entries = [
+                ("config.json", None),
+                ("README.md", None),
+                ("tokenizer.json", None),
+                ("vocabulary.txt", None),
+                ("model.bin", None),
+            ]
+
+        preferred_order = {
+            "model.bin": -5,
+            "tokenizer.json": -4,
+            "vocabulary.txt": -3,
+            "config.json": -2,
+            "README.md": -1,
+            ".gitattributes": 0,
+        }
+        file_entries = sorted(
+            file_entries,
+            key=lambda item: (preferred_order.get(Path(item[0]).name, 1), item[0]),
         )
-        _put(("stage", "Downloading Whisper model…"))
-        snapshot_download(
-            repo_id,
-            local_dir=str(store_path),
-            local_dir_use_symlinks=False,
-            resume_download=True,
-        )
+        overall_total = 0
+        downloaded = 0
+
+        session = requests.Session()
+        session.headers.setdefault("User-Agent", "CtrlSpeak/0.6.0")
+        CHUNK_SIZE = 1 << 18  # 256 KiB
+        try:
+            for index, (rel_path, size_hint) in enumerate(file_entries, start=1):
+                if not rel_path:
+                    continue
+                trace_model_download_step(
+                    f"download_model_with_gui.worker: downloading {rel_path}",
+                    "stream file contents",
+                )
+                _put(("stage", f"Downloading {rel_path} ({index}/{len(file_entries)})"))
+                target_path = store_path / rel_path
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                temp_path = target_path.with_suffix(target_path.suffix + ".part")
+                try:
+                    temp_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+                url = hf_hub_url(repo_id, filename=rel_path)
+                with session.get(url, stream=True, timeout=(10, 90)) as response:
+                    response.raise_for_status()
+                    content_length = response.headers.get("Content-Length")
+                    file_total = int(content_length) if content_length and content_length.isdigit() else 0
+                    if file_total > 0:
+                        overall_total += file_total
+                    with open(temp_path, "wb") as handle:
+                        for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
+                            if not chunk:
+                                continue
+                            handle.write(chunk)
+                            downloaded += len(chunk)
+                            if overall_total > 0:
+                                _put(("progress", downloaded, overall_total))
+                            else:
+                                _put(("progress", downloaded, 0))
+                temp_path.replace(target_path)
+        finally:
+            session.close()
     except Exception as exc:
         logger.exception("Model download failed")
         trace_model_download_step(
-            "download_model_with_gui.worker: snapshot_download raised exception",
+            "download_model_with_gui.worker: download flow raised exception",
             "report error to user",
         )
         _put(("error", f"Model download failed: {exc}"))
         return
 
     trace_model_download_step(
-        "download_model_with_gui.worker: snapshot_download completed",
+        "download_model_with_gui.worker: download complete",
         "signal stage completion",
     )
-    _put(("stage", "Download complete. Verifying files…"))
+    _put(("stage", "Download complete. Verifying files..."))
     _put(("done",))
 
 

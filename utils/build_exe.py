@@ -6,7 +6,6 @@ The resulting bundle lives in ``dist/CtrlSpeak/``. From the project root run::
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 try:
@@ -16,40 +15,33 @@ except ImportError as exc:  # pragma: no cover - developer convenience
         "PyInstaller is required to build the executable. "
         "Install it with 'pip install pyinstaller'."
     ) from exc
+
 project_root = Path(__file__).resolve().parent.parent
+assets_dir = project_root / 'assets'
+spec_path = project_root / 'packaging' / 'CtrlSpeak.spec'
+
+REQUIRED_ASSETS = {
+    'application icon': assets_dir / 'icon.ico',
+    'processing chime': assets_dir / 'loading.wav',
+    'automation clip': assets_dir / 'test.wav',
+    'fun facts list': assets_dir / 'fun_facts.txt',
+    'welcome video': assets_dir / 'TrueAI_Intro_Video.mp4',
+}
 
 
 def build() -> None:
-    assets_dir = project_root / "assets"
-    icon_path = assets_dir / "icon.ico"
-    audio_path = assets_dir / "loading.wav"
+    if not spec_path.exists():
+        raise SystemExit(f'Missing PyInstaller spec at {spec_path}')
 
-    if not icon_path.exists():
-        raise SystemExit(f"Missing icon at {icon_path}")
-    if not audio_path.exists():
-        raise SystemExit(f"Missing loading sound at {audio_path}")
+    missing_assets = [name for name, path in REQUIRED_ASSETS.items() if not path.exists()]
+    if missing_assets:
+        formatted = ', '.join(sorted(missing_assets))
+        raise SystemExit(f'Missing required asset(s): {formatted}')
 
-    data_sep = ";" if os.name == "nt" else ":"
-    datas = [
-        f"{icon_path}{data_sep}assets",
-        f"{audio_path}{data_sep}assets",
-    ]
-
-    args = [
-        str(project_root / "main.py"),
-        "--noconfirm",
-        "--clean",
-        "--windowed",
-        "--name=CtrlSpeak",
-        f"--icon={icon_path}",
-        "--collect-all=certifi",
-        "--collect-submodules=huggingface_hub"
-    ]
-    args.extend(f"--add-data={entry}" for entry in datas)
-
-    print("Running PyInstaller with arguments:\n  " + "\n  ".join(args))
+    args = ['--noconfirm', '--clean', str(spec_path)]
+    print('Running PyInstaller with arguments:\n  ' + '\n  '.join(args))
     pyinstaller_run(args)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     build()
