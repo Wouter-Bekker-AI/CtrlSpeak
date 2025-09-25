@@ -1,5 +1,6 @@
 ctranslate2
 faster-whisper
+ffpyplayer
 huggingface-hub
 numpy
 opencv-python==4.10.0.84
