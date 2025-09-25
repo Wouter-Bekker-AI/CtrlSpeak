@@ -7,12 +7,11 @@ import time
 import threading
 import subprocess
 import shutil
-import importlib
-import importlib.util
+import platform
 from datetime import datetime
 from pathlib import Path
 from queue import Empty
-from typing import Optional, List, Set, Callable, Tuple
+from typing import Optional, List, Set, Callable, Tuple, Dict, Any
 
 from multiprocessing import Process, Queue as MPQueue
 
@@ -25,10 +24,14 @@ except ImportError:
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 from huggingface_hub import snapshot_download
-import cv2
 import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageTk
+
+try:  # pragma: no cover - optional dependency for richer playback
+    from ffpyplayer.player import MediaPlayer  # type: ignore
+except Exception:  # pragma: no cover - optional dependency missing
+    MediaPlayer = None  # type: ignore
 
 from utils.system import (
     settings, settings_lock,
@@ -576,7 +579,6 @@ def format_bytes(value: float) -> str:
 
 _FUN_FACT_ROTATION_MS = 6000
 _WELCOME_VIDEO_TARGET_DURATION_MS = 5000
-_WELCOME_VIDEO_FPS_FALLBACK = 30
 _WELCOME_VIDEO_MIN_FRAME_DELAY_MS = 5
 _DEFAULT_FUN_FACTS: List[str] = [
     "CtrlSpeak records while you hold the right Ctrl key and pastes the transcript when you release it.",
@@ -586,6 +588,47 @@ _DEFAULT_FUN_FACTS: List[str] = [
     "Speech recognition loves quiet rooms—CtrlSpeak lets you change microphones from the management window anytime.",
     "You can automate install validation with python main.py --automation-flow for headless health checks.",
 ]
+
+
+def _choose_audio_driver() -> Optional[str]:
+    if platform.system().lower() == "windows":
+        return "wasapi"
+    return None
+
+
+def _probe_video_metadata(video_path: Path) -> Dict[str, Any]:
+    if MediaPlayer is None:
+        return {}
+    try:
+        player = MediaPlayer(str(video_path), ff_opts={"sync": "video"})
+    except Exception:
+        logger.exception("Failed to probe welcome video metadata")
+        return {}
+    try:
+        metadata = player.get_metadata() or {}
+    except Exception:
+        logger.exception("Failed to fetch welcome video metadata")
+        metadata = {}
+    finally:
+        try:
+            player.close_player()
+        except Exception:
+            pass
+    return metadata
+
+
+def _decide_ff_options(meta: Dict[str, Any]) -> Dict[str, str]:
+    ff_opts: Dict[str, str] = {"sync": "audio"}
+    audio_info = meta.get("audio") or {}
+    sample_rate = audio_info.get("sample_rate")
+    channels = audio_info.get("channels")
+
+    if isinstance(channels, int) and channels > 2:
+        ff_opts["ac"] = "2"
+    if not isinstance(sample_rate, int) or sample_rate not in (44100, 48000):
+        ff_opts["ar"] = "48000"
+    ff_opts["af"] = "aresample=async=1:min_hard_comp=0.100:first_pts=0"
+    return ff_opts
 
 
 def _load_fun_facts() -> List[str]:
@@ -619,18 +662,11 @@ class WelcomeWindow:
         apply_modern_theme(self.root)
 
         self._video_path = asset_path("TrueAI_Intro_Video.mp4")
-        self._video_cap = cv2.VideoCapture(str(self._video_path))
-        self._video_available = self._video_cap.isOpened()
-        self._native_frame_count = self._resolve_native_frame_count()
-        self._native_fps = self._resolve_native_fps()
-        self._native_video_size = self._resolve_native_video_size()
-        self._target_video_duration_ms = self._resolve_target_duration_ms()
-        self._frame_delay = self._resolve_frame_delay()
-        width, height = self._resolve_dimensions()
-        width, height = self._configure_geometry(width, height)
+        self._video_metadata = _probe_video_metadata(self._video_path)
+        self._target_video_duration_ms = self._resolve_target_duration_ms(self._video_metadata)
+        width, height = self._configure_geometry(int(1920 * 0.8), int(1080 * 0.8))
         self._window_width = width
         self._window_height = height
-        self._video_target_size = self._calculate_video_target_size(width, height)
 
         self.container = ttk.Frame(self.root, style="Modern.TFrame")
         self.container.pack(fill=tk.BOTH, expand=True)
@@ -643,117 +679,21 @@ class WelcomeWindow:
         self._fun_fact_job: Optional[str] = None
         self._facts = _load_fun_facts()
         self._fact_index = 0
-        self._fact_var = tk.StringVar(value=self._facts[0] if self._facts else "")
-        self._fact_wrap = max(self._window_width - 120, 360)
-
-        self._audio_player = self._prepare_audio_player()
-        self._video_start_time: Optional[float] = None
+        self._fact_label: Optional[ttk.Label] = None
+        self._fact_wrap = max(self._window_width - 200, 360)
+        self._facts_frame: Optional[tk.Widget] = None
+        self._facts_canvas: Optional[tk.Canvas] = None
+        self._video_player = self._prepare_video_player()
+        self._video_target_size: Optional[Tuple[int, int]] = None
         self._video_deadline: Optional[float] = None
 
         self.root.after(120, self._pump_management_events)
         self.root.after(150, self._poll_queue)
 
-        if self._video_available:
+        if self._video_player is not None:
             self.root.after(10, self._play_next_frame)
-            if self._audio_player is not None:
-                self.root.after(20, self._pump_audio_frames)
         else:
             self.root.after(10, self._show_fun_facts_view)
-
-    def _resolve_native_video_size(self) -> Tuple[int, int]:
-        if not self._video_available:
-            return (0, 0)
-        try:
-            width = int(self._video_cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-            height = int(self._video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-        except Exception:
-            logger.exception("Failed to query welcome video dimensions")
-            return (0, 0)
-        if width <= 0 or height <= 0:
-            return (0, 0)
-        return width, height
-
-    def _resolve_native_frame_count(self) -> int:
-        if not self._video_available:
-            return 0
-        try:
-            frames = int(self._video_cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        except Exception:
-            logger.exception("Failed to query welcome video frame count")
-            return 0
-        return max(frames, 0)
-
-    def _resolve_native_fps(self) -> float:
-        if not self._video_available:
-            return 0.0
-        try:
-            fps = float(self._video_cap.get(cv2.CAP_PROP_FPS) or 0.0)
-        except Exception:
-            logger.exception("Failed to query welcome video fps")
-            return 0.0
-        if fps <= 0:
-            return 0.0
-        return fps
-
-    def _resolve_target_duration_ms(self) -> int:
-        if not self._video_available:
-            return _WELCOME_VIDEO_TARGET_DURATION_MS
-
-        duration_ms = 0
-        if self._native_frame_count > 0 and self._native_fps > 0:
-            try:
-                duration_ms = int(round((self._native_frame_count / self._native_fps) * 1000))
-            except Exception:
-                logger.exception("Failed to calculate welcome video duration")
-                duration_ms = 0
-
-        if duration_ms <= 0:
-            return _WELCOME_VIDEO_TARGET_DURATION_MS
-        if duration_ms > _WELCOME_VIDEO_TARGET_DURATION_MS:
-            return _WELCOME_VIDEO_TARGET_DURATION_MS
-        return duration_ms
-
-    def _resolve_dimensions(self) -> Tuple[int, int]:
-        target_width = int(1920 * 0.8)
-        target_height = int(1080 * 0.8)
-        if not self._video_available:
-            return target_width, target_height
-        native_width, native_height = self._native_video_size
-        if native_width <= 0 or native_height <= 0:
-            return target_width, target_height
-        aspect = native_width / native_height
-        target_aspect = target_width / target_height
-        if abs(aspect - target_aspect) > 0.01:
-            if aspect > target_aspect:
-                target_height = int(target_width / aspect)
-            else:
-                target_width = int(target_height * aspect)
-        return max(target_width, 640), max(target_height, 360)
-
-    def _resolve_frame_delay(self) -> int:
-        if not self._video_available:
-            fallback_delay = int(round(1000 / max(_WELCOME_VIDEO_FPS_FALLBACK, 1)))
-            return max(fallback_delay, _WELCOME_VIDEO_MIN_FRAME_DELAY_MS)
-
-        duration_ms = self._target_video_duration_ms or _WELCOME_VIDEO_TARGET_DURATION_MS
-        if self._native_frame_count > 0:
-            try:
-                frame_delay = duration_ms / self._native_frame_count
-            except Exception:
-                frame_delay = 0
-        else:
-            frame_delay = 0
-
-        if frame_delay <= 0 and self._native_fps > 0:
-            try:
-                frame_delay = 1000.0 / self._native_fps
-            except Exception:
-                frame_delay = 0
-
-        if frame_delay <= 0:
-            frame_delay = 1000.0 / max(_WELCOME_VIDEO_FPS_FALLBACK, 1)
-
-        return max(int(round(frame_delay)), _WELCOME_VIDEO_MIN_FRAME_DELAY_MS)
 
     def _configure_geometry(self, width: int, height: int) -> Tuple[int, int]:
         try:
@@ -771,92 +711,125 @@ class WelcomeWindow:
         self.root.resizable(False, False)
         return width, height
 
-    def _calculate_video_target_size(self, window_width: int, window_height: int) -> Optional[Tuple[int, int]]:
-        if not self._video_available:
-            return None
-        native_width, native_height = self._native_video_size
-        if native_width <= 0 or native_height <= 0:
-            native_width, native_height = window_width, window_height
+    def _resolve_target_duration_ms(self, metadata: Dict[str, Any]) -> int:
+        duration_value = metadata.get("duration")
+        duration_ms = 0
+        if isinstance(duration_value, (int, float)) and duration_value > 0:
+            try:
+                duration_ms = int(round(duration_value * 1000))
+            except Exception:
+                duration_ms = 0
+        if duration_ms <= 0:
+            duration_ms = _WELCOME_VIDEO_TARGET_DURATION_MS
+        return min(duration_ms, _WELCOME_VIDEO_TARGET_DURATION_MS)
+
+    def _calculate_video_target_size(self, frame_width: int, frame_height: int) -> Tuple[int, int]:
         try:
-            scale = min(window_width / native_width, window_height / native_height)
+            scale = min(self._window_width / max(frame_width, 1), self._window_height / max(frame_height, 1))
         except Exception:
-            return window_width, window_height
-        target_width = max(int(native_width * scale), 1)
-        target_height = max(int(native_height * scale), 1)
+            return frame_width, frame_height
+        target_width = max(int(frame_width * scale), 1)
+        target_height = max(int(frame_height * scale), 1)
         return target_width, target_height
 
-    def _prepare_audio_player(self):
-        if not self._video_available:
+    def _prepare_video_player(self):
+        if MediaPlayer is None:
+            logger.debug("ffpyplayer not available; welcome video disabled")
             return None
-        spec = importlib.util.find_spec("ffpyplayer.player")
-        if spec is None:
-            logger.debug("ffpyplayer.player not available; welcome video audio disabled")
-            return None
-        module = importlib.import_module("ffpyplayer.player")
-        try:
-            return module.MediaPlayer(str(self._video_path))
-        except Exception:
-            logger.exception("Failed to initialize welcome video audio")
+        if not self._video_path.exists():
+            logger.warning("Welcome video asset missing; showing fun facts immediately")
             return None
 
-    def _pump_audio_frames(self) -> None:
-        if self._closing or self._audio_player is None:
-            return
+        driver = _choose_audio_driver()
+        if driver:
+            os.environ["SDL_AUDIODRIVER"] = driver
+
+        os.environ.setdefault("FFMPEG_PRINT_LEVEL", "quiet")
+
+        ff_opts = _decide_ff_options(self._video_metadata)
         try:
-            frame, value = self._audio_player.get_frame()
+            return MediaPlayer(str(self._video_path), ff_opts=ff_opts)
         except Exception:
-            logger.exception("Failed to advance welcome video audio")
-            self._audio_player = None
-            return
-        if value == "eof":
-            return
-        try:
-            self.root.after(30, self._pump_audio_frames)
-        except Exception:
-            logger.exception("Failed to schedule welcome audio pump")
+            logger.exception("Failed to initialize welcome video playback")
+            return None
 
     def _play_next_frame(self) -> None:
-        if self._closing or not self._video_available:
-            return
-        if self._video_deadline is not None and time.monotonic() >= self._video_deadline:
-            self._show_fun_facts_view()
-            return
-        try:
-            ok, frame = self._video_cap.read()
-        except Exception:
-            logger.exception("Failed to read welcome video frame")
-            ok = False
-        if not ok:
-            self._show_fun_facts_view()
+        if self._closing or self._video_player is None:
             return
 
         try:
+            frame, value = self._video_player.get_frame()
+        except Exception:
+            logger.exception("Failed to fetch welcome video frame")
+            self._show_fun_facts_view()
+            return
+
+        if value == "eof":
+            self._show_fun_facts_view()
+            return
+
+        delay_ms = _WELCOME_VIDEO_MIN_FRAME_DELAY_MS
+
+        if frame is not None:
+            img, _pts = frame
+            try:
+                frame_width, frame_height = img.get_size()
+            except Exception:
+                frame_width = frame_height = 0
+
+            if frame_width <= 0 or frame_height <= 0:
+                self._show_fun_facts_view()
+                return
+
             if not self._video_label.winfo_exists():
                 self._show_fun_facts_view()
                 return
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            image = Image.fromarray(rgb)
-            if self._video_target_size is not None:
-                image = image.resize(self._video_target_size, Image.LANCZOS)
-                self._video_label.configure(width=self._video_target_size[0], height=self._video_target_size[1])
-            else:
-                self._video_label.configure(width=image.width, height=image.height)
-            self._photo = ImageTk.PhotoImage(image=image, master=self.root)
-            self._video_label.configure(image=self._photo)
-            self._video_label.image = self._photo
-            if self._video_start_time is None:
-                self._video_start_time = time.monotonic()
-                duration_ms = self._target_video_duration_ms or _WELCOME_VIDEO_TARGET_DURATION_MS
-                self._video_deadline = self._video_start_time + (duration_ms / 1000.0)
-        except Exception:
-            logger.exception("Failed to render welcome video frame")
+
+            if self._video_target_size is None:
+                self._video_target_size = self._calculate_video_target_size(frame_width, frame_height)
+
+            target_width, target_height = self._video_target_size
+
+            try:
+                rgb_bytes = img.to_bytearray()[0]
+                pil_image = Image.frombytes("RGB", (frame_width, frame_height), rgb_bytes)
+            except Exception:
+                logger.exception("Failed to convert welcome video frame")
+                self._show_fun_facts_view()
+                return
+
+            if (frame_width, frame_height) != (target_width, target_height):
+                try:
+                    pil_image = pil_image.resize((target_width, target_height), Image.Resampling.LANCZOS)
+                except Exception:
+                    logger.exception("Failed to resize welcome video frame")
+                    self._show_fun_facts_view()
+                    return
+
+            try:
+                self._photo = ImageTk.PhotoImage(image=pil_image, master=self.root)
+                self._video_label.configure(image=self._photo, width=target_width, height=target_height)
+                self._video_label.image = self._photo
+            except Exception:
+                logger.exception("Failed to render welcome video frame")
+                self._show_fun_facts_view()
+                return
+
+            if self._video_deadline is None:
+                self._video_deadline = time.monotonic() + (self._target_video_duration_ms / 1000.0)
+
+        if isinstance(value, (int, float)) and value > 0:
+            delay_ms = max(int(value * 1000), _WELCOME_VIDEO_MIN_FRAME_DELAY_MS)
+
+        if self._video_deadline is not None and time.monotonic() >= self._video_deadline:
             self._show_fun_facts_view()
             return
 
         try:
-            self._video_job = self.root.after(self._frame_delay, self._play_next_frame)
+            self._video_job = self.root.after(delay_ms, self._play_next_frame)
         except Exception:
             logger.exception("Failed to schedule welcome video frame advance")
+            self._show_fun_facts_view()
 
     def _stop_fun_facts(self) -> None:
         if self._fun_fact_job is None:
@@ -876,18 +849,22 @@ class WelcomeWindow:
                 logger.exception("Failed to cancel welcome video job")
             finally:
                 self._video_job = None
-        if self._video_cap is not None:
-            try:
-                self._video_cap.release()
-            except Exception:
-                logger.exception("Failed to release welcome video capture")
-        if self._audio_player is not None:
-            try:
-                self._audio_player.close_player()
-            except Exception:
-                logger.exception("Failed to close welcome video audio player")
-            finally:
-                self._audio_player = None
+        self._video_target_size = None
+        self._video_deadline = None
+        player = self._video_player
+        self._video_player = None
+        if player is not None:
+            def _close() -> None:
+                try:
+                    player.set_pause(True)
+                except Exception:
+                    pass
+                try:
+                    player.close_player()
+                except Exception:
+                    logger.exception("Failed to close welcome video player")
+
+            threading.Thread(target=_close, daemon=True).start()
 
     def _show_fun_facts_view(self) -> None:
         if self._closing:
@@ -900,51 +877,149 @@ class WelcomeWindow:
                 child.destroy()
             except Exception:
                 logger.exception("Failed to destroy welcome video widget")
-        card = ttk.Frame(self.container, style="ModernCard.TFrame", padding=(24, 24))
-        card.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(self.container, highlightthickness=0, bd=0)
+        canvas.pack(fill=tk.BOTH, expand=True)
+        self._facts_canvas = canvas
+
+        self._draw_fun_facts_gradient(canvas, self._window_width, self._window_height)
+
+        style = ttk.Style(master=self.root)
+        style.configure(
+            "FunFactsCard.TFrame",
+            background="#132543",
+            relief="flat",
+        )
+        style.configure(
+            "FunFactsTitle.TLabel",
+            background="#132543",
+            foreground="#f4fbff",
+            font=("{Segoe UI Semibold}", 28),
+        )
+        style.configure(
+            "FunFactsSubtitle.TLabel",
+            background="#132543",
+            foreground="#b7c9e6",
+            font=("{Segoe UI}", 14),
+        )
+        style.configure(
+            "FunFactsHeading.TLabel",
+            background="#132543",
+            foreground="#f4fbff",
+            font=("{Segoe UI Semibold}", 18),
+        )
+        style.configure(
+            "FunFactsBody.TLabel",
+            background="#132543",
+            foreground="#f4fbff",
+            font=("{Segoe UI}", 17),
+        )
+
+        card = ttk.Frame(canvas, style="FunFactsCard.TFrame", padding=(40, 40))
+        canvas.create_window(
+            self._window_width // 2,
+            self._window_height // 2,
+            window=card,
+            anchor="center",
+        )
         self._facts_frame = card
 
-        title = ttk.Label(card, text="CtrlSpeak is getting ready", style="Title.TLabel")
-        title.pack(pady=(0, 12))
+        title = ttk.Label(card, text="Welcome to CtrlSpeak", style="FunFactsTitle.TLabel")
+        title.pack(pady=(0, 10))
+
+        subtitle = ttk.Label(
+            card,
+            text="Here are a few fun facts while we prepare your Whisper model.",
+            style="FunFactsSubtitle.TLabel",
+            wraplength=max(self._fact_wrap - 120, 360),
+            justify=tk.CENTER,
+        )
+        subtitle.pack(pady=(0, 24))
 
         try:
             if card.winfo_exists():
-                icon_image = Image.open(asset_path("icon.ico"))
-                icon_image.thumbnail((160, 160), Image.LANCZOS)
-                self._icon_photo = ImageTk.PhotoImage(icon_image, master=self.root)
-                icon_label = ttk.Label(card, image=self._icon_photo, style="Modern.TLabel")
+                icon_image = Image.open(asset_path("icon.ico")).convert("RGBA")
+                icon_image.thumbnail((176, 176), Image.Resampling.LANCZOS)
+                white_bg = Image.new("RGBA", icon_image.size, (255, 255, 255, 255))
+                alpha_channel = icon_image.getchannel("A") if "A" in icon_image.getbands() else None
+                white_bg.paste(icon_image, mask=alpha_channel)
+                display_image = white_bg.convert("RGB")
+                self._icon_photo = ImageTk.PhotoImage(display_image, master=self.root)
+                icon_label = tk.Label(
+                    card,
+                    image=self._icon_photo,
+                    bg="#ffffff",
+                    bd=1,
+                    relief=tk.SOLID,
+                    highlightthickness=0,
+                    padx=12,
+                    pady=12,
+                )
                 icon_label.image = self._icon_photo
-                icon_label.pack(pady=(0, 12))
+                icon_label.pack(pady=(0, 16))
         except Exception:
             logger.exception("Failed to load welcome icon asset")
 
+        heading = ttk.Label(card, text="Fun facts:", style="FunFactsHeading.TLabel")
+        heading.pack(pady=(0, 12))
+
         fact_label = ttk.Label(
             card,
-            textvariable=self._fact_var,
-            style="Body.TLabel",
-            wraplength=self._fact_wrap,
+            text=self._facts[0] if self._facts else "",
+            style="FunFactsBody.TLabel",
+            wraplength=max(self._fact_wrap - 160, 360),
             justify=tk.CENTER,
         )
-        fact_label.pack(fill=tk.BOTH, expand=True)
+        fact_label.pack(pady=(0, 16))
+        self._fact_label = fact_label
+        self._fact_index = 0
 
-        self._schedule_next_fact()
+        self._schedule_next_fact(initial_delay=_FUN_FACT_ROTATION_MS)
 
-    def _schedule_next_fact(self) -> None:
-        if not self._facts:
+    def _draw_fun_facts_gradient(self, canvas: tk.Canvas, width: int, height: int) -> None:
+        if width <= 0 or height <= 0:
+            return
+
+        def _hex_to_rgb(value: str) -> Tuple[int, int, int]:
+            value = value.lstrip("#")
+            r = int(value[0:2], 16)
+            g = int(value[2:4], 16)
+            b = int(value[4:6], 16)
+            return (r, g, b)
+
+        top_color = _hex_to_rgb("#1a355d")
+        bottom_color = _hex_to_rgb("#040913")
+        steps = max(height, 1)
+
+        for i in range(height):
+            ratio = i / max(steps - 1, 1)
+            r = int(top_color[0] + (bottom_color[0] - top_color[0]) * ratio)
+            g = int(top_color[1] + (bottom_color[1] - top_color[1]) * ratio)
+            b = int(top_color[2] + (bottom_color[2] - top_color[2]) * ratio)
+            color = f"#{r:02x}{g:02x}{b:02x}"
+            canvas.create_line(0, i, width, i, fill=color)
+
+    def _schedule_next_fact(self, initial_delay: int = _FUN_FACT_ROTATION_MS) -> None:
+        if self._closing or not self._facts or self._fact_label is None:
             return
         self._stop_fun_facts()
 
         def _advance() -> None:
-            if self._closing or not self._facts:
+            if self._closing or not self._facts or self._fact_label is None:
                 return
+            self._fun_fact_job = None
             self._fact_index = (self._fact_index + 1) % len(self._facts)
-            self._fact_var.set(self._facts[self._fact_index])
+            try:
+                self._fact_label.configure(text=self._facts[self._fact_index])
+            except Exception:
+                logger.exception("Failed to update fun fact text")
+                return
             self._schedule_next_fact()
 
         try:
-            self._fun_fact_job = self.root.after(_FUN_FACT_ROTATION_MS, _advance)
+            self._fun_fact_job = self.root.after(initial_delay, _advance)
         except Exception:
             logger.exception("Failed to schedule fun fact rotation")
+            self._fun_fact_job = None
 
     def _poll_queue(self) -> None:
         while True:
