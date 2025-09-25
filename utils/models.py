@@ -7,10 +7,14 @@ import time
 import threading
 import subprocess
 import shutil
+import importlib
+import importlib.util
 from datetime import datetime
 from pathlib import Path
-from queue import Queue, Empty
-from typing import Optional, List, Set
+from queue import Empty
+from typing import Optional, List, Set, Callable, Tuple
+
+from multiprocessing import Process, Queue as MPQueue
 
 import ctypes
 import ctranslate2
@@ -21,21 +25,23 @@ except ImportError:
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 from huggingface_hub import snapshot_download
+import cv2
 import tkinter as tk
 from tkinter import ttk
+from PIL import Image, ImageTk
 
 from utils.system import (
     settings, settings_lock,
     notify, notify_error, format_exception_details,
     get_config_dir, save_settings,
     start_processing_feedback, stop_processing_feedback,
-    ui_show_lockout_window, ui_close_lockout_window,
+    ui_show_lockout_window, ui_update_lockout_message, ui_close_lockout_window,
     pump_management_events_once,
     play_model_ready_sound_once,
 )
 from utils.system import get_best_server, CLIENT_ONLY_BUILD
 from utils.ui_theme import apply_modern_theme
-from utils.config_paths import get_logger
+from utils.config_paths import get_logger, asset_path
 
 
 # ---------------- Env / defaults ----------------
@@ -567,314 +573,509 @@ def format_bytes(value: float) -> str:
     return f"{amount:.1f} PB"
 
 
-MB_DIVISOR = 1024.0 * 1024.0
+
+_FUN_FACT_ROTATION_MS = 6000
+_WELCOME_VIDEO_TARGET_DURATION_MS = 5000
+_WELCOME_VIDEO_FPS_FALLBACK = 30
+_WELCOME_VIDEO_MIN_FRAME_DELAY_MS = 5
+_DEFAULT_FUN_FACTS: List[str] = [
+    "CtrlSpeak records while you hold the right Ctrl key and pastes the transcript when you release it.",
+    "Whisper models live in %APPDATA%/CtrlSpeak/models so updates never overwrite your cached downloads.",
+    "Need GPU acceleration later? Use the management window’s CUDA installer without reinstalling CtrlSpeak.",
+    "Fun fact: Whisper small balances accuracy and speed, making it the ideal first model for most PCs.",
+    "Speech recognition loves quiet rooms—CtrlSpeak lets you change microphones from the management window anytime.",
+    "You can automate install validation with python main.py --automation-flow for headless health checks.",
+]
 
 
-def format_duration(seconds: float) -> str:
-    seconds = max(float(seconds), 0.0)
-    minutes, secs = divmod(int(seconds + 0.5), 60)
-    hours, minutes = divmod(minutes, 60)
-    if hours:
-        return f"{hours:d}h {minutes:02d}m {secs:02d}s"
-    if minutes:
-        return f"{minutes:d}m {secs:02d}s"
-    return f"{secs:d}s"
+def _load_fun_facts() -> List[str]:
+    path = asset_path("fun_facts.txt")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        logger.warning("Fun facts asset missing; using built-in defaults")
+        return list(_DEFAULT_FUN_FACTS)
+    except Exception:
+        logger.exception("Failed to read fun facts asset; using defaults")
+        return list(_DEFAULT_FUN_FACTS)
+
+    facts = [line.strip() for line in text.splitlines() if line.strip()]
+    return facts or list(_DEFAULT_FUN_FACTS)
 
 
-class DownloadDialog:
-    def __init__(self, model_name: str, progress_queue: Queue, cancel_event: threading.Event):
+class WelcomeWindow:
+    def __init__(self, model_name: str, progress_queue: MPQueue, process: Process):
+        self.model_name = model_name
         self.progress_queue = progress_queue
-        self.cancel_event = cancel_event
+        self.process = process
         self.result: Optional[str] = None
-        self._close_scheduled = False
+        self.error_message: Optional[str] = None
+        self._closing = False
 
         self.root = tk.Tk()
         self.root.title("CtrlSpeak Setup")
-        self.root.geometry("960x520")
-        self.root.minsize(900, 500)
-        self.root.resizable(True, True)
         self.root.attributes("-topmost", True)
+        self.root.protocol("WM_DELETE_WINDOW", lambda: None)
         apply_modern_theme(self.root)
 
-        container = ttk.Frame(self.root, style="Modern.TFrame", padding=(26, 24))
-        container.pack(fill=tk.BOTH, expand=True)
+        self._video_path = asset_path("TrueAI_Intro_Video.mp4")
+        self._video_cap = cv2.VideoCapture(str(self._video_path))
+        self._video_available = self._video_cap.isOpened()
+        self._native_frame_count = self._resolve_native_frame_count()
+        self._native_fps = self._resolve_native_fps()
+        self._native_video_size = self._resolve_native_video_size()
+        self._target_video_duration_ms = self._resolve_target_duration_ms()
+        self._frame_delay = self._resolve_frame_delay()
+        width, height = self._resolve_dimensions()
+        width, height = self._configure_geometry(width, height)
+        self._window_width = width
+        self._window_height = height
+        self._video_target_size = self._calculate_video_target_size(width, height)
 
-        card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
-        card.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(card, text="Install speech model", style="Title.TLabel").pack(anchor=tk.W)
-        model_tag = ttk.Label(card, text=f"MODEL · {model_name.upper()}", style="PillMuted.TLabel")
-        model_tag.pack(anchor=tk.W, pady=(10, 0))
-        accent = ttk.Frame(card, style="AccentLine.TFrame")
-        accent.configure(height=2)
-        accent.pack(fill=tk.X, pady=(12, 16))
+        self.container = ttk.Frame(self.root, style="Modern.TFrame")
+        self.container.pack(fill=tk.BOTH, expand=True)
+        self._video_label = tk.Label(self.container, bd=0)
+        self._video_label.pack(fill=tk.BOTH, expand=True)
 
-        info_text = (
-            "CtrlSpeak needs to download the Whisper model '"
-            f"{model_name}' the first time it runs on this PC."
-        )
-        ttk.Label(card, text=info_text, style="Body.TLabel", wraplength=380,
-                  justify=tk.LEFT).pack(anchor=tk.W, pady=(12, 16))
+        self._photo: Optional[ImageTk.PhotoImage] = None
+        self._icon_photo: Optional[ImageTk.PhotoImage] = None
+        self._video_job: Optional[str] = None
+        self._fun_fact_job: Optional[str] = None
+        self._facts = _load_fun_facts()
+        self._fact_index = 0
+        self._fact_var = tk.StringVar(value=self._facts[0] if self._facts else "")
+        self._fact_wrap = max(self._window_width - 120, 360)
 
-        self.stage_var = tk.StringVar(value="Preparing download…")
-        ttk.Label(card, textvariable=self.stage_var, style="SectionHeading.TLabel").pack(anchor=tk.W)
+        self._audio_player = self._prepare_audio_player()
+        self._video_start_time: Optional[float] = None
+        self._video_deadline: Optional[float] = None
 
-        self.progress = ttk.Progressbar(card, length=360, mode="determinate", maximum=100,
-                                        style="Modern.Horizontal.TProgressbar")
-        self.progress.pack(fill=tk.X, pady=(12, 8))
+        self.root.after(120, self._pump_management_events)
+        self.root.after(150, self._poll_queue)
 
-        self._start_time = time.time()
-
-        metrics = ttk.Frame(card, style="ModernCardInner.TFrame")
-        metrics.pack(fill=tk.X, pady=(8, 0))
-
-        self.metric_vars: dict[str, tk.StringVar] = {
-            "progress": tk.StringVar(),
-            "file_size": tk.StringVar(),
-            "downloaded": tk.StringVar(),
-            "speed": tk.StringVar(),
-            "eta": tk.StringVar(),
-            "elapsed": tk.StringVar(),
-        }
-
-        for label_text, key in [
-            ("Progress", "progress"),
-            ("File size", "file_size"),
-            ("Downloaded", "downloaded"),
-            ("Average speed", "speed"),
-            ("ETA", "eta"),
-            ("Elapsed", "elapsed"),
-        ]:
-            column_frame = ttk.Frame(metrics, style="ModernCardInner.TFrame")
-            column_frame.pack(side=tk.LEFT, padx=(0, 24))
-
-            ttk.Label(column_frame, text=f"{label_text}:", style="Caption.TLabel").pack(anchor=tk.W)
-            ttk.Label(
-                column_frame,
-                textvariable=self.metric_vars[key],
-                style="Caption.TLabel",
-            ).pack(anchor=tk.W)
-        self.status_var = tk.StringVar(value="")
-        ttk.Label(card, textvariable=self.status_var, style="Caption.TLabel", wraplength=360,
-                  justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 0))
-
-        actions = ttk.Frame(card, style="ModernCardInner.TFrame")
-        actions.pack(fill=tk.X, pady=(20, 0))
-        self.cancel_button = ttk.Button(actions, text="Cancel download", style="Danger.TButton",
-                                        command=self.cancel)
-        self.cancel_button.pack(side=tk.RIGHT)
-        try:
-            self.cancel_button.configure(state=tk.DISABLED)
-        except Exception:
-            pass
-
-        self.root.protocol("WM_DELETE_WINDOW", self.cancel)
-        self._last_progress_was_bytes = False
-        self._progress_updates_started = False
-        self._placeholder_after_id: Optional[str] = None
-        self._update_placeholder_status()
-        self._schedule_placeholder_refresh()
-
-    def cancel(self) -> None:
-        if self.result is None:
-            self.result = "cancelled"
-            self.cancel_event.set()
-            self.status_var.set("Cancelling...")
-            self._cancel_placeholder_refresh()
-
-    def _schedule_close(self, delay_ms: int = 0) -> None:
-        if self._close_scheduled:
-            return
-        self._close_scheduled = True
-
-        def _close() -> None:
-            try:
-                self.root.quit()
-            except Exception:
-                logger.exception("Failed to quit download dialog mainloop")
-            try:
-                self.root.destroy()
-            except Exception:
-                logger.exception("Failed to destroy download dialog window")
-
-        try:
-            self.root.after(delay_ms, _close)
-        except Exception:
-            logger.exception("Failed to schedule download dialog close")
-            _close()
-
-    def _update_progress(self, desc: str, current: float, total: float, *, is_bytes: bool) -> None:
-        if desc:
-            desc_clean = desc.strip()
-            if desc_clean:
-                self.stage_var.set(f"Downloading: {desc_clean}")
-        if is_bytes:
-            if not self._progress_updates_started:
-                self._progress_updates_started = True
-                self._cancel_placeholder_refresh()
-            else:
-                self.status_var.set("")
-            if total and total > 0:
-                percent_float = max(min((current / total) * 100.0, 100.0), 0.0)
-                if self.progress["mode"] != "determinate":
-                    self.progress.stop()
-                    self.progress.config(mode="determinate", maximum=100.0)
-                else:
-                    try:
-                        current_max = float(self.progress.cget("maximum"))
-                    except Exception:
-                        current_max = 0.0
-                    if current_max != 100.0:
-                        self.progress.config(maximum=100.0)
-                self.progress["value"] = percent_float
-                percent = int(round(percent_float))
-            else:
-                if self.progress["mode"] != "indeterminate":
-                    self.progress.config(mode="indeterminate")
-                    self.progress.start(10)
-                self.progress["value"] = 0
-                percent = 0
-            now = time.time()
-            elapsed = max(now - self._start_time, 1e-6)
-            speed = current / elapsed if elapsed > 0.0 else 0.0
-            downloaded_mb = current / MB_DIVISOR
-            total_mb = total / MB_DIVISOR if total and total > 0 else None
-            remaining = (total - current) if total and total > current else None
-            eta_seconds = (remaining / speed) if (remaining is not None and speed > 1e-6) else None
-            eta_text = format_duration(eta_seconds) if eta_seconds is not None else "calculating"
-            elapsed_text = format_duration(elapsed)
-            total_text = f"{total_mb:.2f} MB" if total_mb is not None else "calculating"
-            self.metric_vars["progress"].set(f"{percent}%")
-            self.metric_vars["file_size"].set(total_text)
-            self.metric_vars["downloaded"].set(f"{downloaded_mb:.2f} MB")
-            self.metric_vars["speed"].set(
-                f"{format_bytes(speed)}/s" if speed > 0 else "calculating"
-            )
-            self.metric_vars["eta"].set(eta_text)
-            self.metric_vars["elapsed"].set(elapsed_text)
-            self._last_progress_was_bytes = True
+        if self._video_available:
+            self.root.after(10, self._play_next_frame)
+            if self._audio_player is not None:
+                self.root.after(20, self._pump_audio_frames)
         else:
-            if not self._progress_updates_started:
-                self._progress_updates_started = True
-                self._cancel_placeholder_refresh()
+            self.root.after(10, self._show_fun_facts_view)
+
+    def _resolve_native_video_size(self) -> Tuple[int, int]:
+        if not self._video_available:
+            return (0, 0)
+        try:
+            width = int(self._video_cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            height = int(self._video_cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        except Exception:
+            logger.exception("Failed to query welcome video dimensions")
+            return (0, 0)
+        if width <= 0 or height <= 0:
+            return (0, 0)
+        return width, height
+
+    def _resolve_native_frame_count(self) -> int:
+        if not self._video_available:
+            return 0
+        try:
+            frames = int(self._video_cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        except Exception:
+            logger.exception("Failed to query welcome video frame count")
+            return 0
+        return max(frames, 0)
+
+    def _resolve_native_fps(self) -> float:
+        if not self._video_available:
+            return 0.0
+        try:
+            fps = float(self._video_cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        except Exception:
+            logger.exception("Failed to query welcome video fps")
+            return 0.0
+        if fps <= 0:
+            return 0.0
+        return fps
+
+    def _resolve_target_duration_ms(self) -> int:
+        if not self._video_available:
+            return _WELCOME_VIDEO_TARGET_DURATION_MS
+
+        duration_ms = 0
+        if self._native_frame_count > 0 and self._native_fps > 0:
+            try:
+                duration_ms = int(round((self._native_frame_count / self._native_fps) * 1000))
+            except Exception:
+                logger.exception("Failed to calculate welcome video duration")
+                duration_ms = 0
+
+        if duration_ms <= 0:
+            return _WELCOME_VIDEO_TARGET_DURATION_MS
+        if duration_ms > _WELCOME_VIDEO_TARGET_DURATION_MS:
+            return _WELCOME_VIDEO_TARGET_DURATION_MS
+        return duration_ms
+
+    def _resolve_dimensions(self) -> Tuple[int, int]:
+        target_width = int(1920 * 0.8)
+        target_height = int(1080 * 0.8)
+        if not self._video_available:
+            return target_width, target_height
+        native_width, native_height = self._native_video_size
+        if native_width <= 0 or native_height <= 0:
+            return target_width, target_height
+        aspect = native_width / native_height
+        target_aspect = target_width / target_height
+        if abs(aspect - target_aspect) > 0.01:
+            if aspect > target_aspect:
+                target_height = int(target_width / aspect)
             else:
-                self.status_var.set("")
-            if self._last_progress_was_bytes:
-                # Ignore non-byte updates once byte progress has started to avoid regressions.
-                return
-            if self.progress["mode"] != "indeterminate":
-                self.progress.config(mode="indeterminate")
-                self.progress.start(10)
-            now = time.time()
-            elapsed = max(now - self._start_time, 1e-6)
-            percent = 0
-            if total and total > 0:
-                percent = min(max(int((current / total) * 100), 0), 100)
-                progress_text = f"{percent}%"
-            else:
-                progress_text = f"Items: {int(current)}"
-            elapsed_text = format_duration(elapsed)
-            self.metric_vars["progress"].set(progress_text)
-            self.metric_vars["file_size"].set("calculating")
-            self.metric_vars["downloaded"].set("calculating")
-            self.metric_vars["speed"].set("calculating")
-            self.metric_vars["eta"].set("calculating")
-            self.metric_vars["elapsed"].set(elapsed_text)
+                target_width = int(target_height * aspect)
+        return max(target_width, 640), max(target_height, 360)
 
-    def _placeholder_status_text(self) -> dict[str, str]:
-        elapsed = max(time.time() - self._start_time, 0.0)
-        elapsed_text = format_duration(elapsed)
-        return {
-            "progress": "0%",
-            "file_size": "calculating",
-            "downloaded": "0.00 MB",
-            "speed": "calculating",
-            "eta": "calculating",
-            "elapsed": elapsed_text,
-        }
+    def _resolve_frame_delay(self) -> int:
+        if not self._video_available:
+            fallback_delay = int(round(1000 / max(_WELCOME_VIDEO_FPS_FALLBACK, 1)))
+            return max(fallback_delay, _WELCOME_VIDEO_MIN_FRAME_DELAY_MS)
 
-    def _update_placeholder_status(self) -> None:
-        self.status_var.set("")
-        placeholder_values = self._placeholder_status_text()
-        for key, value in placeholder_values.items():
-            self.metric_vars[key].set(value)
+        duration_ms = self._target_video_duration_ms or _WELCOME_VIDEO_TARGET_DURATION_MS
+        if self._native_frame_count > 0:
+            try:
+                frame_delay = duration_ms / self._native_frame_count
+            except Exception:
+                frame_delay = 0
+        else:
+            frame_delay = 0
 
-    def _schedule_placeholder_refresh(self) -> None:
-        if self._placeholder_after_id is not None or self.result is not None:
+        if frame_delay <= 0 and self._native_fps > 0:
+            try:
+                frame_delay = 1000.0 / self._native_fps
+            except Exception:
+                frame_delay = 0
+
+        if frame_delay <= 0:
+            frame_delay = 1000.0 / max(_WELCOME_VIDEO_FPS_FALLBACK, 1)
+
+        return max(int(round(frame_delay)), _WELCOME_VIDEO_MIN_FRAME_DELAY_MS)
+
+    def _configure_geometry(self, width: int, height: int) -> Tuple[int, int]:
+        try:
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+        except Exception:
+            logger.exception("Failed to query screen dimensions for welcome window")
+            screen_w, screen_h = 1920, 1080
+        width = max(min(width, screen_w - 40), 320)
+        height = max(min(height, screen_h - 40), 240)
+        pos_x = max(int((screen_w - width) / 2), 0)
+        pos_y = max(int((screen_h - height) / 2), 0)
+        self.root.geometry(f"{width}x{height}+{pos_x}+{pos_y}")
+        self.root.minsize(width, height)
+        self.root.resizable(False, False)
+        return width, height
+
+    def _calculate_video_target_size(self, window_width: int, window_height: int) -> Optional[Tuple[int, int]]:
+        if not self._video_available:
+            return None
+        native_width, native_height = self._native_video_size
+        if native_width <= 0 or native_height <= 0:
+            native_width, native_height = window_width, window_height
+        try:
+            scale = min(window_width / native_width, window_height / native_height)
+        except Exception:
+            return window_width, window_height
+        target_width = max(int(native_width * scale), 1)
+        target_height = max(int(native_height * scale), 1)
+        return target_width, target_height
+
+    def _prepare_audio_player(self):
+        if not self._video_available:
+            return None
+        spec = importlib.util.find_spec("ffpyplayer.player")
+        if spec is None:
+            logger.debug("ffpyplayer.player not available; welcome video audio disabled")
+            return None
+        module = importlib.import_module("ffpyplayer.player")
+        try:
+            return module.MediaPlayer(str(self._video_path))
+        except Exception:
+            logger.exception("Failed to initialize welcome video audio")
+            return None
+
+    def _pump_audio_frames(self) -> None:
+        if self._closing or self._audio_player is None:
+            return
+        try:
+            frame, value = self._audio_player.get_frame()
+        except Exception:
+            logger.exception("Failed to advance welcome video audio")
+            self._audio_player = None
+            return
+        if value == "eof":
+            return
+        try:
+            self.root.after(30, self._pump_audio_frames)
+        except Exception:
+            logger.exception("Failed to schedule welcome audio pump")
+
+    def _play_next_frame(self) -> None:
+        if self._closing or not self._video_available:
+            return
+        if self._video_deadline is not None and time.monotonic() >= self._video_deadline:
+            self._show_fun_facts_view()
+            return
+        try:
+            ok, frame = self._video_cap.read()
+        except Exception:
+            logger.exception("Failed to read welcome video frame")
+            ok = False
+        if not ok:
+            self._show_fun_facts_view()
             return
 
-        def _tick() -> None:
-            self._placeholder_after_id = None
-            if self._progress_updates_started or self.result is not None:
+        try:
+            if not self._video_label.winfo_exists():
+                self._show_fun_facts_view()
                 return
-            self._update_placeholder_status()
-            self._schedule_placeholder_refresh()
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            image = Image.fromarray(rgb)
+            if self._video_target_size is not None:
+                image = image.resize(self._video_target_size, Image.LANCZOS)
+                self._video_label.configure(width=self._video_target_size[0], height=self._video_target_size[1])
+            else:
+                self._video_label.configure(width=image.width, height=image.height)
+            self._photo = ImageTk.PhotoImage(image=image, master=self.root)
+            self._video_label.configure(image=self._photo)
+            self._video_label.image = self._photo
+            if self._video_start_time is None:
+                self._video_start_time = time.monotonic()
+                duration_ms = self._target_video_duration_ms or _WELCOME_VIDEO_TARGET_DURATION_MS
+                self._video_deadline = self._video_start_time + (duration_ms / 1000.0)
+        except Exception:
+            logger.exception("Failed to render welcome video frame")
+            self._show_fun_facts_view()
+            return
 
         try:
-            self._placeholder_after_id = self.root.after(500, _tick)
+            self._video_job = self.root.after(self._frame_delay, self._play_next_frame)
         except Exception:
-            logger.exception("Failed to schedule placeholder status refresh")
+            logger.exception("Failed to schedule welcome video frame advance")
 
-    def _cancel_placeholder_refresh(self) -> None:
-        if self._placeholder_after_id is None:
+    def _stop_fun_facts(self) -> None:
+        if self._fun_fact_job is None:
             return
         try:
-            self.root.after_cancel(self._placeholder_after_id)
+            self.root.after_cancel(self._fun_fact_job)
         except Exception:
-            logger.exception("Failed to cancel placeholder status refresh")
+            logger.exception("Failed to cancel fun fact rotation")
         finally:
-            self._placeholder_after_id = None
+            self._fun_fact_job = None
 
-    def _process_queue(self) -> None:
+    def _finish_video(self) -> None:
+        if self._video_job is not None:
+            try:
+                self.root.after_cancel(self._video_job)
+            except Exception:
+                logger.exception("Failed to cancel welcome video job")
+            finally:
+                self._video_job = None
+        if self._video_cap is not None:
+            try:
+                self._video_cap.release()
+            except Exception:
+                logger.exception("Failed to release welcome video capture")
+        if self._audio_player is not None:
+            try:
+                self._audio_player.close_player()
+            except Exception:
+                logger.exception("Failed to close welcome video audio player")
+            finally:
+                self._audio_player = None
+
+    def _show_fun_facts_view(self) -> None:
+        if self._closing:
+            return
+        self._finish_video()
+        if getattr(self, "_facts_frame", None):
+            return
+        for child in list(self.container.children.values()):
+            try:
+                child.destroy()
+            except Exception:
+                logger.exception("Failed to destroy welcome video widget")
+        card = ttk.Frame(self.container, style="ModernCard.TFrame", padding=(24, 24))
+        card.pack(fill=tk.BOTH, expand=True)
+        self._facts_frame = card
+
+        title = ttk.Label(card, text="CtrlSpeak is getting ready", style="Title.TLabel")
+        title.pack(pady=(0, 12))
+
+        try:
+            if card.winfo_exists():
+                icon_image = Image.open(asset_path("icon.ico"))
+                icon_image.thumbnail((160, 160), Image.LANCZOS)
+                self._icon_photo = ImageTk.PhotoImage(icon_image, master=self.root)
+                icon_label = ttk.Label(card, image=self._icon_photo, style="Modern.TLabel")
+                icon_label.image = self._icon_photo
+                icon_label.pack(pady=(0, 12))
+        except Exception:
+            logger.exception("Failed to load welcome icon asset")
+
+        fact_label = ttk.Label(
+            card,
+            textvariable=self._fact_var,
+            style="Body.TLabel",
+            wraplength=self._fact_wrap,
+            justify=tk.CENTER,
+        )
+        fact_label.pack(fill=tk.BOTH, expand=True)
+
+        self._schedule_next_fact()
+
+    def _schedule_next_fact(self) -> None:
+        if not self._facts:
+            return
+        self._stop_fun_facts()
+
+        def _advance() -> None:
+            if self._closing or not self._facts:
+                return
+            self._fact_index = (self._fact_index + 1) % len(self._facts)
+            self._fact_var.set(self._facts[self._fact_index])
+            self._schedule_next_fact()
+
+        try:
+            self._fun_fact_job = self.root.after(_FUN_FACT_ROTATION_MS, _advance)
+        except Exception:
+            logger.exception("Failed to schedule fun fact rotation")
+
+    def _poll_queue(self) -> None:
         while True:
             try:
                 message = self.progress_queue.get_nowait()
             except Empty:
                 break
+
             message_type = message[0]
-            if message_type == "progress":
-                _, desc, current, total, is_bytes = message
-                self._update_progress(desc, current, total, is_bytes=is_bytes)
-            elif message_type == "stage":
+            if message_type == "stage":
                 _, desc = message
-                self.stage_var.set(desc)
+                if desc:
+                    ui_update_lockout_message(desc)
             elif message_type == "error":
                 _, error_text = message
                 self.result = "error"
-                self.status_var.set(error_text)
+                self.error_message = error_text
             elif message_type == "done":
                 self.result = "success"
-                self.status_var.set("Download completed.")
             elif message_type == "cancelled":
                 self.result = "cancelled"
-                self.status_var.set("Download cancelled.")
 
-        if self.result is None:
-            self.root.after(100, self._process_queue)
+        self._resolve_process_exit()
+
+        if self.result is not None:
+            self._finalize()
+            return
+
+        try:
+            self.root.after(200, self._poll_queue)
+        except Exception:
+            logger.exception("Failed to schedule progress queue polling")
+
+    def _resolve_process_exit(self) -> None:
+        if self.result is not None:
+            return
+        if self.process.is_alive():
+            return
+        exit_code = self.process.exitcode
+        if exit_code is None:
+            return
+        if exit_code == 0:
+            self.result = "success"
         else:
-            if self.progress["mode"] == "indeterminate":
-                self.progress.stop()
-            self.cancel_button.config(state=tk.DISABLED)
-            delay = 400 if self.result == "success" else 0
-            self._schedule_close(delay)
+            self.result = "error"
+            if self.error_message is None:
+                self.error_message = "CtrlSpeak could not download the Whisper model. Please try again."
 
-    def run(self) -> str:
-        self.root.after(100, self._process_queue)
-        self.root.after(80, self._pump_management_events)
-        self.root.mainloop()
-        return self.result or "cancelled"
+    def _finalize(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
+        self._finish_video()
+        self._stop_fun_facts()
+        try:
+            self.root.after(0, self.root.quit)
+        except Exception:
+            try:
+                self.root.quit()
+            except Exception:
+                logger.exception("Failed to quit welcome window mainloop")
 
     def _pump_management_events(self) -> None:
-        if self.result is not None:
+        if self._closing:
             return
         try:
             pump_management_events_once()
         except Exception:
-            logger.exception("Failed to pump management UI while downloading model")
+            logger.exception("Failed to pump management UI during welcome flow")
         finally:
             try:
-                self.root.after(120, self._pump_management_events)
+                self.root.after(160, self._pump_management_events)
             except Exception:
-                logger.exception("Failed to schedule management UI pump during download")
+                logger.exception("Failed to schedule management UI pump during welcome flow")
+
+    def run(self) -> Tuple[str, Optional[str]]:
+        try:
+            self.root.mainloop()
+        finally:
+            self._finish_video()
+            self._stop_fun_facts()
+            try:
+                self.root.destroy()
+            except Exception:
+                logger.exception("Failed to destroy welcome window")
+        return self.result or "cancelled", self.error_message
+
+
+def _model_download_worker(model_name: str, queue: MPQueue) -> None:
+    def _put(payload: Tuple[str, ...]) -> None:
+        try:
+            queue.put_nowait(payload)
+        except Exception:
+            pass
+
+    try:
+        repo_id = _model_repo_id(model_name)
+        trace_model_download_step(
+            "download_model_with_gui.worker: prepared repo id",
+            "announce stage and ensure directory",
+        )
+        _put(("stage", f"Preparing download from Hugging Face ({repo_id})"))
+        store_path = model_store_path_for(model_name)
+        store_path.mkdir(parents=True, exist_ok=True)
+        trace_model_download_step(
+            "download_model_with_gui.worker: starting snapshot_download",
+            "wait for huggingface client to finish",
+        )
+        _put(("stage", "Downloading Whisper model…"))
+        snapshot_download(
+            repo_id,
+            local_dir=str(store_path),
+            local_dir_use_symlinks=False,
+            resume_download=True,
+        )
+    except Exception as exc:
+        logger.exception("Model download failed")
+        trace_model_download_step(
+            "download_model_with_gui.worker: snapshot_download raised exception",
+            "report error to user",
+        )
+        _put(("error", f"Model download failed: {exc}"))
+        return
+
+    trace_model_download_step(
+        "download_model_with_gui.worker: snapshot_download completed",
+        "signal stage completion",
+    )
+    _put(("stage", "Download complete. Verifying files…"))
+    _put(("done",))
+
 
 def _prompt_for_model_install(model_name: str, *, auto_accept: bool = False) -> bool:
     """Request user confirmation before downloading a Whisper model."""
@@ -916,105 +1117,119 @@ def _prompt_for_model_install(model_name: str, *, auto_accept: bool = False) -> 
     return choice == "Install Now"
 
 
+
+
 def download_model_with_gui(
     model_short: Optional[str] = None,
     *,
     block_during_download: bool = False,
 ) -> bool:
-    """Download the selected model snapshot with a simple progress dialog."""
+    """Download the selected model snapshot while presenting the welcome experience."""
 
     model_name = (model_short or get_current_model_name()).strip()
-    progress_queue: Queue = Queue()
-    cancel_event = threading.Event()
-    dialog = DownloadDialog(model_name, progress_queue, cancel_event)
-
     trace_model_download_step(
         "download_model_with_gui: start",
-        "spawn worker thread",
+        "spawn worker process",
     )
 
-    def worker() -> None:
-        try:
-            repo_id = _model_repo_id(model_name)
-            trace_model_download_step(
-                "download_model_with_gui.worker: prepared repo id",
-                "announce stage and ensure directory",
-            )
-            progress_queue.put(("stage", f"Preparing download from Hugging Face ({repo_id})"))
-            store_path = model_store_path_for(model_name)
-            store_path.mkdir(parents=True, exist_ok=True)
-            trace_model_download_step(
-                "download_model_with_gui.worker: starting snapshot_download",
-                "wait for huggingface client to finish",
-            )
-            snapshot_download(
-                repo_id,
-                local_dir=str(store_path),
-                local_dir_use_symlinks=False,
-                resume_download=True,
-            )
-        except Exception as exc:
-            progress_queue.put(("error", f"Failed: {exc}"))
-            logger.exception("Model download failed")
-            trace_model_download_step(
-                "download_model_with_gui.worker: snapshot_download raised exception",
-                "report error to user",
-            )
+    progress_queue: MPQueue = MPQueue()
+    process = Process(target=_model_download_worker, args=(model_name, progress_queue))
+    process.daemon = True
+    process.start()
+
+    cancel_requested = threading.Event()
+
+    def _request_cancel() -> None:
+        if cancel_requested.is_set():
             return
-
+        cancel_requested.set()
         trace_model_download_step(
-            "download_model_with_gui.worker: snapshot_download completed",
-            "signal stage completion",
+            "download_model_with_gui: cancel requested",
+            "terminate worker process",
         )
-        progress_queue.put(("stage", "Download complete."))
-        progress_queue.put(("done",))
+        try:
+            ui_update_lockout_message("Cancelling model download…")
+        except Exception:
+            logger.exception("Failed to update lockout message while cancelling model download")
+        if process.is_alive():
+            try:
+                process.terminate()
+            except Exception:
+                logger.exception("Failed to terminate model download process")
+        try:
+            progress_queue.put_nowait(("cancelled",))
+        except Exception:
+            pass
 
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
+    initial_message = (
+        "CtrlSpeak is downloading the Whisper model. Use Cancel download if you need to stop the download."
+    )
 
-    def _run() -> bool:
-        result = dialog.run()
-        thread.join(timeout=0.5)
-        return result == "success"
-
-    if not block_during_download:
-        trace_model_download_step(
-            "download_model_with_gui: running dialog without lockout",
-            "wait for dialog result",
-        )
-        return _run()
-
+    lockout_open = False
     try:
-        ui_show_lockout_window(
-            "CtrlSpeak is downloading the Whisper model. Please wait for the download to finish before using CtrlSpeak."
-        )
+        ui_show_lockout_window(initial_message, cancel_callback=_request_cancel)
+        lockout_open = True
     except Exception:
         logger.exception("Failed to show lockout window during model download")
-        trace_model_download_step(
-            "download_model_with_gui: lockout window failed",
-            "continue waiting for dialog result",
-        )
 
-    success = _run()
-
-    try:
-        if success:
-            ui_close_lockout_window("The Whisper model download completed successfully.")
-        else:
-            ui_close_lockout_window("CtrlSpeak could not download the Whisper model. Please try again.")
-    except Exception:
-        logger.exception("Failed to close lockout window after model download")
-        trace_model_download_step(
-            "download_model_with_gui: closing lockout failed",
-            "finish with dialog result",
-        )
+    window = WelcomeWindow(model_name, progress_queue, process)
+    status, error_message = window.run()
 
     trace_model_download_step(
-        "download_model_with_gui: completed",
-        "return success flag",
+        "download_model_with_gui: welcome window completed",
+        "finalize lockout window",
     )
 
-    return success
+    process.join(timeout=1.0)
+    if process.is_alive():
+        try:
+            process.terminate()
+        except Exception:
+            logger.exception("Failed to terminate hung model download process")
+        process.join(timeout=0.5)
+
+    try:
+        progress_queue.close()
+    except Exception:
+        pass
+    try:
+        progress_queue.join_thread()
+    except Exception:
+        pass
+
+    if status == "success":
+        try:
+            if lockout_open:
+                ui_close_lockout_window("The Whisper model download completed successfully.")
+        except Exception:
+            logger.exception("Failed to close lockout window after successful download")
+        trace_model_download_step(
+            "download_model_with_gui: completed",
+            "return success flag",
+        )
+        return True
+
+    if status == "cancelled":
+        message = "The Whisper model download was cancelled."
+        trace_model_download_step(
+            "download_model_with_gui: cancelled",
+            "return False",
+        )
+    else:
+        message = error_message or "CtrlSpeak could not download the Whisper model. Please try again."
+        trace_model_download_step(
+            "download_model_with_gui: failed",
+            "return False",
+        )
+
+    try:
+        if lockout_open:
+            ui_close_lockout_window(message)
+    except Exception:
+        logger.exception("Failed to close lockout window after download failure")
+
+    return False
+
 
 
 # ---------------- Transcriber ----------------
