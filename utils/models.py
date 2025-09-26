@@ -161,6 +161,25 @@ def _active_cuda_root() -> Path:
 
 
 logger = get_logger(__name__)
+
+_INTRO_VIDEO_CANDIDATES: Tuple[str, ...] = ("Watcher_Intro_Video.mp4", "TrueAI_Intro_Video.mp4")
+
+
+def _resolve_intro_video_path() -> Path:
+    for filename in _INTRO_VIDEO_CANDIDATES:
+        candidate = asset_path(filename)
+        if candidate.exists():
+            if filename != _INTRO_VIDEO_CANDIDATES[-1]:
+                logger.info("Using alternate intro video asset: %s", filename)
+            return candidate
+
+    fallback = asset_path(_INTRO_VIDEO_CANDIDATES[-1])
+    logger.warning(
+        "No intro video asset found; expected one of %s. Falling back to %s.",
+        ", ".join(_INTRO_VIDEO_CANDIDATES),
+        fallback.name,
+    )
+    return fallback
 _trace_lock = threading.Lock()
 
 
@@ -1077,7 +1096,7 @@ def format_bytes(value: float) -> str:
 
 
 _FUN_FACT_ROTATION_MS = 6000
-_WELCOME_VIDEO_TARGET_DURATION_MS = 5000
+_WELCOME_VIDEO_DEFAULT_DURATION_MS = 5000
 _WELCOME_VIDEO_MIN_FRAME_DELAY_MS = 5
 _DEFAULT_FUN_FACTS: List[str] = [
     "CtrlSpeak records while you hold the right Ctrl key and pastes the transcript when you release it.",
@@ -1162,7 +1181,7 @@ class WelcomeWindow:
         self.root.protocol("WM_DELETE_WINDOW", lambda: None)
         apply_modern_theme(self.root)
 
-        self._video_path = asset_path("TrueAI_Intro_Video.mp4")
+        self._video_path = _resolve_intro_video_path()
         self._video_metadata = _probe_video_metadata(self._video_path)
         self._target_video_duration_ms = self._resolve_target_duration_ms(self._video_metadata)
         width, height = self._configure_geometry(int(1920 * 0.8), int(1080 * 0.8))
@@ -1212,7 +1231,7 @@ class WelcomeWindow:
         self.root.resizable(False, False)
         return width, height
 
-    def _resolve_target_duration_ms(self, metadata: Dict[str, Any]) -> int:
+    def _resolve_target_duration_ms(self, metadata: Dict[str, Any]) -> Optional[int]:
         duration_value = metadata.get("duration")
         duration_ms = 0
         if isinstance(duration_value, (int, float)) and duration_value > 0:
@@ -1220,9 +1239,12 @@ class WelcomeWindow:
                 duration_ms = int(round(duration_value * 1000))
             except Exception:
                 duration_ms = 0
-        if duration_ms <= 0:
-            duration_ms = _WELCOME_VIDEO_TARGET_DURATION_MS
-        return min(duration_ms, _WELCOME_VIDEO_TARGET_DURATION_MS)
+        if duration_ms > 0:
+            return duration_ms
+        if self._video_path.name == "Watcher_Intro_Video.mp4":
+            logger.info("Welcome video duration metadata unavailable; waiting for Watcher intro EOF")
+            return None
+        return _WELCOME_VIDEO_DEFAULT_DURATION_MS
 
     def _calculate_video_target_size(self, frame_width: int, frame_height: int) -> Tuple[int, int]:
         try:
@@ -1316,7 +1338,7 @@ class WelcomeWindow:
                 self._show_fun_facts_view()
                 return
 
-            if self._video_deadline is None:
+            if self._target_video_duration_ms is not None and self._video_deadline is None:
                 self._video_deadline = time.monotonic() + (self._target_video_duration_ms / 1000.0)
 
         if isinstance(value, (int, float)) and value > 0:
