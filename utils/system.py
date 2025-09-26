@@ -198,7 +198,7 @@ def notify(message: str, title: str = "CtrlSpeak") -> None:
 
 
 
-def ui_show_lockout_window(message: str) -> None:
+def ui_show_lockout_window(message: str, cancel_callback: Optional[Callable[[], None]] = None) -> None:
     """Display (or update) the first-run lockout window."""
     try:
         from utils.gui import (
@@ -209,9 +209,9 @@ def ui_show_lockout_window(message: str) -> None:
 
         ensure_management_ui_thread()
         if is_management_ui_thread():
-            show_lockout_window(message)
+            show_lockout_window(message, cancel_callback=cancel_callback)
         else:
-            enqueue_management_task(show_lockout_window, message)
+            enqueue_management_task(show_lockout_window, message, cancel_callback=cancel_callback)
     except Exception:
         logger.exception("Failed to show lockout window")
         try:
@@ -826,37 +826,55 @@ discovery_query_stop_event = threading.Event()
 def start_server() -> None:
     global server_thread, server_httpd, discovery_broadcaster, discovery_query_listener, discovery_query_stop_event, last_connected_server
     if CLIENT_ONLY_BUILD:
+        logger.warning("Server start requested, but this build is client-only")
         notify("Server functionality is not available in this build."); return
-    if server_thread and server_thread.is_alive(): return
+    if server_thread and server_thread.is_alive():
+        logger.debug("Server start requested but server thread is already running")
+        return
     with settings_lock:
         port = int(settings.get("server_port", 65432))
         discovery_port = int(settings.get("discovery_port", 54330))
+    logger.info("Starting CtrlSpeak server on port %s (discovery %s)", port, discovery_port)
     try:
         server_httpd = ThreadingHTTPServer(("0.0.0.0", port), TranscriptionRequestHandler)
     except OSError as exc:
+        logger.error("Server startup failed on port %s: %s", port, exc)
         notify_error("Server startup failed", str(exc)); server_httpd = None; return
     def serve():
-        try: server_httpd.serve_forever()
-        except Exception as exc: notify_error("Server stopped", format_exception_details(exc))
+        try:
+            server_httpd.serve_forever()
+        except Exception as exc:
+            notify_error("Server stopped", format_exception_details(exc))
     server_thread = threading.Thread(target=serve, daemon=True); server_thread.start()
 
     broadcast_stop_event.clear(); discovery_query_stop_event.clear()
-    discovery_broadcaster = threading.Thread(target=manage_discovery_broadcast,
-                                             args=(broadcast_stop_event, discovery_port, port), daemon=True)
+    discovery_broadcaster = threading.Thread(
+        target=manage_discovery_broadcast,
+        args=(broadcast_stop_event, discovery_port, port),
+        daemon=True,
+    )
     discovery_broadcaster.start()
-    discovery_query_listener = threading.Thread(target=listen_for_discovery_queries,
-                                                args=(discovery_query_stop_event, discovery_port, port), daemon=True)
+    discovery_query_listener = threading.Thread(
+        target=listen_for_discovery_queries,
+        args=(discovery_query_stop_event, discovery_port, port),
+        daemon=True,
+    )
     discovery_query_listener.start()
     last_connected_server = ServerInfo(host=get_advertised_host_ip(), port=port, last_seen=time.time())
+    logger.info("CtrlSpeak server listening on port %s", port)
     print(f"CtrlSpeak server listening on port {port}")
     schedule_management_refresh()
 
+
 def shutdown_server() -> None:
     global server_thread, server_httpd, discovery_broadcaster, discovery_query_listener, broadcast_stop_event, discovery_query_stop_event, last_connected_server
+    logger.info("Shutting down CtrlSpeak server")
     broadcast_stop_event.set(); discovery_query_stop_event.set()
-    if discovery_broadcaster and discovery_broadcaster.is_alive(): discovery_broadcaster.join(timeout=1.0)
+    if discovery_broadcaster and discovery_broadcaster.is_alive():
+        discovery_broadcaster.join(timeout=1.0)
     discovery_broadcaster = None
-    if discovery_query_listener and discovery_query_listener.is_alive(): discovery_query_listener.join(timeout=1.0)
+    if discovery_query_listener and discovery_query_listener.is_alive():
+        discovery_query_listener.join(timeout=1.0)
     discovery_query_listener = None
     if server_httpd is not None:
         try:
@@ -864,11 +882,14 @@ def shutdown_server() -> None:
         except Exception:
             logger.exception("Failed to shut down server HTTP listener cleanly")
     server_httpd = None
-    if server_thread and server_thread.is_alive(): server_thread.join(timeout=1.0)
+    if server_thread and server_thread.is_alive():
+        server_thread.join(timeout=1.0)
     server_thread = None
     broadcast_stop_event = threading.Event(); discovery_query_stop_event = threading.Event()
     last_connected_server = None
+    logger.debug("Server resources cleared")
     schedule_management_refresh()
+
 
 # local wrapper to restore original side-effects
 def register_manual_server(host: str, port: int, update_preference: bool = True) -> ServerInfo:
@@ -944,6 +965,7 @@ def run_tray():
 def acquire_single_instance_lock() -> bool:
     global instance_lock_handle
     lock_path = get_config_dir() / LOCK_FILENAME
+    logger.debug("Attempting to acquire instance lock at %s", lock_path)
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -951,22 +973,29 @@ def acquire_single_instance_lock() -> bool:
     try:
         handle = open(lock_path, 'a+')
     except OSError as exc:
+        logger.warning("Unable to open lock file at %s: %s", lock_path, exc)
         print(f'Unable to open lock file: {exc}'); return False
     try:
         handle.seek(0)
         if sys.platform.startswith('win'):
             import msvcrt
-            try: msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
             except OSError:
+                logger.info("Instance lock already held by another process (Windows)")
                 handle.close(); return False
         else:
             import fcntl
-            try: fcntl.lockf(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                fcntl.lockf(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
+                logger.info("Instance lock already held by another process (POSIX)")
                 handle.close(); return False
         handle.truncate(0); handle.write(str(os.getpid())); handle.flush()
+        logger.info("Acquired instance lock with PID %s", os.getpid())
         instance_lock_handle = handle; return True
     except Exception as exc:
+        logger.error("Unable to acquire single-instance lock: %s", exc)
         print(f'Unable to acquire single-instance lock: {exc}')
         try:
             handle.close()
@@ -977,7 +1006,9 @@ def acquire_single_instance_lock() -> bool:
 def release_single_instance_lock() -> None:
     global instance_lock_handle
     handle = instance_lock_handle
-    if handle is None: return
+    if handle is None:
+        logger.debug("Release instance lock requested but no lock handle is present")
+        return
     instance_lock_handle = None
     try:
         if sys.platform.startswith('win'):
@@ -1001,6 +1032,7 @@ def release_single_instance_lock() -> None:
             (get_config_dir() / LOCK_FILENAME).unlink(missing_ok=True)
         except Exception:
             logger.exception("Failed to remove instance lock file")
+        logger.info("Released instance lock")
 
 # ---------------- Uninstall ----------------
 def build_uninstall_script(executable: Path, config_dir: Path) -> Path:
@@ -1038,23 +1070,31 @@ def initiate_self_uninstall(icon: Optional[pystray.Icon]) -> None:
 def start_discovery_listener() -> None:
     global discovery_listener
     if discovery_listener is not None and discovery_listener.is_alive():
+        logger.debug(
+            "Discovery listener already active on port %s",
+            getattr(discovery_listener, "port", "unknown"),
+        )
         return
     with settings_lock:
         port = int(settings.get("discovery_port", 54330))
+    logger.info("Starting discovery listener on UDP port %s", port)
     discovery_listener = DiscoveryListener(port); discovery_listener.start()
 
 def stop_discovery_listener() -> None:
     global discovery_listener
     if discovery_listener is None:
+        logger.debug("Discovery listener stop requested but no listener was running")
         return
     try:
         discovery_listener.stop()
     except Exception:
         logger.exception("Failed to stop discovery listener")
     finally:
+        logger.info("Discovery listener stopped")
         discovery_listener = None
 
 def shutdown_all():
+    logger.info("Shutting down all CtrlSpeak services")
     stop_client_listener(); shutdown_server()
     try:
         stop_discovery_listener()
@@ -1073,7 +1113,13 @@ def parse_cli_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--uninstall", action="store_true", help="Remove CtrlSpeak and all local data")
     parser.add_argument("--auto-setup", choices=["client", "client_server"], help="Configure CtrlSpeak without prompts")
     parser.add_argument("--force-sendinput", action="store_true", help="Force SendInput-based insertion (debug)")
-    parser.add_argument("--setup-cuda", action="store_true", help="Prepare CUDA runtime support without launching the UI")
+    parser.add_argument(
+        "--download-cuda-only",
+        "--setup-cuda",
+        action="store_true",
+        dest="cuda_only",
+        help="Download CUDA runtime assets and exit without launching the UI",
+    )
     parser.add_argument("--automation-flow", action="store_true", help="Run the automated end-to-end regression workflow")
     args, _ = parser.parse_known_args(argv[1:])
     return args

@@ -32,7 +32,7 @@
 
 ## Model and CUDA assets
 - Whisper weights are always staged under `%APPDATA%\CtrlSpeak\models`. The helpers `model_store_path_for` and `model_files_present` encode the layout—do not introduce alternate caches or download directories.【F:utils/models.py†L148-L181】
-- CUDA support searches `%APPDATA%\CtrlSpeak\cuda` (plus bundled/wheel fallbacks) when staging DLLs, and `configure_cuda_paths` extends `PATH` accordingly. Keep GPU runtime files confined to this tree and never install them beside the executable.【F:utils/models.py†L202-L220】
+- CUDA support searches `%APPDATA%\CtrlSpeak\cuda\12.3` (plus bundled/wheel fallbacks) when staging DLLs, and `configure_cuda_paths` extends `PATH` accordingly. Keep GPU runtime files confined to this tree and never install them beside the executable.【F:utils/models.py†L340-L370】
 - Model downloads and CUDA installers must emit human-readable traces under `%APPDATA%\CtrlSpeak\logs`, preserving visibility into staged work.【F:utils/models.py†L62-L83】【F:utils/models.py†L190-L200】
 
 ## Client/server responsibilities

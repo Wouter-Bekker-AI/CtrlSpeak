@@ -49,7 +49,7 @@ asset_datas = [
     (str(PROJECT_ROOT / 'assets' / 'loading.wav'), 'assets'),
     (str(PROJECT_ROOT / 'assets' / 'test.wav'), 'assets'),
     (str(PROJECT_ROOT / 'assets' / 'fun_facts.txt'), 'assets'),
-    (str(PROJECT_ROOT / 'assets' / 'TrueAI_Intro_Video.mp4'), 'assets'),
+    (str(PROJECT_ROOT / 'assets' / 'Watcher_Intro_Video.mp4'), 'assets'),
 ]
 
 datas = _dedupe(third_party_datas + asset_datas)
@@ -82,7 +82,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='CtrlSpeak',
+    name='CtrlSpeak_Watcher',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

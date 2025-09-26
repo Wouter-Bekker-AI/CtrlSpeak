@@ -1,0 +1,6 @@
+CtrlSpeak Tip: Hold the right Ctrl key to start recording and let go when you want the transcript.
+Fun Fact: Whisper small is optimised for quick responses while keeping accuracy high—perfect for first-time installs.
+Need GPU later? Open the management window and use “Install or repair CUDA” without reinstalling the app.
+Tray power: Right-click the CtrlSpeak tray icon any time to change modes or quit cleanly.
+Headless validation is easy—run python main.py --automation-flow to exercise the full install automatically.
+Quiet spaces boost accuracy. Switch microphones from the management window if you need a cleaner signal.

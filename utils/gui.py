@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import sys
@@ -32,15 +32,15 @@ from utils import system as sysmod
 from utils.models import (
     AVAILABLE_MODELS,
     cuda_runtime_ready,
-    install_cuda_runtime_with_progress,   # opens progress window and installs nvidia wheels
+    install_cuda_runtime_with_progress,
     ensure_cuda_runtime_from_existing,
     cuda_runtime_files_present,
+    cuda_driver_available,
     get_device_preference, set_device_preference,
     get_current_model_name, set_current_model_name,
     model_store_path_for, model_files_present,
-    download_model_with_gui,              # opens progress window and downloads model
+    download_model_with_gui,              # orchestrates welcome window and downloads model
     ensure_model_ready_for_local_server,
-    format_bytes,                         # optional pretty bytes
     trace_model_download_step,
 )
 
@@ -68,6 +68,8 @@ _lockout_win: Optional[tk.Toplevel] = None
 _lockout_message_var: Optional[tk.StringVar] = None
 _lockout_close_job: Optional[str] = None
 _lockout_progress: Optional[ttk.Progressbar] = None
+_lockout_cancel_button: Optional[ttk.Button] = None
+_lockout_cancel_callback: Optional[Callable[[], None]] = None
 
 # -------- Notification helpers --------
 
@@ -158,8 +160,8 @@ def show_notification_popup(title: str, message: str) -> None:
             logger.exception("Failed to print fallback notification '%s'", title)
 
 
-def show_lockout_window(message: str) -> None:
-    global _lockout_win, _lockout_message_var, _lockout_progress
+def show_lockout_window(message: str, cancel_callback: Optional[Callable[[], None]] = None) -> None:
+    global _lockout_win, _lockout_message_var, _lockout_progress, _lockout_cancel_button, _lockout_cancel_callback
     if tk_root is None or not tk_root.winfo_exists():
         return
 
@@ -167,10 +169,20 @@ def show_lockout_window(message: str) -> None:
 
     if _lockout_win is None or not _lockout_win.winfo_exists():
         _lockout_win = tk.Toplevel(tk_root)
-        _lockout_win.title("CtrlSpeak Â· Preparing CtrlSpeak")
-        _lockout_win.geometry("720x340")
-        _lockout_win.minsize(580, 300)
-        _lockout_win.resizable(True, True)
+        _lockout_win.title("CtrlSpeak · Preparing CtrlSpeak")
+        width, height = 420, 240
+        geometry = f"{width}x{height}+32+32"
+        try:
+            screen_w = _lockout_win.winfo_screenwidth()
+            screen_h = _lockout_win.winfo_screenheight()
+            offset_x = max(min(32, screen_w - width), 0)
+            offset_y = max(min(32, screen_h - height), 0)
+            geometry = f"{width}x{height}+{offset_x}+{offset_y}"
+        except Exception:
+            logger.exception("Failed to query screen dimensions for lockout window")
+        _lockout_win.geometry(geometry)
+        _lockout_win.minsize(width, height)
+        _lockout_win.resizable(False, False)
         _lockout_win.attributes("-topmost", True)
         try:
             _lockout_win.attributes("-toolwindow", True)
@@ -179,44 +191,66 @@ def show_lockout_window(message: str) -> None:
         apply_modern_theme(_lockout_win)
         _lockout_win.protocol("WM_DELETE_WINDOW", lambda: None)
 
-        container = ttk.Frame(_lockout_win, style="Modern.TFrame", padding=(26, 24))
+        container = ttk.Frame(_lockout_win, style="Modern.TFrame", padding=(18, 16))
         container.pack(fill=tk.BOTH, expand=True)
 
-        card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
+        card = ttk.Frame(container, style="ModernCard.TFrame", padding=(18, 18))
         card.pack(fill=tk.BOTH, expand=True)
 
         ttk.Label(card, text="Preparing CtrlSpeak", style="Title.TLabel").pack(anchor=tk.W)
         accent = ttk.Frame(card, style="AccentLine.TFrame")
         accent.configure(height=2)
-        accent.pack(fill=tk.X, pady=(12, 18))
+        accent.pack(fill=tk.X, pady=(8, 12))
 
         _lockout_message_var = tk.StringVar(master=_lockout_win, value=message)
         message_label = ttk.Label(
             card,
             textvariable=_lockout_message_var,
             style="Body.TLabel",
-            wraplength=540,
+            wraplength=320,
             justify=tk.LEFT,
         )
-        message_label.pack(anchor=tk.W, fill=tk.X, expand=True)
+        message_label.pack(anchor=tk.W, fill=tk.X, expand=True, pady=(0, 8))
 
         _lockout_progress = ttk.Progressbar(
             card,
             mode="indeterminate",
-            length=380,
+            length=280,
             style="Modern.Horizontal.TProgressbar",
         )
-        _lockout_progress.pack(fill=tk.X, pady=(20, 0))
+        _lockout_progress.pack(fill=tk.X)
         try:
             _lockout_progress.start(12)
         except Exception:
             logger.exception("Failed to start lockout spinner")
+
+        def _invoke_cancel() -> None:
+            callback = _lockout_cancel_callback
+            if callback is None:
+                return
+            try:
+                callback()
+            except Exception:
+                logger.exception("Lockout cancel callback raised an exception")
+
+        actions = ttk.Frame(card, style="ModernCardInner.TFrame")
+        actions.pack(fill=tk.X, pady=(12, 0))
+        _lockout_cancel_button = ttk.Button(
+            actions,
+            text="Cancel download",
+            style="Danger.TButton",
+            command=_invoke_cancel,
+        )
+        _lockout_cancel_button.pack(anchor=tk.E)
     else:
         try:
             _lockout_win.deiconify()
             _lockout_win.lift()
         except Exception:
             logger.exception("Failed to raise lockout window")
+
+    if cancel_callback is not None:
+        _lockout_cancel_callback = cancel_callback
 
     if _lockout_message_var is not None:
         try:
@@ -230,6 +264,15 @@ def show_lockout_window(message: str) -> None:
         except Exception:
             pass
 
+    if _lockout_cancel_button is not None:
+        try:
+            if _lockout_cancel_callback is None:
+                _lockout_cancel_button.configure(state=tk.DISABLED)
+            else:
+                _lockout_cancel_button.configure(state=tk.NORMAL)
+        except Exception:
+            logger.exception("Failed to update lockout cancel button state")
+
     try:
         _lockout_win.lift()
         _lockout_win.focus_force()
@@ -238,14 +281,23 @@ def show_lockout_window(message: str) -> None:
 
 
 def update_lockout_message(message: str) -> None:
+    def _update() -> None:
+        if _lockout_win is None or not _lockout_win.winfo_exists() or _lockout_message_var is None:
+            show_lockout_window(message, cancel_callback=_lockout_cancel_callback)
+            return
+        try:
+            _lockout_message_var.set(message)
+        except Exception:
+            logger.exception("Failed to set lockout message text")
+
     _call_on_management_ui(
-        lambda: show_lockout_window(message),
+        _update,
         log_message="Failed to update lockout message text",
     )
 
 
 def close_lockout_window(message: Optional[str] = None) -> None:
-    global _lockout_close_job
+    global _lockout_close_job, _lockout_cancel_callback
     if _lockout_win is None or not _lockout_win.winfo_exists():
         return
 
@@ -263,6 +315,13 @@ def close_lockout_window(message: Optional[str] = None) -> None:
         except Exception:
             pass
 
+    if _lockout_cancel_button is not None:
+        try:
+            _lockout_cancel_button.configure(state=tk.DISABLED)
+        except Exception:
+            logger.exception("Failed to disable lockout cancel button")
+    _lockout_cancel_callback = None
+
     if message:
         try:
             _lockout_win.lift()
@@ -277,11 +336,11 @@ def close_lockout_window(message: Optional[str] = None) -> None:
         _destroy_lockout_window()
 def _format_duration(seconds: Optional[float]) -> str:
     if seconds is None:
-        return "â€”"
+        return "—"
     try:
         total = max(float(seconds), 0.0)
     except (TypeError, ValueError):
-        return "â€”"
+        return "—"
     minutes, secs = divmod(int(total + 0.5), 60)
     hours, minutes = divmod(minutes, 60)
     if hours:
@@ -299,7 +358,7 @@ _waveform_provider: Optional[Callable[[], "np.ndarray"]] = None
 
 # NEW: simple state for live vs processing
 _waveform_mode: str = "live"         # "live" | "processing"
-_waveform_msg: str = "Processingâ€¦"
+_waveform_msg: str = "Processing…"
 _pulse_phase: float = 0.0            # animation phase
 _waveform_closing: bool = False
 
@@ -343,7 +402,7 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
             nonlocal processing_error_logged
             """Redraw the overlay every ~33 ms.
             - LIVE mode: polyline waveform from recent audio samples.
-            - PROCESSING mode: pulsing circular ring with 'Processingâ€¦' label.
+            - PROCESSING mode: pulsing circular ring with 'Processing…' label.
             """
             global _pulse_phase
             if _waveform_win is None or not _waveform_win.winfo_exists():
@@ -364,7 +423,7 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
                         data = _waveform_provider()
                         if data is not None and getattr(data, "size", 0) > 0:
                             # DYNAMIC SCALE WITH UPPER CAP
-                            # Aim to keep the current frameâ€™s peak around ~0.9, but never amplify above 8x.
+                            # Aim to keep the current frame’s peak around ~0.9, but never amplify above 8x.
                             TARGET_PEAK = 0.90
                             MAX_GAIN = 8.0
 
@@ -392,7 +451,7 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
                                 last_x, last_y = X, Y
 
                 else:
-                    # PROCESSING â€” audio-driven radius + circular wiggle
+                    # PROCESSING — audio-driven radius + circular wiggle
                     _pulse_phase = (_pulse_phase + 0.06) % (2 * np.pi)  # subtle motion only
                     # 1) Read the current amplitude + recent waveform of loading.wav
 
@@ -413,13 +472,13 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
                     else:
                         ring_wave = np.zeros(720, dtype=np.float32)
 
-                    # 2) Map amplitude to base radius scaling (more â€œone-to-oneâ€ feel)
-                    #    Increase LEVEL_GAIN to make size swings stronger (try 0.6â€“1.0)
+                    # 2) Map amplitude to base radius scaling (more “one-to-one” feel)
+                    #    Increase LEVEL_GAIN to make size swings stronger (try 0.6–1.0)
                     LEVEL_GAIN = 0.75
                     pulse = 1.0 + LEVEL_GAIN * level
 
                     # 3) Wiggle strength around the ring (how spiky the line looks)
-                    #    Try 0.20â€“0.40 for pronounced wiggle
+                    #    Try 0.20–0.40 for pronounced wiggle
                     WIGGLE_GAIN = 0.30
                     w = max(1, _waveform_canvas.winfo_width())
                     h = max(1, _waveform_canvas.winfo_height())
@@ -475,11 +534,11 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
     except Exception:
         logger.exception("Failed to open waveform overlay window")
 
-def set_waveform_processing(message: str = "Processingâ€¦") -> None:
+def set_waveform_processing(message: str = "Processing…") -> None:
     global _waveform_mode, _waveform_msg, _pulse_phase
     _waveform_mode = "processing"
     _waveform_msg = message
-    _pulse_phase = 0.0   # â† new
+    _pulse_phase = 0.0   # ← new
 
 def hide_waveform_overlay() -> None:
     global _waveform_win, _waveform_canvas, _waveform_job, _waveform_provider
@@ -504,7 +563,7 @@ def hide_waveform_overlay() -> None:
         _waveform_job = None
         _waveform_provider = None
         _waveform_mode = "live"
-        _waveform_msg = "Processingâ€¦"
+        _waveform_msg = "Processing…"
 
 # ---------------- Splash (1s) ----------------
 def show_splash_screen(duration_ms: int) -> None:
@@ -559,7 +618,7 @@ def show_splash_screen(duration_ms: int) -> None:
     accent = ttk.Frame(content, style="AccentLine.TFrame")
     accent.configure(height=2)
     accent.pack(fill=tk.X, pady=(8, 16))
-    ttk.Label(content, text="Initializing voice systemsâ€¦", style="Subtitle.TLabel",
+    ttk.Label(content, text="Initializing voice systems…", style="Subtitle.TLabel",
               wraplength=240, justify=tk.CENTER).pack(pady=(0, 16))
 
     progress = ttk.Progressbar(content, mode="indeterminate", length=220,
@@ -662,7 +721,7 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
     def make_card(title: str, desc: str, mode_value: str, primary: bool) -> None:
         card = ttk.Frame(cards, style="ModernCard.TFrame", padding=(22, 20))
         card.pack(fill=tk.X, pady=8)
-        label_text = f"MODE Â· {mode_value.replace('_', ' ').upper()}"
+        label_text = f"MODE · {mode_value.replace('_', ' ').upper()}"
         ttk.Label(card, text=label_text, style="PillMuted.TLabel").pack(anchor=tk.W)
         accent_inner = ttk.Frame(card, style="AccentLine.TFrame")
         accent_inner.configure(height=2)
@@ -1071,7 +1130,7 @@ class ManagementWindow:
         header.pack(fill=tk.X)
         ttk.Label(header, text="CtrlSpeak Control", style="Title.TLabel").pack(anchor=tk.W)
         build_label = "Client Only" if CLIENT_ONLY_BUILD else "Client + Server"
-        ttk.Label(header, text=f"Build {APP_VERSION} Â· {build_label}", style="Subtitle.TLabel").pack(anchor=tk.W, pady=(10, 0))
+        ttk.Label(header, text=f"Build {APP_VERSION} · {build_label}", style="Subtitle.TLabel").pack(anchor=tk.W, pady=(10, 0))
         header_accent = ttk.Frame(header, style="AccentLine.TFrame")
         header_accent.configure(height=2)
         header_accent.pack(fill=tk.X, pady=(18, 0))
@@ -1103,14 +1162,29 @@ class ManagementWindow:
         device_accent = ttk.Frame(device_card, style="AccentLine.TFrame")
         device_accent.configure(height=2)
         device_accent.pack(fill=tk.X, pady=(10, 12))
-        self.device_var = tk.StringVar(value=get_device_preference())
+        pref = get_device_preference()
+        if pref not in {"cpu", "cuda"}:
+            pref = "cpu"
+        self.cuda_supported = cuda_driver_available()
+        if pref == "cuda" and not self.cuda_supported:
+            try:
+                set_device_preference("cpu")
+            except Exception:
+                logger.exception("Failed to reset device preference to CPU when CUDA is unavailable")
+            pref = "cpu"
+        self.device_var = tk.StringVar(value=pref)
         device_row = ttk.Frame(device_card, style="ModernCardInner.TFrame")
         device_row.pack(fill=tk.X, pady=(14, 10))
         ttk.Radiobutton(device_row, text="CPU", variable=self.device_var, value="cpu",
                         style="Modern.TRadiobutton").pack(side=tk.LEFT, padx=(0, 18))
-        ttk.Radiobutton(device_row, text="GPU (CUDA)", variable=self.device_var, value="cuda",
-                        style="Modern.TRadiobutton").pack(side=tk.LEFT)
+        self.cuda_radio: Optional[ttk.Radiobutton] = None
+        if self.cuda_supported:
+            self.cuda_radio = ttk.Radiobutton(device_row, text="GPU (CUDA)", variable=self.device_var, value="cuda",
+                                             style="Modern.TRadiobutton")
+            self.cuda_radio.pack(side=tk.LEFT)
         self.cuda_status = tk.StringVar()
+        if not self.cuda_supported:
+            self.cuda_status.set("CUDA acceleration is unavailable on this system (no compatible GPU detected).")
         ttk.Label(device_card, textvariable=self.cuda_status, style="Caption.TLabel").pack(anchor=tk.W, pady=(4, 0))
         device_buttons = ttk.Frame(device_card, style="ModernCardInner.TFrame")
         device_buttons.pack(fill=tk.X, pady=(16, 0))
@@ -1120,6 +1194,11 @@ class ManagementWindow:
         self.install_cuda_btn = ttk.Button(device_buttons, text="Install or repair CUDA", style="Subtle.TButton",
                                            command=self._install_cuda)
         self.install_cuda_btn.pack(side=tk.LEFT, padx=(12, 0))
+        if not self.cuda_supported:
+            try:
+                self.install_cuda_btn.state(["disabled"])
+            except Exception:
+                self.install_cuda_btn.configure(state="disabled")
 
         # Model selection
         model_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
@@ -1309,10 +1388,18 @@ class ManagementWindow:
         with settings_lock:
             mode = settings.get("mode") or "unknown"
         device_pref = get_device_preference()
+        if device_pref not in {"cpu", "cuda"}:
+            device_pref = "cpu"
+        if device_pref == "cuda" and not self.cuda_supported:
+            device_pref = "cpu"
+            try:
+                set_device_preference("cpu")
+            except Exception:
+                logger.exception("Failed to persist CPU preference after CUDA became unavailable")
         self.device_var.set(device_pref)
-        has_cuda_files = cuda_runtime_files_present()
+        has_cuda_files = cuda_runtime_files_present() if self.cuda_supported else False
         cuda_ready = False
-        if device_pref == "cuda" and has_cuda_files:
+        if self.cuda_supported and device_pref == "cuda" and has_cuda_files:
             cuda_ready = cuda_runtime_ready(ignore_preference=True, quiet=True)
         model_name = get_current_model_name()
         self.mode_badge.configure(text=f"MODE \uFFFD {mode.upper()}", style="PillAccent.TLabel")
@@ -1338,7 +1425,9 @@ class ManagementWindow:
         ]
         self.status_var.set("\n".join(status_parts))
         self.server_status_var.set(f"Network: {describe_server_status()}")
-        if device_pref == "cuda":
+        if not self.cuda_supported:
+            cuda_text = "CUDA acceleration is unavailable on this system (no compatible GPU detected)."
+        elif device_pref == "cuda":
             cuda_text = ("CUDA runtime active." if cuda_ready
                          else "CUDA runtime not ready; using CPU instead.")
         elif has_cuda_files:
@@ -1561,24 +1650,43 @@ class ManagementWindow:
             requested = "cpu"
 
         if requested == "cuda":
+            if not self.cuda_supported:
+                self.device_var.set("cpu")
+                self.cuda_status.set("CUDA acceleration is unavailable on this system (no compatible GPU detected).")
+                try:
+                    messagebox.showinfo(
+                        "CUDA",
+                        "This system does not have a CUDA-capable GPU. Staying on CPU instead.",
+                        parent=self.window,
+                    )
+                except Exception:
+                    logger.exception("Failed to present CUDA unavailable message box")
+                return
+
             staged = cuda_runtime_files_present()
             if not staged:
                 staged = ensure_cuda_runtime_from_existing()
 
-            if not staged:
-                logger.warning("CUDA device selection requested but no runtime files were staged; staying on CPU.")
-                self.device_var.set("cpu")
-                set_device_preference("cpu")
-                self.cuda_status.set("CUDA runtime not staged. Use Install or repair CUDA to configure it.")
-                self._reload_transcriber_async(
-                    progress_message="Applying device preference...",
-                    status_var=self.cuda_status,
-                    notify_context="Device setup failed",
-                )
-                return
+            if staged and not cuda_runtime_ready(ignore_preference=True, quiet=True):
+                logger.warning("CUDA runtime files failed validation; attempting reinstall.")
+                staged = False
 
-            if not cuda_runtime_ready(ignore_preference=True, quiet=True):
-                logger.warning("CUDA runtime files were staged but validation failed; staying on CPU.")
+            if not staged:
+                if not install_cuda_runtime_with_progress(self.window):
+                    logger.warning("CUDA runtime preparation failed during download attempt; staying on CPU.")
+                    self.device_var.set("cpu")
+                    set_device_preference("cpu")
+                    self.cuda_status.set("CUDA runtime not ready; using CPU instead.")
+                    self._reload_transcriber_async(
+                        progress_message="Applying device preference...",
+                        status_var=self.cuda_status,
+                        notify_context="Device setup failed",
+                    )
+                    return
+                staged = cuda_runtime_files_present()
+
+            if not staged or not cuda_runtime_ready(ignore_preference=True, quiet=True):
+                logger.warning("CUDA runtime is still unavailable after installation; staying on CPU.")
                 self.device_var.set("cpu")
                 set_device_preference("cpu")
                 self.cuda_status.set("CUDA runtime not ready; using CPU instead.")
@@ -1600,6 +1708,12 @@ class ManagementWindow:
 
 
     def _install_cuda(self):
+        if not self.cuda_supported:
+            try:
+                messagebox.showinfo("CUDA", "This system does not have a CUDA-capable GPU.", parent=self.window)
+            except Exception:
+                logger.exception("Failed to present CUDA unavailable message box")
+            return
         if ensure_cuda_runtime_from_existing():
             messagebox.showinfo("CUDA", "Reused existing CUDA runtime for CtrlSpeak.", parent=self.window)
         elif install_cuda_runtime_with_progress(self.window):
@@ -1630,7 +1744,7 @@ class ManagementWindow:
             messagebox.showinfo("Model", f"Active model set to {name}.", parent=self.window)
 
         self._reload_transcriber_async(
-            progress_message="Loading modelâ€¦",
+            progress_message="Loading model…",
             status_var=self.model_status,
             notify_context="Model load failed",
             success_callback=on_success,
@@ -1661,8 +1775,8 @@ class ManagementWindow:
         stop_client_listener(); self.refresh_status()
 
     def refresh_servers(self) -> None:
-        self.refresh_button.state(["disabled"]); self.refresh_button.config(text="Scanningâ€¦")
-        self.server_status_var.set("Scanning for serversâ€¦")
+        self.refresh_button.state(["disabled"]); self.refresh_button.config(text="Scanning…")
+        self.server_status_var.set("Scanning for servers…")
 
         def worker() -> None:
             try:
