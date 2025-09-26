@@ -63,8 +63,20 @@ def main(argv: list[str]) -> int:
     logger.info("Loading configuration settings")
     load_settings()
 
-    if getattr(args, "setup_cuda", False):
-        from utils.models import ensure_cuda_runtime_from_existing, install_cuda_runtime_with_progress
+    if getattr(args, "cuda_only", False):
+        from utils.models import (
+            ensure_cuda_runtime_from_existing,
+            install_cuda_runtime_with_progress,
+            cuda_driver_available,
+        )
+
+        if not cuda_driver_available():
+            logger.error("CUDA setup requested but no CUDA-capable GPU was detected on this system.")
+            try:
+                print("CUDA setup aborted: no CUDA-capable GPU detected.", file=sys.stderr)
+            except Exception:
+                logger.debug("Failed to write CUDA hardware warning to stderr", exc_info=True)
+            return 1
 
         success = ensure_cuda_runtime_from_existing()
         if not success:

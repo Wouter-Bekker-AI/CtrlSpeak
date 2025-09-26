@@ -1113,7 +1113,13 @@ def parse_cli_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--uninstall", action="store_true", help="Remove CtrlSpeak and all local data")
     parser.add_argument("--auto-setup", choices=["client", "client_server"], help="Configure CtrlSpeak without prompts")
     parser.add_argument("--force-sendinput", action="store_true", help="Force SendInput-based insertion (debug)")
-    parser.add_argument("--setup-cuda", action="store_true", help="Prepare CUDA runtime support without launching the UI")
+    parser.add_argument(
+        "--download-cuda-only",
+        "--setup-cuda",
+        action="store_true",
+        dest="cuda_only",
+        help="Download CUDA runtime assets and exit without launching the UI",
+    )
     parser.add_argument("--automation-flow", action="store_true", help="Run the automated end-to-end regression workflow")
     args, _ = parser.parse_known_args(argv[1:])
     return args

@@ -20,4 +20,4 @@ The spec collects the native data required by `faster_whisper`, `ctranslate2`, a
 ## First-run behavior
 - Creates the per-user application data directory (for example `%APPDATA%\CtrlSpeak` on Windows) with subfolders `models/`, `cuda/`, `temp/`, and `logs/`.
 - Automatically downloads the default `small` Whisper model so transcription works on CPU immediately.
-- Defers CUDA preparation until the user runs `python main.py --setup-cuda` or chooses **Install or repair CUDA** in the management window; no GPU installers are run during a normal startup.
+- Defers CUDA preparation until the user runs `python main.py --download-cuda-only` (alias: `--setup-cuda`) or chooses **Install or repair CUDA** in the management window; when no CUDA-capable GPU is detected the command exits immediately and the UI leaves the GPU option hidden, so the packaged build never attempts a CUDA install on unsupported hardware.

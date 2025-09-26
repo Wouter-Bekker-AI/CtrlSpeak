@@ -7,6 +7,8 @@ import time
 import threading
 import subprocess
 import shutil
+import json
+import zipfile
 import requests
 import platform
 from datetime import datetime
@@ -61,10 +63,69 @@ MODEL_REPO_OVERRIDE   = os.environ.get("CTRLSPEAK_MODEL_REPO")
 MODEL_ROOT_PATH = get_config_dir() / "models"
 MODEL_TRACE_PATH = get_config_dir() / "logs" / "model_download_trace.log"
 
+CUDA_TRACE_PATH = get_config_dir() / "logs" / "cuda_download_trace.log"
+
+CUDA_DOWNLOAD_SPEC: dict[str, list[dict[str, str]]] = {
+    "win_amd64": [
+        {"package": "nvidia-cuda-runtime-cu12", "version": "12.3.101"},
+        {"package": "nvidia-cublas-cu12", "version": "12.9.1.4"},
+        {"package": "nvidia-cudnn-cu12", "version": "9.13.0.50"},
+    ],
+}
+
 CUDA_RUNTIME_EXPECTED_BYTES = int(1.2 * (1024 ** 3))
 
 # CUDA search: also look in %APPDATA%/CtrlSpeak/cuda
 cuda_paths_initialized = False
+
+_cuda_driver_probe: Optional[bool] = None
+
+
+def _probe_cuda_driver() -> bool:
+    if sys.platform.startswith("win"):
+        try:
+            nvcuda = ctypes.windll.nvcuda  # type: ignore[attr-defined]
+        except Exception:
+            try:
+                ctypes.WinDLL("nvcuda.dll")
+                nvcuda = ctypes.windll.nvcuda  # type: ignore[attr-defined]
+            except Exception:
+                logger.debug("CUDA driver DLL 'nvcuda.dll' was not found while probing for GPU support.", exc_info=True)
+                return False
+        try:
+            cu_init = nvcuda.cuInit  # type: ignore[attr-defined]
+            cu_init.argtypes = [ctypes.c_uint]
+            cu_init.restype = ctypes.c_int
+            result = cu_init(0)
+        except Exception:
+            logger.debug("Failed to invoke cuInit while probing for CUDA hardware.", exc_info=True)
+            return False
+        if result == 100:  # CUDA_ERROR_NO_DEVICE
+            return False
+        if result != 0:
+            logger.debug("cuInit returned error code %s during CUDA hardware probe.", result)
+            return False
+        try:
+            cu_get_count = nvcuda.cuDeviceGetCount  # type: ignore[attr-defined]
+            cu_get_count.argtypes = [ctypes.POINTER(ctypes.c_int)]
+            cu_get_count.restype = ctypes.c_int
+            count = ctypes.c_int(0)
+            status = cu_get_count(ctypes.byref(count))
+        except Exception:
+            logger.debug("Failed to query CUDA device count during hardware probe.", exc_info=True)
+            return False
+        if status != 0:
+            logger.debug("cuDeviceGetCount returned error code %s during hardware probe.", status)
+            return False
+        return count.value > 0
+    return False
+
+
+def cuda_driver_available() -> bool:
+    global _cuda_driver_probe
+    if _cuda_driver_probe is None:
+        _cuda_driver_probe = _probe_cuda_driver()
+    return bool(_cuda_driver_probe)
 
 logger = get_logger(__name__)
 _trace_lock = threading.Lock()
@@ -92,6 +153,31 @@ def trace_model_download_step(current_step: str, expected_next: Optional[str] = 
                     handle.write(f"{timestamp} | {step}\n")
     except Exception:
         logger.exception("Failed to write model download trace entry")
+
+
+
+def trace_cuda_download_step(current_step: str, expected_next: Optional[str] = None) -> None:
+    """Log progress for the CUDA runtime download workflow."""
+
+    step = current_step.strip()
+    next_step = (expected_next or "").strip()
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S.%f")
+
+    try:
+        with _trace_lock:
+            try:
+                CUDA_TRACE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                logger.exception("Failed to ensure CUDA trace directory exists")
+                return
+
+            with CUDA_TRACE_PATH.open("a", encoding="utf-8") as handle:
+                if next_step:
+                    handle.write(f"{timestamp} | {step} | next: {next_step}\n")
+                else:
+                    handle.write(f"{timestamp} | {step}\n")
+    except Exception:
+        logger.exception("Failed to write CUDA download trace entry")
 
 
 # ---------------- Settings-backed getters/setters ----------------
@@ -432,6 +518,303 @@ def _copy_from_system_cuda(dest_root: Path) -> bool:
     return staged
 
 
+def _resolve_cuda_wheel(package: str, version: str, platform_tag: str) -> dict[str, object]:
+    url = f"https://pypi.org/pypi/{package}/{version}/json"
+    trace_cuda_download_step(f"resolve {package}", url)
+    response = requests.get(url, timeout=30)
+    if response.status_code != 200:
+        raise RuntimeError(f"Failed to resolve metadata for {package}: HTTP {response.status_code}")
+    data = response.json()
+    for entry in data.get("urls", []):
+        filename = entry.get("filename") or ""
+        if platform_tag in filename and filename.endswith(".whl"):
+            return {
+                "url": entry["url"],
+                "filename": filename,
+                "size": int(entry.get("size") or 0),
+            }
+    raise RuntimeError(f"No compatible wheel found for {package} ({platform_tag})")
+
+
+def _clean_cuda_destination(dest_root: Path) -> None:
+    if dest_root.exists():
+        shutil.rmtree(dest_root)
+    dest_root.mkdir(parents=True, exist_ok=True)
+
+
+def _extract_cuda_wheel(wheel_path: Path, dest_root: Path) -> None:
+    trace_cuda_download_step(f"extract {wheel_path.name}", "unpack wheel")
+    with zipfile.ZipFile(wheel_path, "r") as archive:
+        for member in archive.infolist():
+            name = member.filename
+            if not name.startswith("nvidia/") or name.endswith("/"):
+                continue
+            relative = Path(*Path(name).parts[1:])
+            target = dest_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(member) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+
+def _sync_cuda_bins(dest_root: Path) -> None:
+    bin_root = dest_root / "bin"
+    if bin_root.exists():
+        shutil.rmtree(bin_root)
+    bin_root.mkdir(parents=True, exist_ok=True)
+    for sub in ("cuda_runtime/bin", "cudnn/bin", "cublas/bin"):
+        candidate = dest_root / sub
+        if not candidate.exists():
+            continue
+        for file in candidate.iterdir():
+            if file.is_file():
+                shutil.copy2(file, bin_root / file.name)
+
+
+def cuda_device_available() -> bool:
+    try:
+        return ctranslate2.get_cuda_device_count() > 0
+    except Exception:
+        logger.debug("CUDA availability probe failed", exc_info=True)
+        return False
+
+
+def _download_cuda_runtime(progress_queue: MPQueue | None = None) -> None:
+    def _put(payload: Tuple[str, ...]) -> None:
+        if progress_queue is None:
+            return
+        try:
+            progress_queue.put_nowait(payload)
+        except Exception:
+            pass
+
+    try:
+        platform_tag = "win_amd64" if sys.platform.startswith("win") else None
+        if not platform_tag or platform_tag not in CUDA_DOWNLOAD_SPEC:
+            raise RuntimeError("CUDA runtime downloads are only supported on Windows (win_amd64).")
+
+        packages = CUDA_DOWNLOAD_SPEC[platform_tag]
+        dest_root = _cuda_destination_root()
+        download_root = dest_root.parent / "cuda-download-tmp"
+        if download_root.exists():
+            shutil.rmtree(download_root)
+        download_root.mkdir(parents=True, exist_ok=True)
+
+        _clean_cuda_destination(dest_root)
+        metadata: list[dict[str, object]] = []
+        total_known = 0
+        for spec in packages:
+            package = spec["package"]
+            version = spec["version"]
+            wheel_meta = _resolve_cuda_wheel(package, version, platform_tag)
+            metadata.append({**wheel_meta, "package": package})
+            size = int(wheel_meta.get("size") or 0)
+            if size > 0:
+                total_known += size
+
+        downloaded = 0
+        overall_total = total_known
+        session = requests.Session()
+        session.headers.setdefault("User-Agent", "CtrlSpeak/0.6.0")
+
+        try:
+            for entry in metadata:
+                package = entry["package"]
+                filename = entry["filename"]
+                url = entry["url"]
+                size_hint = int(entry.get("size") or 0)
+
+                trace_cuda_download_step(f"downloading {package}", filename)
+                _put(("stage", f"Downloading {package}"))
+
+                dest_file = download_root / filename
+                part_file = dest_file.with_suffix(dest_file.suffix + ".part")
+                if part_file.exists():
+                    part_file.unlink()
+
+                with session.get(url, stream=True, timeout=(10, 90)) as response:
+                    response.raise_for_status()
+                    content_length = response.headers.get("Content-Length")
+                    file_total = int(content_length) if content_length and content_length.isdigit() else size_hint
+                    with open(part_file, "wb") as handle:
+                        for chunk in response.iter_content(chunk_size=1 << 19):
+                            if not chunk:
+                                continue
+                            handle.write(chunk)
+                            downloaded += len(chunk)
+                            if overall_total > 0:
+                                _put(("progress", downloaded, overall_total))
+                            elif file_total > 0:
+                                _put(("progress", downloaded, file_total))
+                            else:
+                                _put(("progress", downloaded, 0))
+                part_file.replace(dest_file)
+
+                _put(("stage", f"Extracting {filename}"))
+                _extract_cuda_wheel(dest_file, dest_root)
+
+        finally:
+            session.close()
+            shutil.rmtree(download_root, ignore_errors=True)
+
+        _sync_cuda_bins(dest_root)
+        trace_cuda_download_step("cuda download complete", "validating runtime")
+        global cuda_paths_initialized
+        cuda_paths_initialized = False
+        if not cuda_runtime_ready(ignore_preference=True, quiet=True):
+            raise RuntimeError("CUDA runtime validation failed after download")
+
+        _put(("done",))
+    except Exception as exc:
+        logger.exception("CUDA runtime download failed")
+        trace_cuda_download_step("cuda download failed", str(exc))
+        if progress_queue is not None:
+            try:
+                progress_queue.put_nowait(("error", f"CUDA download failed: {exc}"))
+            except Exception:
+                pass
+        else:
+            raise
+
+
+def download_cuda_runtime_headless() -> bool:
+    try:
+        _download_cuda_runtime(progress_queue=None)
+        return True
+    except Exception:
+        logger.exception("CUDA runtime download failed in headless mode")
+        return False
+
+
+def download_cuda_runtime_with_gui() -> bool:
+    progress_queue: MPQueue = MPQueue()
+    process = Process(target=_download_cuda_runtime, args=(progress_queue,))
+    process.daemon = True
+    process.start()
+
+    cancel_requested = threading.Event()
+
+    def _request_cancel() -> None:
+        if cancel_requested.is_set():
+            return
+        cancel_requested.set()
+        trace_cuda_download_step("cuda download cancel requested", "terminate worker")
+        if process.is_alive():
+            try:
+                process.terminate()
+            except Exception:
+                logger.exception("Failed to terminate CUDA download process")
+        try:
+            progress_queue.put_nowait(("cancelled",))
+        except Exception:
+            pass
+
+    initial_message = (
+        "CtrlSpeak is downloading CUDA runtime components. Use Cancel download if you need to stop the download."
+    )
+
+    lockout_open = False
+    try:
+        ui_show_lockout_window(initial_message, cancel_callback=_request_cancel)
+        lockout_open = True
+    except Exception:
+        logger.exception("Failed to show lockout window during CUDA download")
+
+    window = WelcomeWindow("CUDA runtime files", progress_queue, process)
+    status, error_message = window.run()
+
+    process.join(timeout=1.0)
+    if process.is_alive():
+        try:
+            process.terminate()
+        except Exception:
+            logger.exception("Failed to terminate lingering CUDA download process")
+        process.join(timeout=0.5)
+
+    try:
+        progress_queue.close()
+    except Exception:
+        pass
+    try:
+        progress_queue.join_thread()
+    except Exception:
+        pass
+
+    if status == "success":
+        try:
+            if lockout_open:
+                ui_close_lockout_window("CUDA runtime download completed successfully.")
+        except Exception:
+            logger.exception("Failed to close lockout window after CUDA download")
+        return True
+
+    message = error_message or "CtrlSpeak could not download CUDA runtime components. Please try again."
+    try:
+        if lockout_open:
+            ui_close_lockout_window(message)
+    except Exception:
+        logger.exception("Failed to close lockout window after CUDA download failure")
+    return False
+
+
+def _resolve_cuda_wheel(package: str, version: str, platform_tag: str) -> dict[str, object]:
+    url = f'https://pypi.org/pypi/{package}/{version}/json'
+    trace_cuda_download_step(f'resolve {package}', url)
+    response = requests.get(url, timeout=30)
+    if response.status_code != 200:
+        raise RuntimeError(f'Failed to resolve metadata for {package}: HTTP {response.status_code}')
+    data = response.json()
+    for entry in data.get('urls', []):
+        filename = entry.get('filename') or ''
+        if platform_tag in filename and filename.endswith('.whl'):
+            return {
+                'url': entry['url'],
+                'filename': filename,
+                'size': int(entry.get('size') or 0),
+            }
+    raise RuntimeError(f'No compatible wheel found for {package} ({platform_tag})')
+
+
+def _clean_cuda_destination(dest_root: Path) -> None:
+    if dest_root.exists():
+        shutil.rmtree(dest_root)
+    dest_root.mkdir(parents=True, exist_ok=True)
+
+
+def _extract_cuda_wheel(wheel_path: Path, dest_root: Path) -> None:
+    trace_cuda_download_step(f'extract {wheel_path.name}', 'unpack wheel')
+    with zipfile.ZipFile(wheel_path, 'r') as archive:
+        for member in archive.infolist():
+            name = member.filename
+            if not name.startswith('nvidia/') or name.endswith('/'):
+                continue
+            relative = Path(*Path(name).parts[1:])
+            target = dest_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(member) as src, open(target, 'wb') as dst:
+                shutil.copyfileobj(src, dst)
+
+
+def _sync_cuda_bins(dest_root: Path) -> None:
+    bin_root = dest_root / 'bin'
+    if bin_root.exists():
+        shutil.rmtree(bin_root)
+    bin_root.mkdir(parents=True, exist_ok=True)
+    for sub in ('cuda_runtime/bin', 'cudnn/bin', 'cublas/bin'):
+        candidate = dest_root / sub
+        if not candidate.exists():
+            continue
+        for file in candidate.iterdir():
+            if file.is_file():
+                shutil.copy2(file, bin_root / file.name)
+
+
+def cuda_device_available() -> bool:
+    try:
+        return ctranslate2.get_cuda_device_count() > 0
+    except Exception:
+        logger.debug('CUDA availability probe failed', exc_info=True)
+        return False
+
 def stage_cuda_runtime_from_existing() -> bool:
     dest_root = _cuda_destination_root()
 
@@ -488,82 +871,15 @@ def _run_cmd_stream(cmd: List[str], timeout: int | None = None) -> int:
 
 
 def install_cuda_runtime_with_progress(parent=None) -> bool:
-    """Install or repair CUDA runtime support for CtrlSpeak."""
+    """Download or reuse CUDA runtime assets, optionally showing the GUI."""
 
     if ensure_cuda_runtime_from_existing():
         return True
 
-    try:
-        import pip  # type: ignore
-    except ModuleNotFoundError:
-        logger.info("pip module not found; bootstrapping ensurepip before CUDA install")
-        ensure_rc = _run_cmd_stream([sys.executable, "-m", "ensurepip", "--upgrade"], timeout=300)
-        if ensure_rc != 0:
-            notify("CUDA runtime installation failed because pip could not be bootstrapped.")
-            try:
-                ui_close_lockout_window("CtrlSpeak could not install pip. GPU support remains unavailable; continuing with CPU.")
-            except Exception:
-                logger.exception("Failed to close lockout window after ensurepip failure")
-            return False
+    if parent is None:
+        return download_cuda_runtime_headless()
 
-    pkgs = ["nvidia-cuda-runtime-cu12", "nvidia-cublas-cu12", "nvidia-cudnn-cu12"]
-    cmd = [
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "--quiet",
-        "--disable-pip-version-check",
-        "--extra-index-url",
-        "https://pypi.nvidia.com",
-        *pkgs,
-    ]
-
-    lockout_open = False
-    try:
-        ui_show_lockout_window(
-            "CtrlSpeak is installing CUDA runtime components required for GPU transcription. "
-            "Please wait for this to finish."
-        )
-        lockout_open = True
-    except Exception:
-        logger.exception("Failed to show lockout window during CUDA installation")
-
-    rc = _run_cmd_stream(cmd, timeout=600)
-    if rc != 0:
-        notify("CUDA runtime installation failed (pip returned non-zero).")
-        if lockout_open:
-            try:
-                ui_close_lockout_window("CUDA runtime installation failed. CtrlSpeak will continue using the CPU.")
-            except Exception:
-                logger.exception("Failed to close lockout window after CUDA installation failure")
-        return False
-
-    if not ensure_cuda_runtime_from_existing():
-        notify("CUDA runtime installation completed, but validation failed. CtrlSpeak will continue using the CPU.")
-        if lockout_open:
-            try:
-                ui_close_lockout_window(
-                    "CUDA runtime installation completed, but validation failed. CtrlSpeak will continue using the CPU."
-                )
-            except Exception:
-                logger.exception("Failed to close lockout window after CUDA validation failure")
-        return False
-
-    if lockout_open:
-        try:
-            ui_close_lockout_window(
-                "CUDA runtime components were installed successfully. CtrlSpeak will continue preparing the Whisper model."
-            )
-        except Exception:
-            logger.exception("Failed to close lockout window after CUDA installation")
-
-    return True
-
-
-
-# ---------------- Download dialog (GUI) ----------------
-class CancelledDownload(Exception): pass
+    return download_cuda_runtime_with_gui()
 
 
 def format_bytes(value: float) -> str:
@@ -650,6 +966,8 @@ def _load_fun_facts() -> List[str]:
 class WelcomeWindow:
     def __init__(self, model_name: str, progress_queue: MPQueue, process: Process):
         self.model_name = model_name
+        label = (model_name or "Whisper model").strip()
+        self._progress_label = label or "Whisper model"
         self.progress_queue = progress_queue
         self.process = process
         self.result: Optional[str] = None
@@ -1042,15 +1360,16 @@ class WelcomeWindow:
                 _, current, total = message
                 try:
                     current_mb = current / (1024 * 1024)
+                    subject = self._progress_label
                     if total and total > 0:
                         total_mb = total / (1024 * 1024)
                         percent = max(0, min(99, int(current * 100 / total)))
                         ui_update_lockout_message(
-                            f"Downloading Whisper model ({current_mb:.1f}/{total_mb:.1f} MB, {percent}% complete)"
+                            f"Downloading {subject} ({current_mb:.1f}/{total_mb:.1f} MB, {percent}% complete)"
                         )
                     else:
                         ui_update_lockout_message(
-                            f"Downloading Whisper model ({current_mb:.1f} MB downloaded)"
+                            f"Downloading {subject} ({current_mb:.1f} MB downloaded)"
                         )
                 except Exception:
                     logger.exception("Failed to format download progress message")
@@ -1083,7 +1402,7 @@ class WelcomeWindow:
         else:
             self.result = "error"
             if self.error_message is None:
-                self.error_message = "CtrlSpeak could not download the Whisper model. Please try again."
+                self.error_message = f"CtrlSpeak could not download {self._progress_label}. Please try again."
 
     def _finalize(self) -> None:
         if self._closing:
@@ -1328,7 +1647,7 @@ def download_model_with_gui(
     except Exception:
         logger.exception("Failed to show lockout window during model download")
 
-    window = WelcomeWindow(model_name, progress_queue, process)
+    window = WelcomeWindow(f"Whisper model ({model_name})", progress_queue, process)
     status, error_message = window.run()
 
     trace_model_download_step(
