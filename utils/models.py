@@ -11,16 +11,16 @@ import json
 import zipfile
 import requests
 import platform
+import hashlib
+import importlib
 from datetime import datetime
 from pathlib import Path
 from queue import Empty
-from typing import Optional, List, Set, Callable, Tuple, Dict, Any
+from typing import Optional, List, Set, Callable, Tuple, Dict, Any, TYPE_CHECKING
 
 from multiprocessing import Process, Queue as MPQueue
 
 import ctypes
-import ctranslate2
-from faster_whisper import WhisperModel
 try:  # pragma: no cover - optional dependency rarely installed
     import hf_xet  # type: ignore  # noqa: F401
 except ImportError:
@@ -30,6 +30,13 @@ from huggingface_hub import HfApi, hf_hub_url
 import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageTk
+
+if TYPE_CHECKING:  # pragma: no cover - typing aid only
+    import ctranslate2 as _ctranslate2_mod
+    from faster_whisper import WhisperModel as WhisperModelType
+else:  # pragma: no cover - runtime fallback for type hints
+    _ctranslate2_mod = None  # type: ignore[assignment]
+    WhisperModelType = Any  # type: ignore[misc,assignment]
 
 try:  # pragma: no cover - optional dependency for richer playback
     from ffpyplayer.player import MediaPlayer  # type: ignore
@@ -65,20 +72,24 @@ MODEL_TRACE_PATH = get_config_dir() / "logs" / "model_download_trace.log"
 
 CUDA_TRACE_PATH = get_config_dir() / "logs" / "cuda_download_trace.log"
 
+CUDA_RUNTIME_VERSION = "12.9.79"
+CUDA_INSTALL_BASE = get_config_dir() / "cuda"
+CUDA_DOWNLOAD_CACHE = CUDA_INSTALL_BASE / "downloads"
+
 CUDA_DOWNLOAD_SPEC: dict[str, list[dict[str, str]]] = {
     "win_amd64": [
-        {"package": "nvidia-cuda-runtime-cu12", "version": "12.3.101"},
+        {"package": "nvidia-cuda-runtime-cu12", "version": "12.9.79"},
         {"package": "nvidia-cublas-cu12", "version": "12.9.1.4"},
         {"package": "nvidia-cudnn-cu12", "version": "9.13.0.50"},
     ],
 }
 
-CUDA_RUNTIME_EXPECTED_BYTES = int(1.2 * (1024 ** 3))
-
 # CUDA search: also look in %APPDATA%/CtrlSpeak/cuda
 cuda_paths_initialized = False
 
 _cuda_driver_probe: Optional[bool] = None
+_ctranslate2_runtime = None
+_whisper_model_class: Optional[type] = None
 
 
 def _probe_cuda_driver() -> bool:
@@ -126,6 +137,28 @@ def cuda_driver_available() -> bool:
     if _cuda_driver_probe is None:
         _cuda_driver_probe = _probe_cuda_driver()
     return bool(_cuda_driver_probe)
+
+
+def _preferred_cuda_root() -> Path:
+    return CUDA_INSTALL_BASE / CUDA_RUNTIME_VERSION
+
+
+def _iter_cuda_roots() -> list[Path]:
+    roots: list[Path] = []
+    preferred = _preferred_cuda_root()
+    roots.append(preferred)
+    legacy = CUDA_INSTALL_BASE
+    if legacy not in roots:
+        roots.append(legacy)
+    return roots
+
+
+def _active_cuda_root() -> Path:
+    for root in _iter_cuda_roots():
+        if root.exists():
+            return root
+    return _preferred_cuda_root()
+
 
 logger = get_logger(__name__)
 _trace_lock = threading.Lock()
@@ -310,16 +343,16 @@ def _model_activation_cache_path(model_short: str) -> Path:
 def get_cuda_dll_dirs() -> list[Path]:
     paths = []
     # user runtime in AppData (preferred first)
-    cuda_root = get_config_dir() / "cuda"
-    for sub in ("bin", "cudnn/bin", "cublas/bin"):
-        paths.append(cuda_root / sub)
+    for root in _iter_cuda_roots():
+        for sub in ("bin", "cuda_runtime/bin", "cublas/bin", "cudnn/bin"):
+            paths.append(root / sub)
     # embedded bundle (if any, e.g., PyInstaller)
     bundle_base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    paths.append(bundle_base / "nvidia" / "cudnn" / "bin")
     paths.append(bundle_base / "nvidia" / "cublas" / "bin")
+    paths.append(bundle_base / "nvidia" / "cudnn" / "bin")
     # site-packages wheels (if present)
-    paths.append(Path(sys.prefix) / "Lib" / "site-packages" / "nvidia" / "cudnn" / "bin")
     paths.append(Path(sys.prefix) / "Lib" / "site-packages" / "nvidia" / "cublas" / "bin")
+    paths.append(Path(sys.prefix) / "Lib" / "site-packages" / "nvidia" / "cudnn" / "bin")
     return paths
 
 
@@ -341,6 +374,26 @@ def configure_cuda_paths() -> None:
     cuda_paths_initialized = True
 
 
+def _import_ctranslate2():
+    global _ctranslate2_runtime
+    if _ctranslate2_runtime is None:
+        configure_cuda_paths()
+        import ctranslate2 as _ctranslate2_module  # noqa: WPS433 - intentional local import
+
+        _ctranslate2_runtime = _ctranslate2_module
+    return _ctranslate2_runtime
+
+
+def _get_whisper_model_class():
+    global _whisper_model_class
+    if _whisper_model_class is None:
+        configure_cuda_paths()
+        from faster_whisper import WhisperModel as _WhisperModel  # noqa: WPS433 - intentional local import
+
+        _whisper_model_class = _WhisperModel
+    return _whisper_model_class
+
+
 def cuda_runtime_ready(*, ignore_preference: bool = False, quiet: bool = False) -> bool:
     """Validate that CUDA DLLs can be loaded for GPU inference."""
 
@@ -357,7 +410,8 @@ def cuda_runtime_ready(*, ignore_preference: bool = False, quiet: bool = False) 
     configure_cuda_paths()
 
     try:
-        if ctranslate2.get_cuda_device_count() <= 0:
+        ct2 = _import_ctranslate2()
+        if ct2.get_cuda_device_count() <= 0:
             return False
     except Exception:
         if quiet:
@@ -367,7 +421,38 @@ def cuda_runtime_ready(*, ignore_preference: bool = False, quiet: bool = False) 
         return False
 
     if sys.platform.startswith("win"):
-        for dll in ("cudnn_ops64_9.dll", "cublas64_12.dll"):
+        required_dlls = ["cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll"]
+
+        cudnn_ops: Optional[str] = None
+        cudnn_core: Optional[str] = None
+        for root in _iter_cuda_roots():
+            bin_dir = root / "bin"
+            if not bin_dir.exists():
+                continue
+            if cudnn_ops is None:
+                matches = sorted(bin_dir.glob("cudnn_ops64_*.dll"), reverse=True)
+                if matches:
+                    cudnn_ops = matches[0].name
+            if cudnn_core is None:
+                matches = sorted(bin_dir.glob("cudnn64_*.dll"), reverse=True)
+                if matches:
+                    cudnn_core = matches[0].name
+            if cudnn_ops and cudnn_core:
+                break
+
+        if not cudnn_ops:
+            message = "Could not locate cudnn_ops64 DLL in staged CUDA runtime"
+            if quiet:
+                logger.debug(message)
+            else:
+                logger.warning(message)
+            return False
+
+        if cudnn_core:
+            required_dlls.append(cudnn_core)
+        required_dlls.append(cudnn_ops)
+
+        for dll in required_dlls:
             try:
                 ctypes.windll.LoadLibrary(dll)
             except OSError as exc:
@@ -382,7 +467,7 @@ def cuda_runtime_ready(*, ignore_preference: bool = False, quiet: bool = False) 
 
 
 def _cuda_destination_root() -> Path:
-    dest_root = get_config_dir() / "cuda"
+    dest_root = _preferred_cuda_root()
     dest_root.mkdir(parents=True, exist_ok=True)
     return dest_root
 
@@ -390,31 +475,46 @@ def _cuda_destination_root() -> Path:
 def cuda_runtime_files_present() -> bool:
     """Return True when essential CUDA runtime files exist under the app data folder."""
 
-    root = get_config_dir() / "cuda"
-    if not root.exists():
-        return False
+    for root in _iter_cuda_roots():
+        if not root.exists():
+            continue
 
-    if sys.platform.startswith("win"):
-        required = (
-            "cudart64_*.dll",
-            "cublas64_*.dll",
-            "cublasLt64_*.dll",
-            "cudnn*.dll",
-        )
-    else:
-        required = (
-            "libcudart.so*",
-            "libcublas.so*",
-            "libcudnn*.so*",
-        )
+        if sys.platform.startswith("win"):
+            required = (
+                "cudart64_*.dll",
+                "cublas64_*.dll",
+                "cublasLt64_*.dll",
+                "cudnn_ops64_*.dll",
+            )
+        else:
+            required = (
+                "libcudart.so*",
+                "libcublas.so*",
+                "libcublasLt.so*",
+                "libcudnn*.so*",
+            )
 
-    for pattern in required:
-        if not any(root.rglob(pattern)):
-            return False
-    return True
+        missing = False
+        for pattern in required:
+            if not any(root.rglob(pattern)):
+                missing = True
+                break
+        if not missing:
+            return True
+    return False
+
+
+def _running_in_frozen_app() -> bool:
+    """Return True when CtrlSpeak is executing from a frozen (PyInstaller) build."""
+
+    return bool(getattr(sys, "frozen", False))
 
 
 def _copy_from_nvidia_packages(dest_root: Path) -> bool:
+    if _running_in_frozen_app():
+        logger.debug("Skipping site-packages CUDA reuse inside frozen executable")
+        return False
+
     staged = False
     prefixes = {Path(sys.prefix)}
     base_prefix = getattr(sys, "base_prefix", None)
@@ -426,7 +526,7 @@ def _copy_from_nvidia_packages(dest_root: Path) -> bool:
         if not package_root.exists():
             continue
 
-        for component in ("cuda_runtime", "cudnn", "cublas"):
+        for component in ("cuda_runtime", "cublas", "cudnn"):
             src = package_root / component
             if not src.exists():
                 continue
@@ -501,11 +601,12 @@ def _copy_from_system_cuda(dest_root: Path) -> bool:
         "cudart64_*.dll",
         "cublas64_*.dll",
         "cublasLt64_*.dll",
+        "nvrtc64_*.dll",
         "nvblas64_*.dll",
-        "cudnn*.dll",
         "libcudart.so*",
         "libcublas.so*",
-        "libcudnn*.so*",
+        "libcublasLt.so*",
+        "libnvrtc.so*",
     )
     for source_dir in candidates:
         for pattern in patterns:
@@ -518,6 +619,39 @@ def _copy_from_system_cuda(dest_root: Path) -> bool:
     return staged
 
 
+
+def stage_cuda_runtime_from_existing() -> bool:
+    dest_root = _cuda_destination_root()
+
+    if cuda_runtime_files_present() and _validate_cuda_runtime_install(dest_root):
+        return True
+
+    staged = False
+    try:
+        staged = _copy_from_nvidia_packages(dest_root) or staged
+        if not staged:
+            staged = _copy_from_system_cuda(dest_root)
+    except Exception:
+        logger.exception("Failed to reuse existing CUDA runtime files")
+        return False
+
+    if not staged:
+        return False
+
+    global cuda_paths_initialized
+    cuda_paths_initialized = False
+    if not _validate_cuda_runtime_install(dest_root):
+        logger.debug("CUDA runtime validation failed after staging existing assets")
+        return False
+
+    return True
+
+
+def ensure_cuda_runtime_from_existing() -> bool:
+    if stage_cuda_runtime_from_existing():
+        logger.info("Reused existing CUDA runtime assets for CtrlSpeak.")
+        return True
+    return False
 def _resolve_cuda_wheel(package: str, version: str, platform_tag: str) -> dict[str, object]:
     url = f"https://pypi.org/pypi/{package}/{version}/json"
     trace_cuda_download_step(f"resolve {package}", url)
@@ -532,14 +666,9 @@ def _resolve_cuda_wheel(package: str, version: str, platform_tag: str) -> dict[s
                 "url": entry["url"],
                 "filename": filename,
                 "size": int(entry.get("size") or 0),
+                "sha256": (entry.get("digests", {}) or {}).get("sha256"),
             }
     raise RuntimeError(f"No compatible wheel found for {package} ({platform_tag})")
-
-
-def _clean_cuda_destination(dest_root: Path) -> None:
-    if dest_root.exists():
-        shutil.rmtree(dest_root)
-    dest_root.mkdir(parents=True, exist_ok=True)
 
 
 def _extract_cuda_wheel(wheel_path: Path, dest_root: Path) -> None:
@@ -561,7 +690,7 @@ def _sync_cuda_bins(dest_root: Path) -> None:
     if bin_root.exists():
         shutil.rmtree(bin_root)
     bin_root.mkdir(parents=True, exist_ok=True)
-    for sub in ("cuda_runtime/bin", "cudnn/bin", "cublas/bin"):
+    for sub in ("cuda_runtime/bin", "cublas/bin", "cudnn/bin"):
         candidate = dest_root / sub
         if not candidate.exists():
             continue
@@ -572,10 +701,122 @@ def _sync_cuda_bins(dest_root: Path) -> None:
 
 def cuda_device_available() -> bool:
     try:
-        return ctranslate2.get_cuda_device_count() > 0
+        ct2 = _import_ctranslate2()
+        return ct2.get_cuda_device_count() > 0
     except Exception:
         logger.debug("CUDA availability probe failed", exc_info=True)
         return False
+
+
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _download_integrity_ok(path: Path, size_hint: int, sha256: Optional[str]) -> bool:
+    if not path.is_file():
+        return False
+    if size_hint > 0 and path.stat().st_size != size_hint:
+        return False
+    if sha256:
+        try:
+            return _hash_file(path) == sha256
+        except Exception:
+            logger.exception("Failed to hash %s while validating CUDA download", path)
+            return False
+    return True
+
+
+def _validate_cuda_runtime_install(root: Path) -> bool:
+    dll_dirs: list[Path] = []
+    for sub in ("bin", "cuda_runtime/bin", "cublas/bin", "cudnn/bin"):
+        candidate = root / sub
+        if candidate.exists():
+            dll_dirs.append(candidate)
+
+    original_path = os.environ.get("PATH", "")
+    handles: list[object] = []
+    try:
+        new_path_parts: list[str] = []
+        for dll_dir in dll_dirs:
+            try:
+                handle = os.add_dll_directory(str(dll_dir))  # type: ignore[attr-defined]
+            except (AttributeError, FileNotFoundError, OSError):
+                handle = None
+            else:
+                handles.append(handle)
+            new_path_parts.append(str(dll_dir))
+        if new_path_parts:
+            prefix = os.pathsep.join(new_path_parts)
+            os.environ["PATH"] = prefix + (os.pathsep + original_path if original_path else "")
+
+        sys.modules.pop("ctranslate2", None)
+        ct2 = importlib.import_module("ctranslate2")
+        if ct2.get_cuda_device_count() <= 0:
+            logger.warning("CUDA validation failed: no CUDA devices reported after staging runtime")
+            return False
+
+        if sys.platform.startswith("win"):
+            required_dlls = ["cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll"]
+            cudnn_ops: Optional[Path] = None
+            cudnn_core: Optional[Path] = None
+
+            for directory in dll_dirs:
+                if cudnn_ops is None:
+                    matches = sorted(directory.glob("cudnn_ops64_*.dll"), reverse=True)
+                    if matches:
+                        cudnn_ops = matches[0]
+                if cudnn_core is None:
+                    matches = sorted(directory.glob("cudnn64_*.dll"), reverse=True)
+                    if matches:
+                        cudnn_core = matches[0]
+                if cudnn_ops and cudnn_core:
+                    break
+
+            if cudnn_ops is None:
+                logger.warning("CUDA validation failed: cudnn_ops64 DLL not found in %s", root)
+                return False
+            required_paths: list[Path] = []
+            for dll in required_dlls:
+                found: Optional[Path] = None
+                for directory in dll_dirs:
+                    candidate = directory / dll
+                    if candidate.exists():
+                        found = candidate
+                        break
+                if found is None:
+                    logger.warning("CUDA validation failed: required DLL %s missing in %s", dll, root)
+                    return False
+                required_paths.append(found)
+
+            required_paths.append(cudnn_ops)
+            if cudnn_core is not None:
+                required_paths.append(cudnn_core)
+
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            for dll_path in required_paths:
+                try:
+                    handle = kernel32.LoadLibraryW(str(dll_path))
+                except Exception as exc:
+                    logger.warning("CUDA validation failed: unable to load %s (%s)", dll_path, exc)
+                    return False
+                else:
+                    kernel32.FreeLibrary(handle)
+
+        return True
+    except Exception:
+        logger.exception("Unexpected error while validating staged CUDA runtime")
+        return False
+    finally:
+        os.environ["PATH"] = original_path
+        for handle in handles:
+            try:
+                handle.close()  # type: ignore[union-attr]
+            except Exception:
+                logger.debug("Failed to close DLL directory handle", exc_info=True)
 
 
 def _download_cuda_runtime(progress_queue: MPQueue | None = None) -> None:
@@ -587,19 +828,22 @@ def _download_cuda_runtime(progress_queue: MPQueue | None = None) -> None:
         except Exception:
             pass
 
+    staging_root: Optional[Path] = None
     try:
         platform_tag = "win_amd64" if sys.platform.startswith("win") else None
         if not platform_tag or platform_tag not in CUDA_DOWNLOAD_SPEC:
             raise RuntimeError("CUDA runtime downloads are only supported on Windows (win_amd64).")
 
         packages = CUDA_DOWNLOAD_SPEC[platform_tag]
-        dest_root = _cuda_destination_root()
-        download_root = dest_root.parent / "cuda-download-tmp"
-        if download_root.exists():
-            shutil.rmtree(download_root)
-        download_root.mkdir(parents=True, exist_ok=True)
+        final_root = _preferred_cuda_root()
+        staging_root = final_root.parent / f"{final_root.name}.staging"
+        backup_root = final_root.parent / f"{final_root.name}.backup"
+        if staging_root.exists():
+            shutil.rmtree(staging_root)
+        staging_root.mkdir(parents=True, exist_ok=True)
 
-        _clean_cuda_destination(dest_root)
+        CUDA_DOWNLOAD_CACHE.mkdir(parents=True, exist_ok=True)
+
         metadata: list[dict[str, object]] = []
         total_known = 0
         for spec in packages:
@@ -622,47 +866,77 @@ def _download_cuda_runtime(progress_queue: MPQueue | None = None) -> None:
                 filename = entry["filename"]
                 url = entry["url"]
                 size_hint = int(entry.get("size") or 0)
+                sha256 = entry.get("sha256") or None
 
-                trace_cuda_download_step(f"downloading {package}", filename)
-                _put(("stage", f"Downloading {package}"))
-
-                dest_file = download_root / filename
+                dest_file = CUDA_DOWNLOAD_CACHE / filename
                 part_file = dest_file.with_suffix(dest_file.suffix + ".part")
                 if part_file.exists():
                     part_file.unlink()
 
-                with session.get(url, stream=True, timeout=(10, 90)) as response:
-                    response.raise_for_status()
-                    content_length = response.headers.get("Content-Length")
-                    file_total = int(content_length) if content_length and content_length.isdigit() else size_hint
-                    with open(part_file, "wb") as handle:
-                        for chunk in response.iter_content(chunk_size=1 << 19):
-                            if not chunk:
-                                continue
-                            handle.write(chunk)
-                            downloaded += len(chunk)
-                            if overall_total > 0:
-                                _put(("progress", downloaded, overall_total))
-                            elif file_total > 0:
-                                _put(("progress", downloaded, file_total))
-                            else:
-                                _put(("progress", downloaded, 0))
-                part_file.replace(dest_file)
+                if _download_integrity_ok(dest_file, size_hint, sha256):
+                    trace_cuda_download_step(f"reuse {package}", filename)
+                    _put(("stage", f"Reusing cached {package}"))
+                    if size_hint > 0:
+                        downloaded += size_hint
+                    elif dest_file.exists():
+                        downloaded += dest_file.stat().st_size
+                    if overall_total > 0:
+                        _put(("progress", downloaded, overall_total))
+                    else:
+                        _put(("progress", downloaded, 0))
+                else:
+                    if dest_file.exists():
+                        trace_cuda_download_step(f"discard {package}", "corrupt cache")
+                        dest_file.unlink()
+
+                    trace_cuda_download_step(f"downloading {package}", filename)
+                    _put(("stage", f"Downloading {package}"))
+
+                    with session.get(url, stream=True, timeout=(10, 90)) as response:
+                        response.raise_for_status()
+                        content_length = response.headers.get("Content-Length")
+                        file_total = int(content_length) if content_length and content_length.isdigit() else size_hint
+                        with open(part_file, "wb") as handle:
+                            for chunk in response.iter_content(chunk_size=1 << 19):
+                                if not chunk:
+                                    continue
+                                handle.write(chunk)
+                                downloaded += len(chunk)
+                                if overall_total > 0:
+                                    _put(("progress", downloaded, overall_total))
+                                elif file_total > 0:
+                                    _put(("progress", downloaded, file_total))
+                                else:
+                                    _put(("progress", downloaded, 0))
+                    part_file.replace(dest_file)
+
+                    if not _download_integrity_ok(dest_file, size_hint, sha256):
+                        raise RuntimeError(f"Downloaded file failed integrity check: {filename}")
 
                 _put(("stage", f"Extracting {filename}"))
-                _extract_cuda_wheel(dest_file, dest_root)
+                try:
+                    _extract_cuda_wheel(dest_file, staging_root)
+                except Exception as exc:
+                    logger.exception("Failed to extract %s", filename)
+                    raise RuntimeError(f"Failed to extract {filename}: {exc}") from exc
 
         finally:
             session.close()
-            shutil.rmtree(download_root, ignore_errors=True)
 
-        _sync_cuda_bins(dest_root)
+        _sync_cuda_bins(staging_root)
         trace_cuda_download_step("cuda download complete", "validating runtime")
-        global cuda_paths_initialized
-        cuda_paths_initialized = False
-        if not cuda_runtime_ready(ignore_preference=True, quiet=True):
+        if not _validate_cuda_runtime_install(staging_root):
             raise RuntimeError("CUDA runtime validation failed after download")
 
+        if backup_root.exists():
+            shutil.rmtree(backup_root)
+        if final_root.exists():
+            final_root.rename(backup_root)
+        staging_root.rename(final_root)
+        shutil.rmtree(backup_root, ignore_errors=True)
+
+        global cuda_paths_initialized
+        cuda_paths_initialized = False
         _put(("done",))
     except Exception as exc:
         logger.exception("CUDA runtime download failed")
@@ -674,7 +948,9 @@ def _download_cuda_runtime(progress_queue: MPQueue | None = None) -> None:
                 pass
         else:
             raise
-
+    finally:
+        if staging_root and staging_root.exists():
+            shutil.rmtree(staging_root, ignore_errors=True)
 
 def download_cuda_runtime_headless() -> bool:
     try:
@@ -754,100 +1030,6 @@ def download_cuda_runtime_with_gui() -> bool:
     except Exception:
         logger.exception("Failed to close lockout window after CUDA download failure")
     return False
-
-
-def _resolve_cuda_wheel(package: str, version: str, platform_tag: str) -> dict[str, object]:
-    url = f'https://pypi.org/pypi/{package}/{version}/json'
-    trace_cuda_download_step(f'resolve {package}', url)
-    response = requests.get(url, timeout=30)
-    if response.status_code != 200:
-        raise RuntimeError(f'Failed to resolve metadata for {package}: HTTP {response.status_code}')
-    data = response.json()
-    for entry in data.get('urls', []):
-        filename = entry.get('filename') or ''
-        if platform_tag in filename and filename.endswith('.whl'):
-            return {
-                'url': entry['url'],
-                'filename': filename,
-                'size': int(entry.get('size') or 0),
-            }
-    raise RuntimeError(f'No compatible wheel found for {package} ({platform_tag})')
-
-
-def _clean_cuda_destination(dest_root: Path) -> None:
-    if dest_root.exists():
-        shutil.rmtree(dest_root)
-    dest_root.mkdir(parents=True, exist_ok=True)
-
-
-def _extract_cuda_wheel(wheel_path: Path, dest_root: Path) -> None:
-    trace_cuda_download_step(f'extract {wheel_path.name}', 'unpack wheel')
-    with zipfile.ZipFile(wheel_path, 'r') as archive:
-        for member in archive.infolist():
-            name = member.filename
-            if not name.startswith('nvidia/') or name.endswith('/'):
-                continue
-            relative = Path(*Path(name).parts[1:])
-            target = dest_root / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(member) as src, open(target, 'wb') as dst:
-                shutil.copyfileobj(src, dst)
-
-
-def _sync_cuda_bins(dest_root: Path) -> None:
-    bin_root = dest_root / 'bin'
-    if bin_root.exists():
-        shutil.rmtree(bin_root)
-    bin_root.mkdir(parents=True, exist_ok=True)
-    for sub in ('cuda_runtime/bin', 'cudnn/bin', 'cublas/bin'):
-        candidate = dest_root / sub
-        if not candidate.exists():
-            continue
-        for file in candidate.iterdir():
-            if file.is_file():
-                shutil.copy2(file, bin_root / file.name)
-
-
-def cuda_device_available() -> bool:
-    try:
-        return ctranslate2.get_cuda_device_count() > 0
-    except Exception:
-        logger.debug('CUDA availability probe failed', exc_info=True)
-        return False
-
-def stage_cuda_runtime_from_existing() -> bool:
-    dest_root = _cuda_destination_root()
-
-    if cuda_runtime_files_present() and cuda_runtime_ready(ignore_preference=True, quiet=True):
-        return True
-
-    staged = False
-    try:
-        staged = _copy_from_nvidia_packages(dest_root) or staged
-        if not staged:
-            staged = _copy_from_system_cuda(dest_root)
-    except Exception:
-        logger.exception("Failed to reuse existing CUDA runtime files")
-        return False
-
-    if not staged:
-        return False
-
-    global cuda_paths_initialized
-    cuda_paths_initialized = False
-    if not cuda_runtime_ready(ignore_preference=True, quiet=True):
-        logger.debug("CUDA runtime validation failed after staging existing assets")
-        return False
-
-    return True
-
-
-def ensure_cuda_runtime_from_existing() -> bool:
-    if stage_cuda_runtime_from_existing():
-        logger.info("Reused existing CUDA runtime assets for CtrlSpeak.")
-        return True
-    return False
-
 
 
 def _run_cmd_stream(cmd: List[str], timeout: int | None = None) -> int:
@@ -1709,7 +1891,7 @@ def download_model_with_gui(
 
 # ---------------- Transcriber ----------------
 model_lock = threading.Lock()
-whisper_model: Optional[WhisperModel] = None
+whisper_model: Optional[WhisperModelType] = None
 warned_cuda_unavailable = False
 _missing_model_notified: Set[str] = set()
 
@@ -1927,7 +2109,7 @@ def initialize_transcriber(
     allow_client: bool = False,
     preferred_device: Optional[str] = None,
     interactive: bool = True,
-) -> Optional[WhisperModel]:
+) -> Optional[WhisperModelType]:
     """Load the configured Whisper model into memory if it is not already active."""
 
     global whisper_model, warned_cuda_unavailable
@@ -1990,8 +2172,10 @@ def initialize_transcriber(
         if device == "cpu":
             _force_cpu_env()
 
+        model_cls = _get_whisper_model_class()
+
         try:
-            whisper_model = WhisperModel(
+            whisper_model = model_cls(
                 str(model_path),
                 device=device,
                 compute_type=compute_type,
@@ -2004,7 +2188,7 @@ def initialize_transcriber(
             )
             if device != "cpu":
                 try:
-                    whisper_model = WhisperModel(
+                    whisper_model = model_cls(
                         str(model_path),
                         device="cpu",
                         compute_type="int8",
@@ -2170,5 +2354,9 @@ def transcribe_audio(file_path: str, play_feedback: bool = True) -> Optional[str
     else:
         notify("CtrlSpeak mode is not configured. Restart the application.")
         return None
+
+
+
+
 
 

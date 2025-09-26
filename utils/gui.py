@@ -1662,24 +1662,31 @@ class ManagementWindow:
                 except Exception:
                     logger.exception("Failed to present CUDA unavailable message box")
                 return
+
             staged = cuda_runtime_files_present()
             if not staged:
                 staged = ensure_cuda_runtime_from_existing()
 
-            if not staged:
-                logger.warning("CUDA device selection requested but no runtime files were staged; staying on CPU.")
-                self.device_var.set("cpu")
-                set_device_preference("cpu")
-                self.cuda_status.set("CUDA runtime not staged. Use Install or repair CUDA to configure it.")
-                self._reload_transcriber_async(
-                    progress_message="Applying device preference...",
-                    status_var=self.cuda_status,
-                    notify_context="Device setup failed",
-                )
-                return
+            if staged and not cuda_runtime_ready(ignore_preference=True, quiet=True):
+                logger.warning("CUDA runtime files failed validation; attempting reinstall.")
+                staged = False
 
-            if not cuda_runtime_ready(ignore_preference=True, quiet=True):
-                logger.warning("CUDA runtime files were staged but validation failed; staying on CPU.")
+            if not staged:
+                if not install_cuda_runtime_with_progress(self.window):
+                    logger.warning("CUDA runtime preparation failed during download attempt; staying on CPU.")
+                    self.device_var.set("cpu")
+                    set_device_preference("cpu")
+                    self.cuda_status.set("CUDA runtime not ready; using CPU instead.")
+                    self._reload_transcriber_async(
+                        progress_message="Applying device preference...",
+                        status_var=self.cuda_status,
+                        notify_context="Device setup failed",
+                    )
+                    return
+                staged = cuda_runtime_files_present()
+
+            if not staged or not cuda_runtime_ready(ignore_preference=True, quiet=True):
+                logger.warning("CUDA runtime is still unavailable after installation; staying on CPU.")
                 self.device_var.set("cpu")
                 set_device_preference("cpu")
                 self.cuda_status.set("CUDA runtime not ready; using CPU instead.")
