@@ -17,9 +17,9 @@ Immediately after the splash, CtrlSpeak determines whether the install already k
 
 1. **Mode lookup** – The cached `settings["mode"]` value is inspected. If it is already `"client"` or `"client_server"`, no prompt is shown. Otherwise, setup continues.【F:main.py†L69-L72】【F:utils/gui.py†L712-L738】
 2. **Client-only builds** – If the binary was produced with the client-only flag, CtrlSpeak silently forces `mode="client"`, stores it, and proceeds without showing UI.【F:utils/gui.py†L740-L759】
-3. **Mode selection dialog** – The user is shown a themed window with two cards: “Client + Server” (primary action) and “Client Only”. Choosing either persists the selection. Closing the dialog aborts setup and exits CtrlSpeak until the user reruns it.【F:utils/gui.py†L533-L704】
-4. **Server prerequisites check** – If the user chose “Client + Server”, `_ensure_server_mode_model_ready` verifies that the currently selected Whisper model exists on disk, prompting the download workflow if necessary. Cancelling the download causes CtrlSpeak to exit to avoid running in an incomplete state.【F:utils/gui.py†L705-L769】
-5. **Settings persistence** – The selected mode is written to `settings.json` (`%APPDATA%/CtrlSpeak/settings.json` on Windows). Future boots will start directly in this mode unless changed manually later.【F:utils/gui.py†L770-L784】【F:utils/config_paths.py†L58-L72】
+3. **Mode selection dialog** – The user is shown a themed window with two cards: “Client + Server” (primary action) and “Client Only”. The client-only card exposes a manual `host[:port]` entry, discovery-backed server list, and **Refresh servers** action so the user can target a specific endpoint before committing to client mode.【F:utils/gui.py†L639-L859】【F:utils/gui.py†L912-L970】
+4. **Server prerequisites check** – If the user chose “Client + Server”, `_ensure_server_mode_model_ready` verifies that the currently selected Whisper model exists on disk, prompting the download workflow if necessary. Cancelling the download causes CtrlSpeak to exit to avoid running in an incomplete state.【F:utils/gui.py†L1017-L1050】
+5. **Settings persistence** – The selected mode is written to `settings.json` (`%APPDATA%/CtrlSpeak/settings.json` on Windows). Future boots will start directly in this mode unless changed manually later.【F:utils/gui.py†L1051-L1111】【F:utils/config_paths.py†L58-L72】
 
 ## 3. Automatic Model Preparation on First Launch
 With a mode chosen, CtrlSpeak ensures the default speech model (small) is installed without further input:
@@ -58,9 +58,10 @@ Holding the right Control key drives the core speech-to-text workflow.
 When the user initially selects “Client Only”, or later switches to it:
 
 1. **Server discovery** – The background discovery listener keeps searching for LAN servers and updates the management UI badges via `schedule_management_refresh`.【F:utils/system.py†L1089-L1104】【F:utils/system.py†L300-L317】
-2. **Recording behavior** – Recordings are still captured locally, but `transcribe_remote` uploads the audio over HTTP to the best discovered server. Processing audio feedback plays locally while waiting for the HTTP response.【F:utils/system.py†L644-L690】【F:utils/models.py†L1230-L1292】
-3. **Missing server flow** – If no server answers, `handle_missing_server` prompts the user via a modal dialog to install the local server. Accepting switches the persisted mode to `client_server`, forces a local model load, starts the server, and then transcribes the pending recording locally.【F:utils/models.py†L1200-L1237】
-4. **Re-launch experience** – Subsequent launches skip the mode picker and jump straight into client-only behavior because the mode is cached in settings. The user can revisit the picker later through the management window’s “Change mode” control.【F:utils/gui.py†L712-L784】【F:utils/gui.py†L1668-L1707】
+2. **Preferred endpoint reuse** – Manual entries from the mode picker are validated, stored as the preferred host/port, and reused the next time discovery comes up empty, ensuring the client can target a known server even without broadcasts.【F:utils/gui.py†L679-L756】【F:utils/net_discovery.py†L85-L123】
+3. **Recording behavior** – Recordings are still captured locally, but `transcribe_remote` uploads the audio over HTTP to the best discovered server. A guard (`_client_hotkey_available`) refuses to start recording when the mode is `client` and no server is connected, logging the block so operators understand why nothing happened. Processing audio feedback plays locally while waiting for the HTTP response.【F:utils/system.py†L606-L690】【F:utils/models.py†L1230-L1292】
+4. **Missing server flow** – If no server answers, `handle_missing_server` prompts the user via a modal dialog to install the local server. Accepting switches the persisted mode to `client_server`, forces a local model load, starts the server, and then transcribes the pending recording locally.【F:utils/models.py†L1200-L1237】
+5. **Re-launch experience** – Subsequent launches skip the mode picker and jump straight into client-only behavior because the mode is cached in settings. The user can revisit the picker later through the management window’s “Change mode” control.【F:utils/gui.py†L1051-L1111】【F:utils/gui.py†L1532-L1543】
 
 ## 8. Client + Server Mode Runtime Specifics
 When operating as both client and server:
