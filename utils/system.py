@@ -646,11 +646,31 @@ def record_audio(target_path: Path) -> None:
         wf.writeframes(b"".join(frames))
 
 # ---------------- Client keyboard listener ----------------
+def _client_hotkey_available() -> bool:
+    """Return True when the Ctrl+R hotkey may start a recording."""
+
+    with settings_lock:
+        mode = settings.get("mode")
+
+    if mode != "client":
+        return True
+
+    if last_connected_server is not None:
+        return True
+
+    logger.info(
+        "Recording hotkey blocked: client-only mode is active without a connected server."
+    )
+    return False
+
+
 def on_press(key):
     global recording, recording_thread, recording_file_path
     if not client_enabled:
         return
     if key == keyboard.Key.ctrl_r and not recording:
+        if not _client_hotkey_available():
+            return
         recording = True
         recording_file_path = create_recording_file_path()
         recording_thread = threading.Thread(target=record_audio, args=(recording_file_path,), daemon=True)

@@ -12,6 +12,8 @@ from tkinter import ttk, messagebox
 import pystray
 import numpy as np
 
+import utils.net_discovery as net_discovery
+
 
 # ---- System-layer pieces (lifecycle, discovery, status) ----
 from utils.system import (
@@ -49,6 +51,7 @@ from utils.ui_theme import (
     ELEVATED_SURFACE,
     ACCENT,
     BACKGROUND,
+    DANGER,
 )
 
 from utils.config_paths import asset_path, get_logger
@@ -635,9 +638,35 @@ def show_splash_screen(duration_ms: int) -> None:
 # ---------------- First-run mode ----------------
 def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
     from utils.system import AUTO_MODE_PROFILE
+
     if AUTO_MODE_PROFILE:
         return AUTO_MODE_PROFILE
+
     result = {"mode": None}
+    manual_server_var: Optional[tk.StringVar] = None
+    manual_server_error: Optional[tk.StringVar] = None
+    server_status_var: Optional[tk.StringVar] = None
+    server_list_var: Optional[tk.StringVar] = None
+    refresh_button: Optional[ttk.Button] = None
+    server_listbox: Optional[tk.Listbox] = None
+    discovery_listener_local: Optional[net_discovery.DiscoveryListener] = None
+    available_servers: list[str] = []
+    refresh_in_progress = threading.Event()
+
+    def _cleanup_listener() -> None:
+        nonlocal discovery_listener_local
+        listener = discovery_listener_local
+        discovery_listener_local = None
+        if listener is None:
+            return
+        try:
+            listener.stop()
+        except Exception:
+            logger.exception("Failed to stop temporary discovery listener")
+        try:
+            listener.join(timeout=1.5)
+        except Exception:
+            logger.exception("Failed to join temporary discovery listener")
 
     def _release_grab() -> None:
         if window is None:
@@ -648,7 +677,27 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
             pass
 
     def choose(mode: str) -> None:
+        nonlocal available_servers
+        if mode == "client" and manual_server_var is not None:
+            target = manual_server_var.get().strip()
+            if target:
+                try:
+                    host, port = net_discovery.parse_server_target(target)
+                except ValueError as exc:
+                    if manual_server_error is not None:
+                        manual_server_error.set(str(exc))
+                    return
+                if manual_server_error is not None:
+                    manual_server_error.set("")
+                try:
+                    net_discovery.set_preferred_server(host, port)
+                except Exception:
+                    logger.exception("Failed to persist preferred server from mode picker")
+            else:
+                if manual_server_error is not None:
+                    manual_server_error.set("")
         result["mode"] = mode
+        _cleanup_listener()
         if not owns_root:
             _release_grab()
         window.destroy()
@@ -693,9 +742,125 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
             "prompt_initial_mode: theme initialization failed", "default to client_server"
         )
         return "client_server"
+
+    manual_server_var = tk.StringVar(master=window)
+    manual_server_error = tk.StringVar(master=window, value="")
+    server_status_var = tk.StringVar(
+        master=window,
+        value="Enter the server address manually or scan for available hosts.",
+    )
+    server_list_var = tk.StringVar(master=window, value=())
+
+    preferred_host, preferred_port = net_discovery.get_preferred_server_settings()
+    if preferred_host and preferred_port:
+        manual_server_var.set(f"{preferred_host}:{preferred_port}")
+
+    def _ensure_discovery_listener() -> Optional[net_discovery.DiscoveryListener]:
+        nonlocal discovery_listener_local
+        if discovery_listener_local is not None:
+            return discovery_listener_local
+        try:
+            with settings_lock:
+                port = int(settings.get("discovery_port", 54330))
+            listener = net_discovery.DiscoveryListener(port)
+            listener.start()
+            discovery_listener_local = listener
+            return listener
+        except Exception:
+            logger.exception("Failed to start temporary discovery listener")
+            discovery_listener_local = None
+            return None
+
+    def _on_server_select(event: tk.Event) -> None:  # type: ignore[valid-type]
+        if manual_server_var is None:
+            return
+        widget = event.widget
+        if not isinstance(widget, tk.Listbox):
+            return
+        selection = widget.curselection()
+        if not selection:
+            return
+        index = selection[0]
+        if 0 <= index < len(available_servers):
+            manual_server_var.set(available_servers[index])
+            if manual_server_error is not None:
+                manual_server_error.set("")
+
+    def _trigger_refresh(initial: bool = False) -> None:
+        if refresh_in_progress.is_set():
+            return
+        refresh_in_progress.set()
+        if refresh_button is not None:
+            try:
+                refresh_button.state(["disabled"])
+                refresh_button.config(text="Scanning…")
+            except Exception:
+                logger.exception("Failed to disable refresh button in mode picker")
+        if server_status_var is not None:
+            server_status_var.set("Scanning for servers…")
+
+        def worker() -> None:
+            entries: list[str] = []
+            error_message: Optional[str] = None
+            listener = _ensure_discovery_listener()
+            if listener is None:
+                error_message = "Unable to start discovery. Enter the server address manually."
+            else:
+                try:
+                    net_discovery.manual_discovery_refresh(listener, wait_time=1.5)
+                    infos = sorted(
+                        list(listener.registry.values()),
+                        key=lambda info: info.last_seen,
+                        reverse=True,
+                    )
+                    entries = [f"{info.host}:{info.port}" for info in infos]
+                except Exception:
+                    logger.exception("Failed to refresh servers from mode picker")
+                    error_message = "Server scan failed. Enter the server address manually."
+
+            def on_complete() -> None:
+                nonlocal available_servers
+                if server_list_var is not None:
+                    try:
+                        server_list_var.set(tuple(entries))
+                    except Exception:
+                        logger.exception("Failed to update server list in mode picker")
+                available_servers = entries
+                if server_status_var is not None:
+                    if entries:
+                        server_status_var.set("Select a server or enter an address manually.")
+                    else:
+                        server_status_var.set(
+                            error_message
+                            or "No servers found. Enter the server address manually or refresh again."
+                        )
+                if manual_server_error is not None and manual_server_error.get():
+                    # Do not clear parse errors automatically; only clear when the user edits the field.
+                    pass
+                if manual_server_var is not None and entries and not manual_server_var.get().strip():
+                    manual_server_var.set(entries[0])
+                if refresh_button is not None:
+                    try:
+                        refresh_button.state(["!disabled"])
+                        refresh_button.config(text="Refresh servers")
+                    except Exception:
+                        logger.exception("Failed to reset refresh button in mode picker")
+                refresh_in_progress.clear()
+
+            try:
+                if window is not None and window.winfo_exists():
+                    window.after(0, on_complete)
+                else:
+                    refresh_in_progress.clear()
+            except Exception:
+                logger.exception("Failed to schedule refresh completion in mode picker")
+                refresh_in_progress.clear()
+
+        threading.Thread(target=worker, daemon=True).start()
+
     window.title("Welcome to CtrlSpeak")
-    window.geometry("560x420")
-    window.minsize(520, 360)
+    window.geometry("600x480")
+    window.minsize(560, 380)
     window.resizable(True, True)
     window.attributes("-topmost", True)
 
@@ -709,7 +874,7 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
         "It looks like this is the first time CtrlSpeak is running on this computer. "
         "Choose how you would like to use it:"
     )
-    ttk.Label(intro, text=message, style="Body.TLabel", wraplength=460,
+    ttk.Label(intro, text=message, style="Body.TLabel", wraplength=500,
               justify=tk.LEFT).pack(anchor=tk.W, pady=(12, 0))
     accent = ttk.Frame(intro, style="AccentLine.TFrame")
     accent.configure(height=2)
@@ -718,7 +883,8 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
     cards = ttk.Frame(container, style="Modern.TFrame")
     cards.pack(fill=tk.BOTH, expand=True, pady=(18, 12))
 
-    def make_card(title: str, desc: str, mode_value: str, primary: bool) -> None:
+    def make_card(title: str, desc: str, mode_value: str, primary: bool,
+                  extra: Optional[Callable[[ttk.Frame], None]] = None) -> None:
         card = ttk.Frame(cards, style="ModernCard.TFrame", padding=(22, 20))
         card.pack(fill=tk.X, pady=8)
         label_text = f"MODE · {mode_value.replace('_', ' ').upper()}"
@@ -727,11 +893,13 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
         accent_inner.configure(height=2)
         accent_inner.pack(fill=tk.X, pady=(10, 14))
         ttk.Label(card, text=title, style="SectionHeading.TLabel").pack(anchor=tk.W)
-        ttk.Label(card, text=desc, style="Body.TLabel", wraplength=460,
-                  justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 16))
+        ttk.Label(card, text=desc, style="Body.TLabel", wraplength=500,
+                  justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 12))
+        if extra is not None:
+            extra(card)
         btn_style = "Accent.TButton" if primary else "Subtle.TButton"
         ttk.Button(card, text="Use this mode", style=btn_style,
-                   command=lambda: choose(mode_value)).pack(anchor=tk.E)
+                   command=lambda: choose(mode_value)).pack(anchor=tk.E, pady=(12, 0))
 
     make_card(
         "Client + Server",
@@ -740,14 +908,77 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
         "client_server",
         True,
     )
+
+    def _build_client_only_controls(card: ttk.Frame) -> None:
+        nonlocal refresh_button, server_listbox
+        inner = ttk.Frame(card, style="ModernCardInner.TFrame")
+        inner.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+
+        ttk.Label(inner, text="Preferred server", style="Subtitle.TLabel").pack(anchor=tk.W)
+        ttk.Label(
+            inner,
+            text="Enter the IP address and port of a CtrlSpeak server or select one from the list below.",
+            style="Caption.TLabel",
+            wraplength=500,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(4, 6))
+
+        entry = ttk.Entry(inner, textvariable=manual_server_var, style="Modern.TEntry")
+        entry.pack(fill=tk.X)
+
+        def _clear_error(_: object) -> None:
+            if manual_server_error is not None:
+                manual_server_error.set("")
+
+        entry.bind("<KeyRelease>", _clear_error)
+
+        error_label = tk.Label(
+            inner,
+            textvariable=manual_server_error,
+            anchor="w",
+            fg=DANGER,
+            bg=ELEVATED_SURFACE,
+            font=("{Segoe UI}", 9),
+            padx=2,
+        )
+        error_label.pack(fill=tk.X, pady=(4, 0))
+
+        ttk.Label(inner, textvariable=server_status_var, style="Caption.TLabel",
+                  wraplength=500, justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 4))
+
+        server_listbox = tk.Listbox(
+            inner,
+            listvariable=server_list_var,
+            height=4,
+            bg=ELEVATED_SURFACE,
+            fg="#e7f2ff",
+            highlightthickness=0,
+            relief=tk.FLAT,
+            selectbackground=ACCENT,
+            activestyle="dotbox",
+            exportselection=False,
+        )
+        server_listbox.pack(fill=tk.BOTH, expand=False, pady=(0, 8))
+        server_listbox.bind("<<ListboxSelect>>", _on_server_select)
+
+        refresh_button = ttk.Button(
+            inner,
+            text="Refresh servers",
+            style="Subtle.TButton",
+            command=_trigger_refresh,
+        )
+        refresh_button.pack(fill=tk.X)
+
     make_card(
         "Client Only",
         "Connect to another CtrlSpeak server on your network and send recordings there for transcription.",
         "client",
         False,
+        extra=_build_client_only_controls,
     )
 
     def cancel() -> None:
+        _cleanup_listener()
         if not owns_root:
             _release_grab()
         window.destroy()
@@ -755,6 +986,10 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
     ttk.Button(container, text="Quit Setup", style="Subtle.TButton",
                command=cancel).pack(fill=tk.X, pady=(8, 0))
     window.protocol("WM_DELETE_WINDOW", cancel)
+
+    if refresh_button is not None:
+        window.after(200, _trigger_refresh)
+
     window.update_idletasks()
     req_w = window.winfo_reqwidth()
     req_h = window.winfo_reqheight()
@@ -775,6 +1010,7 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
             window.wait_window()
         finally:
             _release_grab()
+    _cleanup_listener()
     return result["mode"]
 
 

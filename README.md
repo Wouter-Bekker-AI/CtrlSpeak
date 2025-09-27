@@ -34,7 +34,7 @@ During the initial Whisper download, CtrlSpeak opens a centered welcome window s
 python main.py
 ```
 
-On first launch you will be prompted to choose between **Client + Server** or **Client Only** modes. Settings, models, and logs live under `%APPDATA%\CtrlSpeak` (the folder is created automatically).
+On first launch you will be prompted to choose between **Client + Server** or **Client Only** modes. The client-only card lets you refresh for LAN servers or manually enter a `host[:port]` so CtrlSpeak knows which remote host to target. Settings, models, and logs live under `%APPDATA%\CtrlSpeak` (the folder is created automatically).
 
 ### Command-line Flags
 
