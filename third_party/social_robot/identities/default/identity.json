@@ -1,0 +1,12 @@
+{
+  "name": "default",
+  "description": "Default friendly companion",
+  "read_prompt_from_file": true,
+  "prompt_file": "system_prompt.txt",
+  "face_image": "face.png",
+  "mouth_image": "mouth.png",
+  "llm_model": "gemma3:1b",
+  "llm_url": "http://localhost:11434/api/chat",
+  "voice": "am_michael",
+  "memory_dir": "memory"
+}

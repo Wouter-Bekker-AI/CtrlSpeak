@@ -22,6 +22,8 @@ Create an isolated environment and install the dependencies:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+
+Note: The optional "Chat with Bot" feature using the logo animation style requires PySide6, which is included in requirements.txt.
 ```
 
 GPU acceleration requires an NVIDIA CUDA-capable GPU with compatible drivers, but CtrlSpeak always boots in CPU mode and skips CUDA validation unless you opt in. The Whisper `small` model is downloaded automatically on first launch so a fresh install is usable immediately. Selecting **GPU (CUDA)** in the management window now launches the same welcome-and-progress experience used for model downloads; the app installs the CUDA runtime, cuBLAS, and cuDNN automatically and only falls back to CPU if validation fails. The CUDA wheels are cached under `%APPDATA%\CtrlSpeak\cuda\downloads`, verified with the published SHA-256 digests, and reused on the next attempt so extraction failures no longer force a redownload; the cache is purged only after a validated install. You can also stage GPU support manually via `python main.py --download-cuda-only` (alias: `--setup-cuda`). When no CUDA-capable GPU is detected, the management UI hides the GPU option and the installer flag exits early with an explanatory message.

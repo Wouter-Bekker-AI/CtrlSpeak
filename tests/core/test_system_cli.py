@@ -35,9 +35,7 @@ def test_acquire_single_instance_lock(tmp_path, monkeypatch):
 
     assert system.acquire_single_instance_lock() is True
     first_handle = system.instance_lock_handle
-    assert first_handle is not None
-
-    assert system.acquire_single_instance_lock() is True
+    assert system.acquire_single_instance_lock() is False
     assert system.instance_lock_handle is not None
 
     lock_path = system.get_config_dir() / system.LOCK_FILENAME

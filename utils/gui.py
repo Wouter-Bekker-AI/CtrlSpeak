@@ -29,6 +29,7 @@ from utils.system import (
 )
 # IMPORTANT: import the module so we always see the *current* values
 from utils import system as sysmod
+from utils.bot_integration import start_bot as _bot_start, stop_bot as _bot_stop, is_bot_running as _bot_is_running
 
 # ---- Model/CUDA helpers kept in utils.models to avoid GUI bloat ----
 from utils.models import (
@@ -1315,6 +1316,7 @@ def _show_management_window(icon: pystray.Icon) -> None:
 class ManagementWindow:
     def __init__(self, icon: pystray.Icon):
         self._icon = icon
+        self._last_bot_running_state = _bot_is_running()
         self.window = tk.Toplevel(tk_root)
         self.window.title(f"CtrlSpeak Control v{APP_VERSION}")
         self.window.geometry("640x620")
@@ -1537,6 +1539,14 @@ class ManagementWindow:
                 self.change_mode_button.state(["disabled"])
             except Exception:
                 logger.exception("Failed to disable change mode button for client-only build")
+
+        self.bot_button = ttk.Button(controls, text="Chat with Bot", style="Accent.TButton",
+                                     command=self._toggle_bot)
+        self.bot_button.pack(fill=tk.X, pady=4)
+        self.clear_memory_button = ttk.Button(controls, text="Clear Bot Memory", style="Subtle.TButton",
+                                              command=self._clear_bot_memory)
+        self.clear_memory_button.pack(fill=tk.X, pady=4)
+        self._refresh_bot_button()
         exit_label = "Exit CtrlSpeak" if CLIENT_ONLY_BUILD else "Stop everything"
         self.stop_all_button = ttk.Button(controls, text=exit_label, style="Danger.TButton",
                                           command=self.stop_everything)
@@ -1551,6 +1561,8 @@ class ManagementWindow:
                    command=self.delete_ctrlspeak).pack(fill=tk.X, pady=(10, 0))
 
         self.window.after(120, self.refresh_status)
+        self._bot_status_checker_job: Optional[str] = None
+        self._check_bot_status()
 
         # --- Auto-size window to fit content once everything is laid out ---
         self.window.update_idletasks()
@@ -1558,6 +1570,27 @@ class ManagementWindow:
         self.window.minsize(req_w, 560)
 
         self.bring_to_front()
+
+    def close(self) -> None:
+        if self._bot_status_checker_job:
+            try:
+                self.window.after_cancel(self._bot_status_checker_job)
+            except Exception:
+                pass
+            self._bot_status_checker_job = None
+        self._unbind_mousewheel(None)
+        self.window.destroy()
+
+    def _check_bot_status(self) -> None:
+        if not self.is_open():
+            return
+        
+        is_running = _bot_is_running()
+        if is_running != self._last_bot_running_state:
+            self._last_bot_running_state = is_running
+            self._refresh_bot_button()
+        
+        self._bot_status_checker_job = self.window.after(1000, self._check_bot_status)
 
     # --- window helpers ---
     def is_open(self) -> bool:
@@ -1568,6 +1601,27 @@ class ManagementWindow:
         self.window.deiconify(); self.window.lift(); self.window.focus_force()
         self.window.attributes("-topmost", True)
         self.window.after(150, lambda: self.window.attributes("-topmost", False))
+
+    def close(self) -> None:
+        if self._bot_status_checker_job:
+            try:
+                self.window.after_cancel(self._bot_status_checker_job)
+            except Exception:
+                pass
+            self._bot_status_checker_job = None
+        self._unbind_mousewheel(None)
+        self.window.destroy()
+
+    def _check_bot_status(self) -> None:
+        if not self.is_open():
+            return
+        
+        is_running = _bot_is_running()
+        if is_running != self._last_bot_running_state:
+            self._last_bot_running_state = is_running
+            self._refresh_bot_button()
+        
+        self._bot_status_checker_job = self.window.after(1000, self._check_bot_status)
 
     def _update_scroll_region(self, _event: Optional[tk.Event] = None) -> None:
         if not self.is_open():
@@ -1618,6 +1672,106 @@ class ManagementWindow:
         widget.unbind_all("<Button-4>")
         widget.unbind_all("<Button-5>")
         self._mousewheel_bound = False
+
+    def _refresh_bot_button(self) -> None:
+        try:
+            if _bot_is_running():
+                self.bot_button.configure(text="Stop Chat with Bot")
+            else:
+                self.bot_button.configure(text="Chat with Bot")
+        except Exception:
+            pass
+
+    def _toggle_bot(self) -> None:
+        try:
+            if _bot_is_running():
+                _bot_stop()
+            else:
+                self._select_identity_and_start_bot()
+            self._refresh_bot_button()
+        except Exception:
+            logger.exception("Bot toggle failed")
+            messagebox.showerror("Chat with Bot", "Failed to toggle the bot. Check logs.")
+
+    def _select_identity_and_start_bot(self) -> None:
+        from pathlib import Path
+        import os
+
+        identities_dir = Path(__file__).resolve().parent.parent / "third_party" / "social_robot" / "identities"
+        identities = [d.name for d in identities_dir.iterdir() if d.is_dir()] if identities_dir.exists() else []
+
+        if not identities:
+            messagebox.showerror("Chat with Bot", "No identities found.")
+            return
+
+        dialog = tk.Toplevel(self.window)
+        dialog.title("Select Identity")
+        dialog.transient(self.window)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        apply_modern_theme(dialog)
+
+        container = ttk.Frame(dialog, style="Modern.TFrame", padding=(28, 26))
+        container.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(container, text="Choose an identity for the bot:", style="SectionHeading.TLabel").pack(anchor=tk.W, pady=(0, 12))
+
+        def on_select(identity: str) -> None:
+            dialog.destroy()
+            try:
+                _bot_start(identity=identity)
+                self._refresh_bot_button()
+            except Exception:
+                logger.exception("Bot start failed")
+                messagebox.showerror("Chat with Bot", "Failed to start the bot. Check logs.")
+
+        for identity in identities:
+            ttk.Button(container, text=identity.replace("_", " ").title(), style="Accent.TButton", command=lambda i=identity: on_select(i)).pack(fill=tk.X, pady=4)
+
+        ttk.Button(container, text="Cancel", style="Subtle.TButton", command=dialog.destroy).pack(fill=tk.X, pady=(12, 0))
+
+    def _clear_bot_memory(self) -> None:
+        from pathlib import Path
+        import os
+
+        identities_dir = Path(__file__).resolve().parent.parent / "third_party" / "social_robot" / "identities"
+        identities = [d.name for d in identities_dir.iterdir() if d.is_dir()] if identities_dir.exists() else []
+
+        if not identities:
+            messagebox.showerror("Clear Bot Memory", "No identities found.")
+            return
+
+        dialog = tk.Toplevel(self.window)
+        dialog.title("Select Identity to Clear")
+        dialog.transient(self.window)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        apply_modern_theme(dialog)
+
+        container = ttk.Frame(dialog, style="Modern.TFrame", padding=(28, 26))
+        container.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(container, text="Choose an identity to clear its memory:", style="SectionHeading.TLabel").pack(anchor=tk.W, pady=(0, 12))
+
+        def on_select(identity: str) -> None:
+            dialog.destroy()
+            if messagebox.askyesno("Confirm Clear Memory", f"Are you sure you want to clear the memory for the '{identity}' identity? This cannot be undone."):
+                try:
+                    memory_file = identities_dir / identity / "memory" / "conversation.json"
+                    if memory_file.exists():
+                        os.remove(memory_file)
+                        messagebox.showinfo("Clear Bot Memory", f"Memory for '{identity}' has been cleared.")
+                    else:
+                        messagebox.showinfo("Clear Bot Memory", f"No memory found for '{identity}'.")
+                except Exception as e:
+                    logger.exception(f"Failed to clear memory for {identity}")
+                    messagebox.showerror("Clear Bot Memory", f"Failed to clear memory for '{identity}'. Check logs.")
+
+        for identity in identities:
+            ttk.Button(container, text=identity.replace("_", " ").title(), style="Danger.TButton", command=lambda i=identity: on_select(i)).pack(fill=tk.X, pady=4)
+
+        ttk.Button(container, text="Cancel", style="Subtle.TButton", command=dialog.destroy).pack(fill=tk.X, pady=(12, 0))
+
 
     # --- state refresh ---
     def refresh_status(self) -> None:
@@ -2101,6 +2255,10 @@ class ManagementWindow:
 
     def stop_everything(self) -> None:
         stop_client_listener(); shutdown_server()
+        try:
+            _bot_stop()
+        except Exception:
+            pass
         self.refresh_status()
         self.window.after(200, self._icon.stop)
         self.close()
@@ -2116,6 +2274,10 @@ class ManagementWindow:
         global management_window
         if self.is_open():
             self._unbind_mousewheel(None)
+            try:
+                _bot_stop()
+            except Exception:
+                pass
             self.window.destroy()
         management_window = None
 

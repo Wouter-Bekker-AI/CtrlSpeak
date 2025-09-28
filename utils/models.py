@@ -2132,8 +2132,7 @@ def initialize_transcriber(
     preferred_device: Optional[str] = None,
     interactive: bool = True,
 ) -> Optional[WhisperModelType]:
-    """Load the configured Whisper model into memory if it is not already active."""
-
+    logger.debug("initialize_transcriber: Function entered.")
     global whisper_model, warned_cuda_unavailable
 
     trace_model_download_step(
@@ -2160,13 +2159,18 @@ def initialize_transcriber(
                 "initialize_transcriber: not in server mode",
                 "return None",
             )
+            logger.debug("initialize_transcriber: Not in server mode and allow_client is False.")
             return None
 
-        if not _ensure_model_files(interactive=interactive):
+        logger.debug("initialize_transcriber: Calling _ensure_model_files().")
+        result = _ensure_model_files(interactive=interactive)
+        logger.debug(f"initialize_transcriber: _ensure_model_files() returned {result}.")
+        if not result:
             trace_model_download_step(
                 "initialize_transcriber: model files missing",
                 "abort load",
             )
+            logger.debug("initialize_transcriber: Model files missing.")
             return None
 
         device = preferred_device or resolve_device()
@@ -2221,6 +2225,7 @@ def initialize_transcriber(
                         "Unable to initialize the transcription model. Please check your installation and try again."
                     )
                     whisper_model = None
+                    logger.debug("initialize_transcriber: CPU fallback failed.")
                     return None
                 else:
                     logger.info("CUDA runtime not available; using CPU fallback.")
@@ -2238,6 +2243,7 @@ def initialize_transcriber(
                 "initialize_transcriber: load failed",
                 "return None",
             )
+            logger.debug("initialize_transcriber: Final load failed.")
             return None
 
         trace_model_download_step(
@@ -2248,6 +2254,8 @@ def initialize_transcriber(
         return whisper_model
 
 # ---------------- Transcription API ----------------
+
+initialize_transcriber.__doc__ = "Load the configured Whisper model into memory if it is not already active."
 def collect_text_from_segments(segments) -> str:
     pieces = []
     for s in segments:

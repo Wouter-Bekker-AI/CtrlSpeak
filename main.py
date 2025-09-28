@@ -3,7 +3,9 @@ from __future__ import annotations
 import sys
 import atexit
 import time
+import logging
 
+import utils.system as sysmod
 from utils.config_paths import get_logger
 from utils.system import (
     APP_VERSION,
@@ -13,6 +15,7 @@ from utils.system import (
     shutdown_all,
     notify,
     load_settings,
+    save_settings,
     settings, settings_lock,
     start_discovery_listener,
     parse_cli_args, transcribe_cli,
@@ -36,6 +39,9 @@ def main(argv: list[str]) -> int:
     logger.info("CtrlSpeak starting up (version %s)", APP_VERSION)
     args = parse_cli_args(argv)
     logger.debug("Parsed CLI arguments: %s", args)
+
+    if args.start_server_only:
+        logging.getLogger().setLevel(logging.DEBUG)
 
     if args.uninstall:
         logger.info("Uninstall flag detected; launching uninstall workflow")
@@ -91,6 +97,43 @@ def main(argv: list[str]) -> int:
     if args.transcribe:
         logger.info("Running CLI transcription for %s", args.transcribe)
         return transcribe_cli(args.transcribe)
+
+    if args.start_server_only:
+        logger.info("Starting CtrlSpeak server only (for programmatic testing).")
+        # Explicitly set model to 'small' for programmatic testing
+        with settings_lock:
+            settings["mode"] = "client_server"
+            settings["model_name"] = "small"
+        save_settings()
+        # Ensure model is installed and ready
+        if not ensure_initial_model_installation():
+            logger.error("Initial model installation failed or was aborted; cannot start server.")
+            return 1
+        if not ensure_model_ready_for_local_server():
+            logger.error("Failed to prepare local model for server mode; cannot start server.")
+            return 1
+
+        # Start discovery listener for client mode visibility
+        logger.debug("Starting discovery listener")
+        start_discovery_listener()
+
+        logger.info("Initializing transcriber in background for warm-up")
+        initialize_transcriber(interactive=False)   # warm-up local model when assets are ready
+        logger.info("Starting local transcription server")
+        start_server()
+
+        # Keep the main thread alive so the server continues to run
+        try:
+            while True:
+                thread = sysmod.server_thread
+                if not (thread and thread.is_alive()):
+                    break
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logger.info("Server-only mode interrupted by user.")
+        finally:
+            shutdown_all()
+        return 0
 
     # Splash
     logger.debug("Displaying splash screen for %sms", SPLASH_DURATION_MS)

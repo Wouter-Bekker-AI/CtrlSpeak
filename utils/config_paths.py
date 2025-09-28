@@ -145,8 +145,6 @@ def _configure_logging() -> logging.Logger:
 
             root_logger = logging.getLogger()
             root_logger.addHandler(handler)
-            if root_logger.level == logging.NOTSET or root_logger.level > logging.INFO:
-                root_logger.setLevel(logging.INFO)
 
             if _CONSOLE_HANDLER is None:
                 console_handler = logging.StreamHandler()
@@ -157,7 +155,6 @@ def _configure_logging() -> logging.Logger:
 
             logging.captureWarnings(True)
 
-        ctrl_logger.setLevel(logging.INFO)
         ctrl_logger.propagate = True
         return ctrl_logger
 

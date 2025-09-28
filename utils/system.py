@@ -803,6 +803,15 @@ class TranscriptionRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers(); self.wfile.write(payload); return
+        if self.path == "/kill":
+            logger.info("Received /kill request; shutting down server.")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "shutting down"}).encode("utf-8"))
+            # Trigger server shutdown in a separate thread to avoid blocking the response
+            threading.Thread(target=shutdown_server, daemon=True).start()
+            return
         self.send_error(404, "Unknown endpoint")
     def do_POST(self):
         from utils.models import transcribe_local  # lazy import to avoid circulars
@@ -855,6 +864,13 @@ def start_server() -> None:
         port = int(settings.get("server_port", 65432))
         discovery_port = int(settings.get("discovery_port", 54330))
     logger.info("Starting CtrlSpeak server on port %s (discovery %s)", port, discovery_port)
+    # Ensure transcriber is initialized before starting the server
+    from utils.models import initialize_transcriber
+    if initialize_transcriber() is None:
+        logger.error("Failed to initialize transcriber; cannot start server")
+        notify_error("Server startup failed", "Failed to initialize transcription engine.")
+        return
+
     try:
         server_httpd = ThreadingHTTPServer(("0.0.0.0", port), TranscriptionRequestHandler)
     except OSError as exc:
@@ -1141,6 +1157,7 @@ def parse_cli_args(argv: list[str]) -> argparse.Namespace:
         help="Download CUDA runtime assets and exit without launching the UI",
     )
     parser.add_argument("--automation-flow", action="store_true", help="Run the automated end-to-end regression workflow")
+    parser.add_argument("--start-server-only", action="store_true", help="Start the CtrlSpeak server and keep it running (for programmatic testing).")
     args, _ = parser.parse_known_args(argv[1:])
     return args
 

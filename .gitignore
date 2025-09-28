@@ -29,5 +29,8 @@ client_only.flag
 part*.wav
 temp*.wav
 
+# Bot Identities
+third_party/social_robot/identities/girlfriend/
+
 # Misc
 Thumbs.db
