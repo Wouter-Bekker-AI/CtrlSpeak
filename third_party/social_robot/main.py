@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import io
 import json
 import os
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 
@@ -16,7 +19,7 @@ from audio.tts import KokoroTTS
 from audio.vad import VADListener, VADConfig
 from face_animation.face import FaceAnimator, FaceSettings
 from face_animation.logo import LogoAnimator
-from llm.ollama import OllamaClient
+from llm.ollama import OllamaClient, OllamaUnavailableError
 from PySide6.QtWidgets import QApplication
 
 IDENTITIES_ROOT = Path(__file__).resolve().parent / "identities"
@@ -218,9 +221,12 @@ def main():
                 return
 
             llm_response = ""
-            for chunk in ollama_client.query(recognized_text, stream=True):
-                llm_response += chunk
-            print(f"TEST LLM: {llm_response.strip()}")
+            try:
+                for chunk in ollama_client.query(recognized_text, stream=True):
+                    llm_response += chunk
+                print(f"TEST LLM: {llm_response.strip()}")
+            except OllamaUnavailableError as exc:
+                print(f"TEST LLM ERROR: {exc}")
         except Exception as e:
             print(f"TEST ERROR: {e}")
         finally:
@@ -266,6 +272,44 @@ def main():
     vad_listener: Optional[VADListener] = None
     last_bot_response: str = ""
 
+    def _capture_screenshot() -> tuple[Optional[str], Optional[Path]]:
+        try:
+            import pyautogui  # Local import to avoid heavy dependency on startup
+        except Exception as exc:
+            print(f"-> Screenshot capture unavailable: {exc}")
+            return None, None
+
+        try:
+            image = pyautogui.screenshot()
+        except Exception as exc:
+            print(f"-> Failed to capture screenshot: {exc}")
+            return None, None
+
+        buffer = io.BytesIO()
+        try:
+            image.save(buffer, format="PNG")
+        except Exception as exc:
+            print(f"-> Failed to encode screenshot: {exc}")
+            return None, None
+
+        screenshot_bytes = buffer.getvalue()
+        image_b64 = base64.b64encode(screenshot_bytes).decode("ascii")
+
+        saved_path: Optional[Path] = None
+        if profile.memory_path:
+            try:
+                screenshot_dir = profile.memory_path / "screenshots"
+                screenshot_dir.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+                saved_path = screenshot_dir / f"screenshot_{timestamp}.png"
+                saved_path.write_bytes(screenshot_bytes)
+            except Exception as exc:
+                print(f"-> Failed to persist screenshot to disk: {exc}")
+                saved_path = None
+
+        print("-> Captured screenshot for analysis.")
+        return image_b64, saved_path
+
     def on_speech_detected(raw_bytes: bytes) -> None:
         nonlocal vad_listener, last_bot_response
         if vad_listener is None: return
@@ -293,13 +337,49 @@ def main():
             animator.update_amplitude(0.0)
             return
 
+        screenshot_b64: Optional[str] = None
+        screenshot_path: Optional[Path] = None
+        augmented_text = recognized_text
+
+        if "look at my screen" in normalized_user:
+            screenshot_b64, screenshot_path = _capture_screenshot()
+            if screenshot_b64:
+                prompt_suffix = "Please describe the attached screenshot and let me know anything important you notice."
+                if augmented_text.strip():
+                    augmented_text = f"{augmented_text.strip()}\n\n{prompt_suffix}"
+                else:
+                    augmented_text = prompt_suffix
+            else:
+                print("-> Proceeding without screenshot due to capture failure.")
+
         history = load_history(profile.memory_path)
-        llm_response = ollama_client.query(recognized_text, history=history)
+        try:
+    
+        user_content: Optional[List[dict]] = None
+        if screenshot_b64:
+            user_content = [
+                {"type": "text", "text": augmented_text},
+                {"type": "image", "image": screenshot_b64},
+            ]
+        llm_response = ollama_client.query(augmented_text, history=history, content=user_content)
+        except OllamaUnavailableError as exc:
+            failure_message = str(exc)
+            print(f"-> Ollama error: {failure_message}")
+            animator.update_amplitude(0.0)
+            return
         if not llm_response.strip():
             animator.update_amplitude(0.0)
             return
 
-        history.append({"role": "user", "content": recognized_text})
+        history_entry: dict
+        if user_content is not None:
+            history_entry = {"role": "user", "content": user_content}
+            if screenshot_path:
+                history_entry["metadata"] = {"screenshot_file": str(screenshot_path)}
+        else:
+            history_entry = {"role": "user", "content": recognized_text}
+
+        history.append(history_entry)
         history.append({"role": "assistant", "content": llm_response})
         save_history(profile.memory_path, history)
 
