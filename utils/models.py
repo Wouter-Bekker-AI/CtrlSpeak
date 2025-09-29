@@ -1449,9 +1449,20 @@ class WelcomeWindow:
         title = ttk.Label(card, text="Welcome to CtrlSpeak", style="FunFactsTitle.TLabel")
         title.pack(pady=(0, 10))
 
+        subject = (self._progress_label or "model").strip() or "model"
+        lower_subject = subject.lower()
+        if lower_subject.startswith(("the ", "this ", "that ")):
+            subtitle_text = (
+                f"We're downloading {subject}. Enjoy a few fun facts while we get things ready."
+            )
+        else:
+            subtitle_text = (
+                f"We're downloading the {subject}. Enjoy a few fun facts while we get things ready."
+            )
+
         subtitle = ttk.Label(
             card,
-            text="Here are a few fun facts while we prepare your Whisper model.",
+            text=subtitle_text,
             style="FunFactsSubtitle.TLabel",
             wraplength=max(self._fact_wrap - 120, 360),
             justify=tk.CENTER,

@@ -83,6 +83,10 @@ The helper reuses an existing server when you pass `stt_url=...`, and you can fo
 
 Each option also has a matching CLI flag in `third_party/social_robot/main.py` (for example `--identity`, `--prompt-file`, `--system-prompt`, `--memory-dir`).
 
+## Assistant Model Downloads
+
+Launching Chat with Bot from the management window now verifies that the Ollama model required by the selected identity is available before SocialRobot starts. CtrlSpeak queries the Ollama API to see whether the model is already cached and, when it is missing, reuses the same welcome workflow that Whisper and CUDA downloads use: the intro video plays, fun facts rotate, and the lockout window reports live status with a cancel button. Once the download succeeds the window closes automatically and the bot process launches; cancellation or errors stop the launch and surface the failure in the lockout message so the user can try again after resolving the issue.【F:utils/bot_integration.py†L61-L213】【F:utils/models.py†L1308-L1484】
+
 ## GUI Workflow
 
 1. Start CtrlSpeak in Client + Server mode.
