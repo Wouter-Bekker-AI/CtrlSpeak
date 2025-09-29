@@ -17,5 +17,5 @@ pyright
 requests
 pygame
 kokoro-onnx
-webrtcvad
+webrtcvad-wheels
 PySide6

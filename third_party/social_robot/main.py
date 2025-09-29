@@ -354,14 +354,13 @@ def main():
 
         history = load_history(profile.memory_path)
         try:
-    
-        user_content: Optional[List[dict]] = None
-        if screenshot_b64:
-            user_content = [
-                {"type": "text", "text": augmented_text},
-                {"type": "image", "image": screenshot_b64},
-            ]
-        llm_response = ollama_client.query(augmented_text, history=history, content=user_content)
+            user_content: Optional[List[dict]] = None
+            if screenshot_b64:
+                user_content = [
+                    {"type": "text", "text": augmented_text},
+                    {"type": "image", "image": screenshot_b64},
+                ]
+            llm_response = ollama_client.query(augmented_text, history=history, content=user_content)
         except OllamaUnavailableError as exc:
             failure_message = str(exc)
             print(f"-> Ollama error: {failure_message}")
