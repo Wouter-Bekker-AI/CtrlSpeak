@@ -61,6 +61,8 @@ class IdentityProfile:
         base_path: Path,
         ollama_options: Optional[Dict[str, object]] = None,
         ollama_hardware: Optional[str] = None,
+        vision_enabled: bool = False,
+        tool_enabled: bool = False,
     ) -> None:
         self.name = name
         self.system_prompt = system_prompt
@@ -71,6 +73,8 @@ class IdentityProfile:
         self.base_path = base_path
         self.ollama_options = dict(ollama_options) if ollama_options else {}
         self.ollama_hardware = ollama_hardware
+        self.vision_enabled = vision_enabled
+        self.tool_enabled = tool_enabled
 
 def _resolve_identities_root(arg_value: Optional[str]) -> Path:
     if arg_value:
@@ -161,6 +165,24 @@ def resolve_identity(args) -> tuple[IdentityProfile, dict]:
     elif hardware_pref is not None:
         print("-> Ignoring ollama_hardware because it is not a string value.")
 
+    vision_flag = config.get("vision")
+    if isinstance(vision_flag, bool):
+        vision_enabled = vision_flag
+    elif vision_flag is not None:
+        print("-> Ignoring vision value; expected a boolean true/false.")
+        vision_enabled = False
+    else:
+        vision_enabled = False
+
+    tool_flag = config.get("tool")
+    if isinstance(tool_flag, bool):
+        tool_enabled = tool_flag
+    elif tool_flag is not None:
+        print("-> Ignoring tool value; expected a boolean true/false.")
+        tool_enabled = False
+    else:
+        tool_enabled = False
+
     profile = IdentityProfile(
         name=identity_name,
         system_prompt=system_prompt,
@@ -171,6 +193,8 @@ def resolve_identity(args) -> tuple[IdentityProfile, dict]:
         base_path=identity_path,
         ollama_options=ollama_options,
         ollama_hardware=normalized_hardware,
+        vision_enabled=vision_enabled,
+        tool_enabled=tool_enabled,
     )
 
     print(f"-> Loaded identity '{profile.name}' (voice={profile.voice}, model={profile.llm_model})")
@@ -389,7 +413,12 @@ def main():
         screenshot_path: Optional[Path] = None
         augmented_text = cleaned
 
-        should_capture = force_screenshot or ("look at my screen" in normalized_user)
+        should_capture = False
+        if profile.vision_enabled:
+            should_capture = force_screenshot or ("look at my screen" in normalized_user)
+        elif force_screenshot:
+            print("-> Screenshot capture is disabled for this identity.")
+
         if should_capture:
             screenshot_b64, screenshot_path = _capture_screenshot()
             if screenshot_b64:
@@ -521,6 +550,9 @@ def main():
             _handle_user_request(recognized_text, force_screenshot=False, source="voice")
 
     def _trigger_look_at_screen() -> None:
+        if not profile.vision_enabled:
+            print("-> Look at my Screen is disabled for this identity.")
+            return
         with processing_lock:
             _handle_user_request(
                 "look at my screen",
@@ -529,7 +561,10 @@ def main():
             )
 
     if isinstance(animator, LogoAnimator):
-        animator.set_look_at_screen_callback(_trigger_look_at_screen)
+        if profile.vision_enabled:
+            animator.set_look_at_screen_callback(_trigger_look_at_screen)
+        else:
+            animator.set_look_at_screen_callback(None)
 
     def _stdin_command_listener() -> None:
         if sys.stdin is None or sys.stdin.closed:

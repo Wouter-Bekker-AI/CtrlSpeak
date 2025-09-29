@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import shutil
 import threading
 import time
 from typing import Callable, Optional
@@ -1766,9 +1767,21 @@ class ManagementWindow:
             dialog.destroy()
             if messagebox.askyesno("Confirm Clear Memory", f"Are you sure you want to clear the memory for the '{identity}' identity? This cannot be undone."):
                 try:
-                    memory_file = identities_dir / identity / "memory" / "conversation.json"
+                    memory_dir = identities_dir / identity / "memory"
+                    memory_file = memory_dir / "conversation.json"
+                    screenshots_dir = memory_dir / "screenshots"
+
+                    cleared_anything = False
+
                     if memory_file.exists():
                         os.remove(memory_file)
+                        cleared_anything = True
+
+                    if screenshots_dir.exists():
+                        shutil.rmtree(screenshots_dir)
+                        cleared_anything = True
+
+                    if cleared_anything:
                         messagebox.showinfo("Clear Bot Memory", f"Memory for '{identity}' has been cleared.")
                     else:
                         messagebox.showinfo("Clear Bot Memory", f"No memory found for '{identity}'.")
@@ -2281,13 +2294,19 @@ class ManagementWindow:
 
     def close(self) -> None:
         global management_window
-        if self.is_open():
-            self._unbind_mousewheel(None)
+        if not self.is_open():
+            management_window = None
+            return
+
+        if self._bot_status_checker_job:
             try:
-                _bot_stop()
+                self.window.after_cancel(self._bot_status_checker_job)
             except Exception:
                 pass
-            self.window.destroy()
+            self._bot_status_checker_job = None
+
+        self._unbind_mousewheel(None)
+        self.window.destroy()
         management_window = None
 
 

@@ -89,7 +89,8 @@ class FloatingLogo(QWidget):
 
     def _open_menu(self, pos) -> None:
         menu = QMenu(self)
-        menu.addAction(self._look_action)
+        if self._on_look_at_screen is not None:
+            menu.addAction(self._look_action)
         menu.addAction(self._quit_action)
         menu.exec_(self.mapToGlobal(pos))
 
