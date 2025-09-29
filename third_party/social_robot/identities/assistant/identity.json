@@ -5,7 +5,7 @@
   "prompt_file": "system_prompt.txt",
   "animation_style": "logo",
   "logo_image": "TrueAI_Logo_Transparent_Final.png",
-  "llm_model": "gemma3:4b",
+  "llm_model": "gemma3:12b",
   "llm_url": "http://localhost:11434/api/chat",
   "ollama_hardware": "cpu_and_gpu",
   "ollama_options": {
