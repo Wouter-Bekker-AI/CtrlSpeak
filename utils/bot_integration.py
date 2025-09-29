@@ -532,10 +532,26 @@ def start_bot(
         identity=identity,
         identities_root=identities_root,
     )
-    _warm_ollama_model(resolved_llm_url, resolved_llm_model)
-
     if not _ensure_identity_llm_ready(identity, identities_dir, llm_model, llm_url):
         return False
+
+    normalized_base_url: Optional[str] = None
+    resolved_model_name: Optional[str] = None
+    if resolved_llm_model:
+        resolved_model_name = resolved_llm_model.strip() or None
+    if resolved_llm_url:
+        normalized_base_url = _normalize_ollama_base_url(resolved_llm_url)
+
+    if normalized_base_url and resolved_model_name:
+        state = _ollama_model_state(normalized_base_url, resolved_model_name)
+        if state is True:
+            _warm_ollama_model(resolved_llm_url, resolved_model_name)
+        else:
+            logger.debug(
+                "Skipping Ollama warm-up for model %s (state=%s)",
+                resolved_model_name,
+                state,
+            )
 
     env = os.environ.copy()
     env["CTRLSPEAK_STT_URL"] = stt_url
@@ -668,7 +684,23 @@ def run_bot_test(
         identity=identity,
         identities_root=identities_root,
     )
-    _warm_ollama_model(resolved_llm_url, resolved_llm_model)
+    normalized_base_url: Optional[str] = None
+    resolved_model_name: Optional[str] = None
+    if resolved_llm_model:
+        resolved_model_name = resolved_llm_model.strip() or None
+    if resolved_llm_url:
+        normalized_base_url = _normalize_ollama_base_url(resolved_llm_url)
+
+    if normalized_base_url and resolved_model_name:
+        state = _ollama_model_state(normalized_base_url, resolved_model_name)
+        if state is True:
+            _warm_ollama_model(resolved_llm_url, resolved_model_name)
+        else:
+            logger.debug(
+                "Skipping Ollama warm-up for model %s in test run (state=%s)",
+                resolved_model_name,
+                state,
+            )
 
     env = os.environ.copy()
     env["CTRLSPEAK_STT_URL"] = stt_url
