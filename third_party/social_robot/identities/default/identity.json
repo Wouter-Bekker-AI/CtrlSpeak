@@ -13,5 +13,7 @@
     "num_ctx": 8192
   },
   "voice": "am_michael",
+  "vision": false,
+  "tool": false,
   "memory_dir": "memory"
 }

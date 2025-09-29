@@ -31,6 +31,8 @@ The loader understands the following `identity.json` keys:
     "num_ctx": 8192
   },
   "voice": "am_michael",
+  "vision": true,
+  "tool": false,
   "memory_dir": "memory"
 }
 ```
@@ -44,6 +46,13 @@ When present, `ollama_options` is merged into the payload that SocialRobot sends
 - `gpu_only` – require the checkpoint to stay fully on the GPU (`gpu_only: true`).
 
 CtrlSpeak applies the same options and hardware preference when it pre-warms the checkpoint via `/generate`, ensuring the residency chosen during warm-up matches the settings SocialRobot will use at runtime.
+
+The additional boolean keys control multimodal and future extensibility features:
+
+- `vision` – Enables screenshot capture and the **Look at my Screen** workflow. When `true`, SocialRobot listens for the spoken “look at my screen” command, exposes the matching context-menu action on the floating logo, and pipes captured images to the LLM. When `false`, the command is ignored, the context-menu item is hidden, and no screenshots are taken.
+- `tool` – Reserved flag for forthcoming external tool integrations. It defaults to `false` today but can be toggled once tool calling is implemented.
+
+CtrlSpeak ships with two bundled identities: `assistant` (vision enabled) and `default` (vision disabled). Both currently set `tool` to `false` and can be expanded as the tool feature matures.
 
 You can switch identities from the command line with:
 
@@ -102,9 +111,13 @@ Launching Chat with Bot from the management window now verifies that the Ollama 
 
 ## Screenshot workflow
 
-When you launch the **Assistant** identity from the management UI and say “look at my screen,” SocialRobot now captures the current desktop, stores a PNG copy under the identity’s `memory/screenshots` directory, and forwards the encoded image to the configured Ollama model. The spoken request is automatically augmented with a clarification asking the model to describe the screenshot, so multimodal checkpoints such as `gemma3:12b` can respond with contextual commentary. If the capture fails (for example, when `pyautogui` cannot access the display), the bot logs the issue and continues as a text-only exchange.
+When you launch an identity with `vision: true` (for example the bundled **Assistant** persona) and say “look at my screen,” SocialRobot captures the current desktop, stores a PNG copy under the identity’s `memory/screenshots` directory, and forwards the encoded image to the configured Ollama model. The spoken request is automatically augmented with a clarification asking the model to describe the screenshot, so multimodal checkpoints such as `gemma3:12b` can respond with contextual commentary. If the capture fails (for example, when `pyautogui` cannot access the display), the bot logs the issue and continues as a text-only exchange. Identities with `vision: false` skip these hooks entirely—the floating logo omits the **Look at my Screen** context-menu option and voice commands fall back to a standard text-only exchange.
 
 As soon as you pick an identity, CtrlSpeak now pings the configured Ollama endpoint with that profile’s model so the checkpoint is fully loaded before you speak. This avoids the first-turn lag that previously occurred while Ollama initialized the weights after receiving the initial utterance.
+
+## Clearing stored memory
+
+Use the **Clear Bot Memory** button in the management window when you need to wipe a persona’s stored context. After you choose an identity and confirm the prompt, CtrlSpeak removes that profile’s `memory/conversation.json` file and deletes the entire `memory/screenshots` directory so no cached captures remain. If neither artifact exists, the dialog reports that there is nothing to clear.
 
 ## GUI Workflow
 
@@ -114,5 +127,5 @@ As soon as you pick an identity, CtrlSpeak now pings the configured Ollama endpo
 4. Speak once the "-> Starting the VAD listener..." message appears in the terminal; responses are spoken back and logged to the console as `-> Bot replied: ...`.
 5. Right-click the transparent logo to open its context menu. Choose **Look at my Screen** to capture the desktop and run the same augmented LLM request you would get from speaking the phrase aloud. The menu still includes **Quit** when you need to close the bot quickly.
 
-Stopping the management window automatically terminates SocialRobot.
+The SocialRobot process keeps running if you close the management window—you can reopen it later without interrupting the conversation. To shut the bot down, either click **Stop Chat with Bot** in the management window or choose **Quit** from the floating logo's context menu.
 
