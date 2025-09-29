@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import requests
 
@@ -21,13 +21,22 @@ class OllamaClient:
         self.stream = stream
         self.system_prompt = system_prompt
 
-    def _build_messages(self, user_text: str, history: Optional[List[dict]] = None) -> List[dict]:
+    def _normalize_history_entry(self, entry: dict) -> dict:
+        role = entry.get("role", "user")
+        content = entry.get("content", "")
+        return {"role": role, "content": content}
+
+    def _build_messages(
+        self,
+        user_payload: Any,
+        history: Optional[List[dict]] = None,
+    ) -> List[dict]:
         messages: List[dict] = []
-        if history:
-            messages.extend(history)
         if self.system_prompt:
             messages.append({"role": "system", "content": self.system_prompt})
-        messages.append({"role": "user", "content": user_text})
+        if history:
+            messages.extend(self._normalize_history_entry(item) for item in history)
+        messages.append({"role": "user", "content": user_payload})
         return messages
 
     def _fallback_response(self, user_text: str, stream: bool, error: Exception | None = None):
@@ -49,11 +58,18 @@ class OllamaClient:
         except Exception as exc:
             print(f"-> Failed to request Ollama to unload model: {exc}")
 
-    def query(self, user_text: str, stream: Optional[bool] = None, history: Optional[List[dict]] = None):
+    def query(
+        self,
+        user_text: str,
+        stream: Optional[bool] = None,
+        history: Optional[List[dict]] = None,
+        content: Any | None = None,
+    ):
         use_stream = self.stream if stream is None else stream
+        user_payload = content if content is not None else user_text
         payload = {
             "model": self.model,
-            "messages": self._build_messages(user_text, history=history),
+            "messages": self._build_messages(user_payload, history=history),
             "stream": use_stream,
         }
         print("-> Sending user text to Ollama:\n", user_text)

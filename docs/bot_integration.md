@@ -83,6 +83,10 @@ The helper reuses an existing server when you pass `stt_url=...`, and you can fo
 
 Each option also has a matching CLI flag in `third_party/social_robot/main.py` (for example `--identity`, `--prompt-file`, `--system-prompt`, `--memory-dir`).
 
+## Screenshot workflow
+
+When you launch the **Assistant** identity from the management UI and say “look at my screen,” SocialRobot now captures the current desktop, stores a PNG copy under the identity’s `memory/screenshots` directory, and forwards the encoded image to the configured Ollama model. The spoken request is automatically augmented with a clarification asking the model to describe the screenshot, so multimodal checkpoints such as `llava:13b` can respond with contextual commentary. If the capture fails (for example, when `pyautogui` cannot access the display), the bot logs the issue and continues as a text-only exchange.
+
 ## GUI Workflow
 
 1. Start CtrlSpeak in Client + Server mode.
