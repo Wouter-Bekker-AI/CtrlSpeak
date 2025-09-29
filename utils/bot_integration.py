@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+import json
 import os
 import sys
 import time
 import subprocess
 from pathlib import Path
 from typing import Optional
+
+import requests
 
 from utils.config_paths import get_logger
 from utils.system import (
@@ -55,6 +58,60 @@ def _resolve_stt_url() -> Optional[str]:
         return None
 
 
+def _load_identity_llm_config(identity: str, identities_root: Path) -> tuple[Optional[str], Optional[str]]:
+    config_path = identities_root / identity / "identity.json"
+    if not config_path.exists():
+        return None, None
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.exception("Failed to parse identity configuration for '%s'", identity)
+        return None, None
+    return data.get("llm_url"), data.get("llm_model")
+
+
+def _resolve_llm_settings(
+    *,
+    llm_url: Optional[str],
+    llm_model: Optional[str],
+    identity: Optional[str],
+    identities_root: Path,
+) -> tuple[Optional[str], Optional[str]]:
+    resolved_url = llm_url or os.environ.get("BOT_LLM_URL")
+    resolved_model = llm_model or os.environ.get("BOT_LLM_MODEL")
+    if identity:
+        identity_url, identity_model = _load_identity_llm_config(identity, identities_root)
+        if not resolved_url:
+            resolved_url = identity_url
+        if not resolved_model:
+            resolved_model = identity_model
+    return resolved_url, resolved_model
+
+
+def _warm_ollama_model(llm_url: Optional[str], llm_model: Optional[str]) -> None:
+    if not llm_url or not llm_model:
+        return
+
+    warm_url = llm_url.rstrip("/")
+    if warm_url.endswith("/chat"):
+        warm_url = warm_url[: -len("/chat")]
+    warm_url = f"{warm_url}/generate"
+
+    payload = {
+        "model": llm_model,
+        "prompt": "",
+        "stream": False,
+        "keep_alive": "5m",
+    }
+
+    try:
+        response = requests.post(warm_url, json=payload, timeout=10)
+        response.raise_for_status()
+        logger.info("Preloaded Ollama model %s", llm_model)
+    except Exception:
+        logger.warning("Failed to preload Ollama model %s", llm_model, exc_info=True)
+
+
 def start_bot(
     llm_url: Optional[str] = None,
     llm_model: Optional[str] = None,
@@ -90,6 +147,25 @@ def start_bot(
     if not entry.exists():
         logger.error("SocialRobot entrypoint not found at %s", entry)
         return False
+
+    if identities_dir:
+        identities_root = Path(identities_dir).expanduser()
+        if not identities_root.is_absolute():
+            identities_root = robot_dir / identities_root
+    else:
+        identities_root = robot_dir / "identities"
+    try:
+        identities_root = identities_root.resolve()
+    except FileNotFoundError:
+        pass
+
+    resolved_llm_url, resolved_llm_model = _resolve_llm_settings(
+        llm_url=llm_url,
+        llm_model=llm_model,
+        identity=identity,
+        identities_root=identities_root,
+    )
+    _warm_ollama_model(resolved_llm_url, resolved_llm_model)
 
     env = os.environ.copy()
     env["CTRLSPEAK_STT_URL"] = stt_url
@@ -204,6 +280,25 @@ def run_bot_test(
     if not entry.exists():
         logger.error("SocialRobot entrypoint not found at %s", entry)
         return "Error: SocialRobot entrypoint not found."
+
+    if identities_dir:
+        identities_root = Path(identities_dir).expanduser()
+        if not identities_root.is_absolute():
+            identities_root = robot_dir / identities_root
+    else:
+        identities_root = robot_dir / "identities"
+    try:
+        identities_root = identities_root.resolve()
+    except FileNotFoundError:
+        pass
+
+    resolved_llm_url, resolved_llm_model = _resolve_llm_settings(
+        llm_url=llm_url,
+        llm_model=llm_model,
+        identity=identity,
+        identities_root=identities_root,
+    )
+    _warm_ollama_model(resolved_llm_url, resolved_llm_model)
 
     env = os.environ.copy()
     env["CTRLSPEAK_STT_URL"] = stt_url

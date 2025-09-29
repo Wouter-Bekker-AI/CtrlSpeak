@@ -1002,6 +1002,9 @@ def acquire_single_instance_lock() -> bool:
     global instance_lock_handle
     lock_path = get_config_dir() / LOCK_FILENAME
     logger.debug("Attempting to acquire instance lock at %s", lock_path)
+    if instance_lock_handle is not None:
+        logger.debug("Instance lock already held by current process")
+        return False
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
     except Exception:
