@@ -5,7 +5,7 @@
   "prompt_file": "system_prompt.txt",
   "animation_style": "logo",
   "logo_image": "TrueAI_Logo_Transparent_Final.png",
-  "llm_model": "llava:13b",
+  "llm_model": "gemma3:12b",
   "llm_url": "http://localhost:11434/api/chat",
   "voice": "af_sky",
   "memory_dir": "memory"
