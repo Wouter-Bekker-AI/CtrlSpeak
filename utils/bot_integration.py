@@ -1,19 +1,34 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+
+import json
 import os
 import sys
 import time
+import threading
 import subprocess
+from multiprocessing import Process, Queue as MPQueue
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse, urlunparse
+
+import requests
 
 from utils.config_paths import get_logger
 from utils.system import (
-    CLIENT_ONLY_BUILD, start_server, settings, settings_lock,
-    get_best_server, load_settings, save_settings,
+    CLIENT_ONLY_BUILD,
+    get_best_server,
+    load_settings,
+    save_settings,
+    settings,
+    settings_lock,
+    start_server,
+    ui_close_lockout_window,
+    ui_show_lockout_window,
+    ui_update_lockout_message,
 )
 
-from utils.models import DEFAULT_MODEL_NAME
+from utils.models import DEFAULT_MODEL_NAME, WelcomeWindow
 
 def _ensure_server_defaults() -> None:
     """Make sure settings permit running the embedded server."""
@@ -31,6 +46,12 @@ def _ensure_server_defaults() -> None:
         save_settings()
 
 logger = get_logger(__name__)
+
+_SOCIAL_ROBOT_ROOT = Path(__file__).resolve().parents[1] / "third_party" / "social_robot"
+_DEFAULT_IDENTITIES_ROOT = _SOCIAL_ROBOT_ROOT / "identities"
+_DEFAULT_IDENTITY_NAME = "default"
+_DEFAULT_LLM_MODEL = "gemma3:1b"
+_DEFAULT_LLM_URL = "http://localhost:11434/api/chat"
 
 _bot_proc: Optional[subprocess.Popen] = None
 
@@ -53,6 +74,356 @@ def _resolve_stt_url() -> Optional[str]:
     except Exception:
         logger.exception("Failed to resolve STT URL")
         return None
+
+
+def _resolve_identities_root(identities_dir: Optional[str]) -> Path:
+    candidate = identities_dir or os.getenv("BOT_IDENTITIES_DIR")
+    if candidate:
+        try:
+            return Path(candidate).expanduser().resolve()
+        except Exception:
+            logger.exception("Failed to resolve identities directory %s", candidate)
+    return _DEFAULT_IDENTITIES_ROOT
+
+
+def _load_identity_config(identity: str, identities_dir: Optional[str]) -> tuple[dict, Path]:
+    root = _resolve_identities_root(identities_dir)
+    identity_path = (root / identity).expanduser()
+    try:
+        identity_path = identity_path.resolve()
+    except Exception:
+        pass
+
+    config: dict = {}
+    config_path = identity_path / "identity.json"
+    if config_path.exists():
+        try:
+            config.update(json.loads(config_path.read_text(encoding="utf-8")))
+        except Exception:
+            logger.exception("Failed to parse identity config at %s", config_path)
+
+    return config, identity_path
+
+
+def _identity_display_name(identity: str, config: dict) -> str:
+    display = str(config.get("name") or "").strip()
+    if not display:
+        display = identity.replace("_", " ").strip()
+    if not display:
+        display = "Assistant"
+    return display.title()
+
+
+def _normalize_ollama_base_url(llm_url: str) -> Optional[str]:
+    llm_url = (llm_url or "").strip()
+    if not llm_url:
+        return None
+
+    parsed = urlparse(llm_url)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+
+    path = parsed.path or ""
+    if path.endswith("/chat"):
+        path = path[: -len("/chat")]
+    path = path or "/api"
+    if not path.endswith("/api"):
+        path = path.rstrip("/")
+        if not path:
+            path = "/api"
+        else:
+            if not path.endswith("/api"):
+                path = f"{path}/api"
+    if not path.startswith("/"):
+        path = f"/{path}"
+
+    normalized = urlunparse((parsed.scheme, parsed.netloc, path.rstrip("/"), "", "", ""))
+    return normalized.rstrip("/")
+
+
+def _ollama_model_state(base_url: str, model_name: str) -> Optional[bool]:
+    endpoint = f"{base_url.rstrip('/')}/show"
+    payload = {"model": model_name}
+    try:
+        response = requests.post(endpoint, json=payload, timeout=10)
+    except Exception as exc:
+        logger.warning(
+            "Failed to reach Ollama when checking model %s at %s: %s",
+            model_name,
+            base_url,
+            exc,
+        )
+        return None
+
+    if response.status_code == 200:
+        return True
+
+    error_text = ""
+    try:
+        data = response.json()
+        error_text = str(data.get("error") or "")
+    except Exception:
+        error_text = response.text or ""
+
+    lowered = error_text.lower()
+    if response.status_code in (400, 404) and ("not found" in lowered):
+        return False
+    if response.status_code == 404:
+        return False
+    if "not found" in lowered:
+        return False
+
+    if response.status_code >= 400:
+        logger.warning(
+            "Unexpected response while checking Ollama model %s (HTTP %s): %s",
+            model_name,
+            response.status_code,
+            error_text.strip() or response.reason,
+        )
+
+    return None
+
+
+def _ollama_pull_worker(model_name: str, base_url: str, queue: MPQueue) -> None:
+    def _put(payload: tuple[str, ...]) -> None:
+        try:
+            queue.put_nowait(payload)
+        except Exception:
+            pass
+
+    session: Optional[requests.Session] = None
+    try:
+        session = requests.Session()
+        pull_url = f"{base_url.rstrip('/')}/pull"
+        _put(("stage", f"Contacting Ollama to download {model_name}…"))
+        response = session.post(
+            pull_url,
+            json={"model": model_name, "stream": True},
+            stream=True,
+            timeout=30,
+        )
+        response.raise_for_status()
+
+        total_bytes: Optional[int] = None
+        completed_bytes = 0
+
+        for raw_line in response.iter_lines():
+            if not raw_line:
+                continue
+            try:
+                payload = json.loads(raw_line.decode("utf-8"))
+            except Exception:
+                continue
+
+            status_text = str(payload.get("status") or "").strip()
+            if status_text:
+                _put(("stage", status_text))
+
+            error_text = str(payload.get("error") or "").strip()
+            if error_text:
+                raise RuntimeError(error_text)
+
+            if isinstance(payload.get("total"), int):
+                total_bytes = payload["total"]
+            if isinstance(payload.get("completed"), int):
+                completed_bytes = payload["completed"]
+
+            if total_bytes is not None and total_bytes > 0:
+                _put(("progress", completed_bytes, total_bytes))
+            elif completed_bytes > 0:
+                _put(("progress", completed_bytes, 0))
+
+        _put(("done",))
+    except Exception as exc:
+        logger.exception("Failed to download Ollama model %s", model_name)
+        _put(("error", f"Failed to download the assistant model: {exc}"))
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+
+def _download_ollama_model_with_gui(
+    identity_display: str,
+    model_name: str,
+    base_url: str,
+) -> bool:
+    progress_queue: MPQueue = MPQueue()
+    process = Process(target=_ollama_pull_worker, args=(model_name, base_url, progress_queue))
+    process.daemon = True
+    process.start()
+
+    cancel_requested = threading.Event()
+    monitor_stop = threading.Event()
+
+    def _request_cancel() -> None:
+        if cancel_requested.is_set():
+            return
+        cancel_requested.set()
+        try:
+            ui_update_lockout_message("Cancelling assistant model download…")
+        except Exception:
+            logger.exception("Failed to update lockout message while cancelling Ollama download")
+        if process.is_alive():
+            try:
+                process.terminate()
+            except Exception:
+                logger.exception("Failed to terminate Ollama download process")
+        try:
+            progress_queue.put_nowait(("cancelled",))
+        except Exception:
+            pass
+
+    pretty_name = (identity_display or "assistant").strip() or "assistant"
+    if pretty_name.lower().endswith("assistant"):
+        assistant_label = pretty_name
+    else:
+        assistant_label = f"{pretty_name} assistant"
+
+    window_label = f"{assistant_label} model ({model_name})"
+    initial_message = (
+        f"We're downloading the {model_name} model for the {assistant_label}."
+    )
+
+    def _monitor_model_availability() -> None:
+        """Poll Ollama so the UI can finish even if streaming never signals EOF."""
+
+        # Give Ollama a brief head start so we don't spam logs before it reacts.
+        time.sleep(2.0)
+
+        while not cancel_requested.is_set() and not monitor_stop.is_set():
+            try:
+                state = _ollama_model_state(base_url, model_name)
+            except Exception:
+                state = None
+
+            if state is True:
+                try:
+                    progress_queue.put_nowait(("stage", f"Preparing the {assistant_label}…"))
+                except Exception:
+                    pass
+                try:
+                    progress_queue.put_nowait(("done",))
+                except Exception:
+                    pass
+                return
+
+            # If Ollama can't confirm the model yet just keep waiting – a
+            # successful pull will eventually make the model visible via /show.
+            time.sleep(2.5)
+
+    lockout_open = False
+    try:
+        ui_show_lockout_window(initial_message, cancel_callback=_request_cancel)
+        lockout_open = True
+    except Exception:
+        logger.exception("Failed to show lockout window during Ollama model download")
+
+    monitor_thread = threading.Thread(target=_monitor_model_availability, name="OllamaModelMonitor", daemon=True)
+    monitor_thread.start()
+
+    window = WelcomeWindow(window_label, progress_queue, process)
+    status, error_message = window.run()
+
+    monitor_stop.set()
+    if monitor_thread.is_alive():
+        monitor_thread.join(timeout=1.5)
+
+    process.join(timeout=1.0)
+    if process.is_alive():
+        try:
+            process.terminate()
+        except Exception:
+            logger.exception("Failed to terminate Ollama download worker after window closed")
+        process.join(timeout=0.5)
+
+    try:
+        progress_queue.close()
+    except Exception:
+        pass
+    try:
+        progress_queue.join_thread()
+    except Exception:
+        pass
+
+    if status == "success":
+        # Double-check with Ollama so we don't race returning before the model
+        # is actually advertised as available.
+        deadline = time.time() + 30.0
+        while time.time() < deadline and not cancel_requested.is_set():
+            state = _ollama_model_state(base_url, model_name)
+            if state is True:
+                break
+            if state is False:
+                time.sleep(1.0)
+                continue
+            # When Ollama is unreachable we should not block indefinitely.
+            time.sleep(1.0)
+
+        try:
+            if lockout_open:
+                ui_close_lockout_window(f"The {assistant_label} model is ready.")
+        except Exception:
+            logger.exception("Failed to close lockout window after Ollama download success")
+        return True
+
+    if status == "cancelled":
+        message = f"The {assistant_label} model download was cancelled."
+    else:
+        message = error_message or f"CtrlSpeak could not download the {assistant_label} model."
+
+    try:
+        if lockout_open:
+            ui_close_lockout_window(message)
+    except Exception:
+        logger.exception("Failed to close lockout window after Ollama download failure")
+
+    return False
+
+
+def _ensure_identity_llm_ready(
+    identity: Optional[str],
+    identities_dir: Optional[str],
+    override_model: Optional[str],
+    override_url: Optional[str],
+) -> bool:
+    identity_name = (identity or os.getenv("BOT_IDENTITY") or _DEFAULT_IDENTITY_NAME).strip() or _DEFAULT_IDENTITY_NAME
+    config, _identity_path = _load_identity_config(identity_name, identities_dir)
+    display_name = _identity_display_name(identity_name, config)
+
+    resolved_model = (override_model or config.get("llm_model") or os.getenv("BOT_LLM_MODEL") or _DEFAULT_LLM_MODEL)
+    resolved_model = (resolved_model or "").strip()
+    resolved_url = (override_url or config.get("llm_url") or os.getenv("BOT_LLM_URL") or _DEFAULT_LLM_URL)
+    resolved_url = (resolved_url or "").strip()
+
+    base_url = _normalize_ollama_base_url(resolved_url)
+    if not resolved_model or not base_url:
+        logger.debug(
+            "Skipping Ollama model management (model=%s, base_url=%s)",
+            resolved_model,
+            base_url,
+        )
+        return True
+
+    state = _ollama_model_state(base_url, resolved_model)
+    if state is True:
+        logger.info("Ollama model %s already present for identity %s", resolved_model, identity_name)
+        return True
+
+    if state is None:
+        logger.warning(
+            "Unable to confirm Ollama model %s for identity %s; proceeding without managed download.",
+            resolved_model,
+            identity_name,
+        )
+        return True
+
+    logger.info(
+        "Downloading Ollama model %s for identity %s via welcome workflow", resolved_model, identity_name
+    )
+    return _download_ollama_model_with_gui(display_name, resolved_model, base_url)
 
 
 def start_bot(
@@ -89,6 +460,9 @@ def start_bot(
     entry = robot_dir / "main.py"
     if not entry.exists():
         logger.error("SocialRobot entrypoint not found at %s", entry)
+        return False
+
+    if not _ensure_identity_llm_ready(identity, identities_dir, llm_model, llm_url):
         return False
 
     env = os.environ.copy()
