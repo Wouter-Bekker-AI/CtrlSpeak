@@ -7,6 +7,7 @@ import base64
 import io
 import json
 import os
+import re
 import sys
 import threading
 from datetime import datetime
@@ -25,6 +26,12 @@ from PySide6.QtWidgets import QApplication
 IDENTITIES_ROOT = Path(__file__).resolve().parent / "identities"
 DEFAULT_IDENTITY_NAME = "default"
 DEFAULT_SYSTEM_PROMPT = "You are a cheerful robotic companion speaking concisely."
+
+_LOOK_AT_SCREEN_PATTERN = re.compile(r"\blook at my screen\b", re.IGNORECASE)
+
+_camera_sound_lock = threading.Lock()
+_camera_sound: Optional[object] = None
+_camera_sound_failed = False
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -209,6 +216,46 @@ def save_history(memory_path: Optional[Path], history: List[dict]) -> None:
         except Exception as exc:
             print(f"-> Failed to save conversation history: {exc}")
 
+def _play_camera_shutter() -> None:
+    """Play the camera shutter sound if available."""
+    global _camera_sound, _camera_sound_failed
+
+    if _camera_sound_failed:
+        return
+
+    with _camera_sound_lock:
+        if _camera_sound_failed:
+            return
+        try:
+            import pygame
+        except Exception as exc:
+            print(f"-> Camera sound unavailable: {exc}")
+            _camera_sound_failed = True
+            return
+
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+        except Exception as exc:
+            print(f"-> Camera sound unavailable: {exc}")
+            _camera_sound_failed = True
+            return
+
+        if _camera_sound is None:
+            sound_path = Path(__file__).resolve().parents[2] / "assets" / "camera.wav"
+            try:
+                _camera_sound = pygame.mixer.Sound(str(sound_path))
+            except Exception as exc:
+                print(f"-> Failed to load camera sound: {exc}")
+                _camera_sound_failed = True
+                return
+
+        try:
+            _camera_sound.play()
+        except Exception as exc:
+            print(f"-> Failed to play camera sound: {exc}")
+            _camera_sound_failed = True
+
 def main():
     args = parse_args()
     profile, config = resolve_identity(args)
@@ -340,7 +387,7 @@ def main():
 
         screenshot_b64: Optional[str] = None
         screenshot_path: Optional[Path] = None
-        augmented_text = transcript
+        augmented_text = cleaned
 
         should_capture = force_screenshot or ("look at my screen" in normalized_user)
         if should_capture:
@@ -349,8 +396,12 @@ def main():
                 prompt_suffix = (
                     "Please describe the attached screenshot and let me know anything important you notice."
                 )
-                if augmented_text.strip():
-                    augmented_text = f"{augmented_text.strip()}\n\n{prompt_suffix}"
+                trimmed_prompt = cleaned
+                if "look at my screen" in normalized_user or force_screenshot:
+                    trimmed_prompt = _LOOK_AT_SCREEN_PATTERN.sub(" ", cleaned)
+                has_additional_prompt = bool(trimmed_prompt.strip())
+                if has_additional_prompt:
+                    augmented_text = cleaned
                 else:
                     augmented_text = prompt_suffix
             else:
@@ -449,6 +500,7 @@ def main():
                 saved_path = None
 
         print("-> Captured screenshot for analysis.")
+        _play_camera_shutter()
         return image_b64, saved_path
 
     def on_speech_detected(raw_bytes: bytes) -> None:

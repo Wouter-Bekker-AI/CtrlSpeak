@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 try:
-    from PySide6.QtCore import Qt, QPoint, Signal, Slot, QObject
+    from PySide6.QtCore import Qt, QPoint, Signal, Slot, QObject, QTimer
     from PySide6.QtGui import QAction, QGuiApplication, QPixmap
     from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QMenu, QWidget
 except ImportError:
@@ -27,6 +27,7 @@ class FloatingLogo(QWidget):
         self._drag_pos: QPoint | None = None
         self.original_pixmap = pixmap
         self._on_look_at_screen = on_look_at_screen
+        self._on_top_timer: Optional[QTimer] = None
 
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
         if stay_on_top:
@@ -49,6 +50,12 @@ class FloatingLogo(QWidget):
         self._quit_action.triggered.connect(QApplication.instance().quit)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._open_menu)
+
+        if stay_on_top:
+            self._on_top_timer = QTimer(self)
+            self._on_top_timer.setInterval(500)
+            self._on_top_timer.timeout.connect(self._refresh_on_top)
+            self._on_top_timer.start()
 
     @Slot(float)
     def set_scale(self, scale: float) -> None:
@@ -85,6 +92,14 @@ class FloatingLogo(QWidget):
         menu.addAction(self._look_action)
         menu.addAction(self._quit_action)
         menu.exec_(self.mapToGlobal(pos))
+
+    def _refresh_on_top(self) -> None:
+        if not self.isVisible() or self.isHidden():
+            return
+        if not (self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint):
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+            self.show()
+        self.raise_()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         if event.button() == Qt.MouseButton.LeftButton:
