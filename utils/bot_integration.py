@@ -4,11 +4,12 @@ import json
 import os
 import sys
 import time
+import json
 import threading
 import subprocess
 from multiprocessing import Process, Queue as MPQueue
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 from urllib.parse import urlparse, urlunparse
 
 import requests
@@ -53,6 +54,9 @@ _DEFAULT_LLM_MODEL = "gemma3:1b"
 _DEFAULT_LLM_URL = "http://localhost:11434/api/chat"
 
 _bot_proc: Optional[subprocess.Popen] = None
+_bot_stdin_lock = threading.Lock()
+
+_OLLAMA_HARDWARE_CHOICES = {"cpu_only", "cpu_and_gpu", "gpu_only"}
 
 
 def _resolve_stt_url() -> Optional[str]:
@@ -102,6 +106,49 @@ def _load_identity_config(identity: str, identities_dir: Optional[str]) -> tuple
             logger.exception("Failed to parse identity config at %s", config_path)
 
     return config, identity_path
+
+
+def _extract_ollama_preferences(config: dict) -> tuple[Dict[str, Any], Optional[str]]:
+    options: Dict[str, Any] = {}
+    raw_options = config.get("ollama_options")
+    if isinstance(raw_options, dict):
+        options = {k: v for k, v in raw_options.items() if v is not None}
+    elif raw_options is not None:
+        logger.warning("Ignoring ollama_options in identity config because it is not an object: %r", raw_options)
+
+    hardware_pref = config.get("ollama_hardware")
+    if isinstance(hardware_pref, str):
+        normalized = hardware_pref.strip().lower()
+        if normalized in _OLLAMA_HARDWARE_CHOICES:
+            return options, normalized
+        if normalized:
+            logger.warning(
+                "Ignoring ollama_hardware value '%s'; expected one of %s", hardware_pref, sorted(_OLLAMA_HARDWARE_CHOICES)
+            )
+        return options, None
+
+    if hardware_pref is not None:
+        logger.warning("Ignoring ollama_hardware in identity config because it is not a string: %r", hardware_pref)
+
+    return options, None
+
+
+def _compose_ollama_options(
+    base_options: Optional[Dict[str, Any]], hardware_mode: Optional[str]
+) -> Dict[str, Any]:
+    options: Dict[str, Any] = {}
+    if base_options:
+        options.update({k: v for k, v in base_options.items() if v is not None})
+    if hardware_mode:
+        mode = hardware_mode.strip().lower()
+        if mode == "cpu_only":
+            options["gpu_only"] = False
+            options["num_gpu"] = 0
+        elif mode == "gpu_only":
+            options["gpu_only"] = True
+        elif mode == "cpu_and_gpu":
+            options.setdefault("gpu_only", False)
+    return options
 
 
 def _identity_display_name(identity: str, config: dict) -> str:
@@ -425,16 +472,19 @@ def _ensure_identity_llm_ready(
     return _download_ollama_model_with_gui(display_name, resolved_model, base_url)
 
 
-def _load_identity_llm_config(identity: str, identities_root: Path) -> tuple[Optional[str], Optional[str]]:
+def _load_identity_llm_config(
+    identity: str, identities_root: Path
+) -> tuple[Optional[str], Optional[str], Dict[str, Any], Optional[str]]:
     config_path = identities_root / identity / "identity.json"
     if not config_path.exists():
-        return None, None
+        return None, None, {}, None
     try:
         data = json.loads(config_path.read_text(encoding="utf-8"))
     except Exception:
         logger.exception("Failed to parse identity configuration for '%s'", identity)
-        return None, None
-    return data.get("llm_url"), data.get("llm_model")
+        return None, None, {}, None
+    options, hardware = _extract_ollama_preferences(data)
+    return data.get("llm_url"), data.get("llm_model"), options, hardware
 
 
 def _resolve_llm_settings(
@@ -443,19 +493,30 @@ def _resolve_llm_settings(
     llm_model: Optional[str],
     identity: Optional[str],
     identities_root: Path,
-) -> tuple[Optional[str], Optional[str]]:
+) -> tuple[Optional[str], Optional[str], Dict[str, Any], Optional[str]]:
     resolved_url = llm_url or os.environ.get("BOT_LLM_URL")
     resolved_model = llm_model or os.environ.get("BOT_LLM_MODEL")
+    resolved_options: Dict[str, Any] = {}
+    resolved_hardware: Optional[str] = None
     if identity:
-        identity_url, identity_model = _load_identity_llm_config(identity, identities_root)
+        identity_url, identity_model, identity_options, identity_hardware = _load_identity_llm_config(
+            identity, identities_root
+        )
         if not resolved_url:
             resolved_url = identity_url
         if not resolved_model:
             resolved_model = identity_model
-    return resolved_url, resolved_model
+        resolved_options = identity_options
+        resolved_hardware = identity_hardware
+    return resolved_url, resolved_model, resolved_options, resolved_hardware
 
 
-def _warm_ollama_model(llm_url: Optional[str], llm_model: Optional[str]) -> None:
+def _warm_ollama_model(
+    llm_url: Optional[str],
+    llm_model: Optional[str],
+    identity_options: Optional[Dict[str, Any]] = None,
+    hardware_mode: Optional[str] = None,
+) -> None:
     if not llm_url or not llm_model:
         return
 
@@ -470,6 +531,9 @@ def _warm_ollama_model(llm_url: Optional[str], llm_model: Optional[str]) -> None
         "stream": False,
         "keep_alive": "5m",
     }
+    options = _compose_ollama_options(identity_options, hardware_mode)
+    if options:
+        payload["options"] = options
 
     try:
         response = requests.post(warm_url, json=payload, timeout=10)
@@ -526,7 +590,12 @@ def start_bot(
     except FileNotFoundError:
         pass
 
-    resolved_llm_url, resolved_llm_model = _resolve_llm_settings(
+    (
+        resolved_llm_url,
+        resolved_llm_model,
+        identity_options,
+        identity_hardware,
+    ) = _resolve_llm_settings(
         llm_url=llm_url,
         llm_model=llm_model,
         identity=identity,
@@ -545,7 +614,12 @@ def start_bot(
     if normalized_base_url and resolved_model_name:
         state = _ollama_model_state(normalized_base_url, resolved_model_name)
         if state is True:
-            _warm_ollama_model(resolved_llm_url, resolved_model_name)
+            _warm_ollama_model(
+                resolved_llm_url,
+                resolved_model_name,
+                identity_options,
+                identity_hardware,
+            )
         else:
             logger.debug(
                 "Skipping Ollama warm-up for model %s (state=%s)",
@@ -585,7 +659,16 @@ def start_bot(
 
     logger.info("Starting SocialRobot: %s", " ".join(cmd))
     try:
-        _bot_proc = subprocess.Popen(cmd, cwd=str(robot_dir), env=env)
+        _bot_proc = subprocess.Popen(
+            cmd,
+            cwd=str(robot_dir),
+            env=env,
+            stdin=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
         time.sleep(0.35)  # give it a moment to open the window
         return True
     except Exception:
@@ -599,6 +682,11 @@ def stop_bot() -> None:
     if _bot_proc is None:
         return
     try:
+        if _bot_proc.stdin:
+            try:
+                _bot_proc.stdin.close()
+            except Exception:
+                logger.warning("Failed to close bot stdin", exc_info=True)
         if _bot_proc.poll() is None:
             _bot_proc.terminate()
             try:
@@ -619,6 +707,28 @@ def stop_bot() -> None:
 
 def is_bot_running() -> bool:
     return _bot_proc is not None and _bot_proc.poll() is None
+
+
+def request_bot_screenshot() -> bool:
+    """Request that the running bot execute the look-at-my-screen workflow."""
+
+    proc = _bot_proc
+    if proc is None or proc.poll() is not None:
+        logger.error("Bot is not running; cannot request screenshot")
+        return False
+    if proc.stdin is None:
+        logger.error("Bot stdin unavailable; cannot request screenshot")
+        return False
+
+    payload = json.dumps({"command": "look_at_my_screen"})
+    try:
+        with _bot_stdin_lock:
+            proc.stdin.write(payload + "\n")
+            proc.stdin.flush()
+        return True
+    except Exception:
+        logger.exception("Failed to send screenshot request to bot")
+        return False
 
 
 def run_bot_test(
@@ -678,7 +788,12 @@ def run_bot_test(
     except FileNotFoundError:
         pass
 
-    resolved_llm_url, resolved_llm_model = _resolve_llm_settings(
+    (
+        resolved_llm_url,
+        resolved_llm_model,
+        identity_options,
+        identity_hardware,
+    ) = _resolve_llm_settings(
         llm_url=llm_url,
         llm_model=llm_model,
         identity=identity,
@@ -694,7 +809,12 @@ def run_bot_test(
     if normalized_base_url and resolved_model_name:
         state = _ollama_model_state(normalized_base_url, resolved_model_name)
         if state is True:
-            _warm_ollama_model(resolved_llm_url, resolved_model_name)
+            _warm_ollama_model(
+                resolved_llm_url,
+                resolved_model_name,
+                identity_options,
+                identity_hardware,
+            )
         else:
             logger.debug(
                 "Skipping Ollama warm-up for model %s in test run (state=%s)",

@@ -29,7 +29,11 @@ from utils.system import (
 )
 # IMPORTANT: import the module so we always see the *current* values
 from utils import system as sysmod
-from utils.bot_integration import start_bot as _bot_start, stop_bot as _bot_stop, is_bot_running as _bot_is_running
+from utils.bot_integration import (
+    start_bot as _bot_start,
+    stop_bot as _bot_stop,
+    is_bot_running as _bot_is_running,
+)
 
 # ---- Model/CUDA helpers kept in utils.models to avoid GUI bloat ----
 from utils.models import (
@@ -1540,8 +1544,12 @@ class ManagementWindow:
             except Exception:
                 logger.exception("Failed to disable change mode button for client-only build")
 
-        self.bot_button = ttk.Button(controls, text="Chat with Bot", style="Accent.TButton",
-                                     command=self._toggle_bot)
+        self.bot_button = ttk.Button(
+            controls,
+            text="Chat with Bot",
+            style="Accent.TButton",
+            command=self._toggle_bot,
+        )
         self.bot_button.pack(fill=tk.X, pady=4)
         self.clear_memory_button = ttk.Button(controls, text="Clear Bot Memory", style="Subtle.TButton",
                                               command=self._clear_bot_memory)
@@ -1675,7 +1683,8 @@ class ManagementWindow:
 
     def _refresh_bot_button(self) -> None:
         try:
-            if _bot_is_running():
+            running = _bot_is_running()
+            if running:
                 self.bot_button.configure(text="Stop Chat with Bot")
             else:
                 self.bot_button.configure(text="Chat with Bot")

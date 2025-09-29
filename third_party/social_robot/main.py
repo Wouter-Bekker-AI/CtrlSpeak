@@ -11,7 +11,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 from audio.stt import FasterWhisperSTT
 from audio.remote_stt import RemoteSTT
@@ -52,6 +52,8 @@ class IdentityProfile:
         llm_url: str,
         memory_path: Optional[Path],
         base_path: Path,
+        ollama_options: Optional[Dict[str, object]] = None,
+        ollama_hardware: Optional[str] = None,
     ) -> None:
         self.name = name
         self.system_prompt = system_prompt
@@ -60,6 +62,8 @@ class IdentityProfile:
         self.llm_url = llm_url
         self.memory_path = memory_path
         self.base_path = base_path
+        self.ollama_options = dict(ollama_options) if ollama_options else {}
+        self.ollama_hardware = ollama_hardware
 
 def _resolve_identities_root(arg_value: Optional[str]) -> Path:
     if arg_value:
@@ -130,6 +134,26 @@ def resolve_identity(args) -> tuple[IdentityProfile, dict]:
             print(f"-> Failed to ensure memory directory {memory_path}: {exc}")
             memory_path = None
 
+    raw_options = config.get("ollama_options")
+    ollama_options: Dict[str, object] = {}
+    if isinstance(raw_options, dict):
+        ollama_options = dict(raw_options)
+    elif raw_options is not None:
+        print("-> Ignoring ollama_options because it is not a JSON object.")
+
+    hardware_pref = config.get("ollama_hardware")
+    normalized_hardware: Optional[str] = None
+    if isinstance(hardware_pref, str):
+        candidate = hardware_pref.strip().lower()
+        if candidate in {"cpu_only", "cpu_and_gpu", "gpu_only"}:
+            normalized_hardware = candidate
+        elif candidate:
+            print(
+                "-> Ignoring ollama_hardware value '%s'; expected cpu_only, cpu_and_gpu, or gpu_only." % hardware_pref
+            )
+    elif hardware_pref is not None:
+        print("-> Ignoring ollama_hardware because it is not a string value.")
+
     profile = IdentityProfile(
         name=identity_name,
         system_prompt=system_prompt,
@@ -138,6 +162,8 @@ def resolve_identity(args) -> tuple[IdentityProfile, dict]:
         llm_url=llm_url,
         memory_path=memory_path,
         base_path=identity_path,
+        ollama_options=ollama_options,
+        ollama_hardware=normalized_hardware,
     )
 
     print(f"-> Loaded identity '{profile.name}' (voice={profile.voice}, model={profile.llm_model})")
@@ -199,6 +225,8 @@ def main():
         model=profile.llm_model,
         stream=False,
         system_prompt=profile.system_prompt,
+        options=profile.ollama_options,
+        hardware_mode=profile.ollama_hardware,
     )
 
     tts_model = KokoroTTS(voice=profile.voice, speed=1.0)
@@ -271,6 +299,119 @@ def main():
     vad_config = VADConfig(sample_rate=16000, frame_duration_ms=30, padding_duration_ms=360, aggressiveness=2, deactivation_ratio=0.9)
     vad_listener: Optional[VADListener] = None
     last_bot_response: str = ""
+    processing_lock = threading.Lock()
+
+    def _handle_user_request(
+        transcript: str,
+        *,
+        force_screenshot: bool = False,
+        source: str = "voice",
+    ) -> None:
+        nonlocal last_bot_response, vad_listener
+
+        cleaned = transcript.strip()
+        if not cleaned:
+            animator.update_amplitude(0.0)
+            return
+
+        if source == "command":
+            print("-> Simulating user request:", transcript)
+        else:
+            print("-> User said:", transcript)
+
+        if tts_model.is_playing:
+            tts_model.stop_playback()
+
+        normalized_user = cleaned.lower()
+        normalized_bot = last_bot_response.strip().lower()
+
+        if (
+            normalized_user
+            and normalized_bot
+            and (
+                normalized_user == normalized_bot
+                or normalized_user in normalized_bot
+                or normalized_bot in normalized_user
+            )
+        ):
+            print("-> Ignoring self-echo from recent response.")
+            animator.update_amplitude(0.0)
+            return
+
+        screenshot_b64: Optional[str] = None
+        screenshot_path: Optional[Path] = None
+        augmented_text = transcript
+
+        should_capture = force_screenshot or ("look at my screen" in normalized_user)
+        if should_capture:
+            screenshot_b64, screenshot_path = _capture_screenshot()
+            if screenshot_b64:
+                prompt_suffix = (
+                    "Please describe the attached screenshot and let me know anything important you notice."
+                )
+                if augmented_text.strip():
+                    augmented_text = f"{augmented_text.strip()}\n\n{prompt_suffix}"
+                else:
+                    augmented_text = prompt_suffix
+            else:
+                print("-> Proceeding without screenshot due to capture failure.")
+
+        history = load_history(profile.memory_path)
+        try:
+            user_content: Optional[List[dict]] = None
+            if screenshot_b64:
+                user_content = [
+                    {"type": "text", "text": augmented_text},
+                    {"type": "image", "image": screenshot_b64},
+                ]
+            llm_response = ollama_client.query(
+                augmented_text,
+                history=history,
+                content=user_content,
+            )
+        except OllamaUnavailableError as exc:
+            failure_message = str(exc)
+            print(f"-> Ollama error: {failure_message}")
+            animator.update_amplitude(0.0)
+            return
+        if not llm_response.strip():
+            animator.update_amplitude(0.0)
+            return
+
+        history_entry: dict
+        if user_content is not None:
+            history_entry = {"role": "user", "content": user_content}
+            if screenshot_path:
+                history_entry["metadata"] = {"screenshot_file": str(screenshot_path)}
+        else:
+            history_entry = {"role": "user", "content": transcript}
+
+        history.append(history_entry)
+        history.append({"role": "assistant", "content": llm_response})
+        save_history(profile.memory_path, history)
+
+        print("-> Bot replied:", llm_response)
+
+        try:
+            audio_data = tts_model.synthesize(llm_response)
+        except Exception as exc:
+            print("TTS error:", exc)
+            animator.update_amplitude(0.0)
+            return
+
+        last_bot_response = llm_response
+
+        def amplitude_callback(level: float) -> None:
+            animator.update_amplitude(level)
+
+        def play_tts_in_thread() -> None:
+            tts_model.play_audio_with_amplitude(audio_data, amplitude_callback)
+            if vad_listener is not None:
+                vad_listener.set_aggressiveness(1)  # Restore VAD aggressiveness after bot playback
+            animator.update_amplitude(0.0)
+
+        tts_thread = threading.Thread(target=play_tts_in_thread, daemon=True)
+        tts_thread.start()
 
     def _capture_screenshot() -> tuple[Optional[str], Optional[Path]]:
         try:
@@ -311,100 +452,68 @@ def main():
         return image_b64, saved_path
 
     def on_speech_detected(raw_bytes: bytes) -> None:
-        nonlocal vad_listener, last_bot_response
-        if vad_listener is None: return
+        nonlocal vad_listener
+        if vad_listener is None:
+            return
 
         try:
-            recognized_text = stt_model.run_stt(raw_bytes, sample_rate=vad_listener.sample_rate)
+            recognized_text = stt_model.run_stt(
+                raw_bytes,
+                sample_rate=vad_listener.sample_rate,
+            )
         except Exception as exc:
             print("STT error:", exc)
             recognized_text = ""
 
-        print("-> User said:", recognized_text)
+        with processing_lock:
+            _handle_user_request(recognized_text, force_screenshot=False, source="voice")
 
-        if not recognized_text.strip():
-            animator.update_amplitude(0.0)
+    def _trigger_look_at_screen() -> None:
+        with processing_lock:
+            _handle_user_request(
+                "look at my screen",
+                force_screenshot=True,
+                source="command",
+            )
+
+    if isinstance(animator, LogoAnimator):
+        animator.set_look_at_screen_callback(_trigger_look_at_screen)
+
+    def _stdin_command_listener() -> None:
+        if sys.stdin is None or sys.stdin.closed:
             return
-
-        # Now that we have a non-empty transcription, check if bot was speaking
-        if tts_model.is_playing:
-            tts_model.stop_playback()
-
-        normalized_user = recognized_text.strip().lower()
-        normalized_bot = last_bot_response.strip().lower()
-        if normalized_user and normalized_bot and (normalized_user == normalized_bot or normalized_user in normalized_bot or normalized_bot in normalized_user):
-            print("-> Ignoring self-echo from recent response.")
-            animator.update_amplitude(0.0)
-            return
-
-        screenshot_b64: Optional[str] = None
-        screenshot_path: Optional[Path] = None
-        augmented_text = recognized_text
-
-        if "look at my screen" in normalized_user:
-            screenshot_b64, screenshot_path = _capture_screenshot()
-            if screenshot_b64:
-                prompt_suffix = "Please describe the attached screenshot and let me know anything important you notice."
-                if augmented_text.strip():
-                    augmented_text = f"{augmented_text.strip()}\n\n{prompt_suffix}"
-                else:
-                    augmented_text = prompt_suffix
+        while True:
+            try:
+                line = sys.stdin.readline()
+            except Exception as exc:
+                print(f"-> Control listener error: {exc}")
+                break
+            if not line:
+                break
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                payload = json.loads(stripped)
+            except Exception as exc:
+                print(f"-> Ignoring malformed control payload: {exc}")
+                continue
+            command = str(payload.get("command") or "").strip().lower()
+            if not command:
+                continue
+            if command == "look_at_my_screen":
+                _trigger_look_at_screen()
             else:
-                print("-> Proceeding without screenshot due to capture failure.")
+                print(f"-> Unknown control command: {command}")
 
-        history = load_history(profile.memory_path)
-        try:
-            user_content: Optional[List[dict]] = None
-            if screenshot_b64:
-                user_content = [
-                    {"type": "text", "text": augmented_text},
-                    {"type": "image", "image": screenshot_b64},
-                ]
-            llm_response = ollama_client.query(augmented_text, history=history, content=user_content)
-        except OllamaUnavailableError as exc:
-            failure_message = str(exc)
-            print(f"-> Ollama error: {failure_message}")
-            animator.update_amplitude(0.0)
-            return
-        if not llm_response.strip():
-            animator.update_amplitude(0.0)
-            return
+    command_thread = threading.Thread(target=_stdin_command_listener, daemon=True)
+    command_thread.start()
 
-        history_entry: dict
-        if user_content is not None:
-            history_entry = {"role": "user", "content": user_content}
-            if screenshot_path:
-                history_entry["metadata"] = {"screenshot_file": str(screenshot_path)}
-        else:
-            history_entry = {"role": "user", "content": recognized_text}
-
-        history.append(history_entry)
-        history.append({"role": "assistant", "content": llm_response})
-        save_history(profile.memory_path, history)
-
-        print("-> Bot replied:", llm_response)
-
-        try:
-            audio_data = tts_model.synthesize(llm_response)
-        except Exception as exc:
-            print("TTS error:", exc)
-            animator.update_amplitude(0.0)
-            return
-
-        last_bot_response = llm_response
-
-        def amplitude_callback(level: float) -> None:
-            animator.update_amplitude(level)
-
-        def play_tts_in_thread():
-            tts_model.play_audio_with_amplitude(audio_data, amplitude_callback)
-            vad_listener.set_aggressiveness(1) # Restore VAD aggressiveness after bot playback
-            animator.update_amplitude(0.0)
-
-        tts_thread = threading.Thread(target=play_tts_in_thread, daemon=True)
-        tts_thread.start()
-
-    vad_listener = VADListener(config=vad_config, device_index=None, on_speech_callback=on_speech_detected)
+    vad_listener = VADListener(
+        config=vad_config,
+        device_index=None,
+        on_speech_callback=on_speech_detected,
+    )
     print("-> Starting the VAD listener...")
     vad_thread = threading.Thread(target=vad_listener.start, daemon=True)
     vad_thread.start()

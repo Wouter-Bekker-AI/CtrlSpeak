@@ -5,7 +5,7 @@ CtrlSpeak includes an optional "Chat with Bot" experience accessible from the ma
 - **Speech to Text (STT)** - Uses CtrlSpeak's `/transcribe` endpoint. Audio captured by the VAD listener is sent to the running CtrlSpeak server (local or remote depending on mode). The server returns the recognized text.
 - **Language Model (LLM)** - The recognized text is sent to the Ollama-compatible client inside SocialRobot. By default CtrlSpeak ships with a lightweight fallback response if no LLM endpoint is reachable, but you can supply your own by setting the `BOT_LLM_URL` and `BOT_LLM_MODEL` environment variables (or the matching CLI flags) before launching CtrlSpeak.
 - **Text to Speech (TTS)** - The LLM response is converted to audio via Kokoro-ONNX. CtrlSpeak defaults to the formal male `am_michael` voice; override it with `BOT_VOICE` or the `--voice` flag.
-- **Animated Face** - SocialRobot renders the bundled desktop face for visual feedback. Assets live under `third_party/social_robot/images/Desktop`.
+- **Animated Face / Logo** - SocialRobot renders the default TrueAI transparent logo with amplitude-based scaling for visual feedback. Identity folders can still supply alternate assets under `third_party/social_robot/identities/<name>` when a different look is desired.
 
 ## Identity Profiles
 
@@ -25,12 +25,25 @@ The loader understands the following `identity.json` keys:
   "prompt_file": "system_prompt.txt",
   "llm_model": "gemma3:1b",
   "llm_url": "http://localhost:11434/api/chat",
+  "ollama_hardware": "cpu_and_gpu",
+  "ollama_options": {
+    "temperature": 0.5,
+    "num_ctx": 8192
+  },
   "voice": "am_michael",
   "memory_dir": "memory"
 }
 ```
 
 If `read_prompt_from_file` is `true`, the prompt file is read relative to the identity directory (unless an absolute path is provided). Omitting it falls back to the built-in default prompt.
+
+When present, `ollama_options` is merged into the payload that SocialRobot sends to Ollama so you can tune generation parameters per identity. The optional `ollama_hardware` key controls how Ollama stages the weights:
+
+- `cpu_only` – force the model to reside entirely in system RAM (`num_gpu` is set to zero).
+- `cpu_and_gpu` – allow Ollama to combine VRAM and RAM (the default when unspecified).
+- `gpu_only` – require the checkpoint to stay fully on the GPU (`gpu_only: true`).
+
+CtrlSpeak applies the same options and hardware preference when it pre-warms the checkpoint via `/generate`, ensuring the residency chosen during warm-up matches the settings SocialRobot will use at runtime.
 
 You can switch identities from the command line with:
 
@@ -99,6 +112,7 @@ As soon as you pick an identity, CtrlSpeak now pings the configured Ollama endpo
 2. Right-click the tray icon, choose **Manage CtrlSpeak**, then click **Chat with Bot**.
 3. The management UI toggles the bot: click once to launch, again to stop. The button text reflects the current state.
 4. Speak once the "-> Starting the VAD listener..." message appears in the terminal; responses are spoken back and logged to the console as `-> Bot replied: ...`.
+5. Right-click the transparent logo to open its context menu. Choose **Look at my Screen** to capture the desktop and run the same augmented LLM request you would get from speaking the phrase aloud. The menu still includes **Quit** when you need to close the bot quickly.
 
 Stopping the management window automatically terminates SocialRobot.
 
