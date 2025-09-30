@@ -28,6 +28,9 @@ from PySide6.QtCore import QTimer
 from tools import keywords, vision
 from utils.config_paths import get_logger
 
+
+logger = get_logger(__name__)
+
 IDENTITIES_ROOT = Path(__file__).resolve().parent / "identities"
 DEFAULT_IDENTITY_NAME = "default"
 DEFAULT_SYSTEM_PROMPT = "You are a cheerful robotic companion speaking concisely."
@@ -41,10 +44,7 @@ try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
-    pass
-
-
-logger = get_logger(__name__)
+    logger.exception("Failed to reconfigure standard streams for UTF-8 output")
 
 def _detect_whisper_device() -> str:
     """Detects the best available device for ctranslate2 (CUDA or CPU)."""
@@ -53,7 +53,7 @@ def _detect_whisper_device() -> str:
         if ctranslate2.get_cuda_device_count() > 0:
             return "cuda"
     except Exception:
-        pass
+        logger.exception("Failed to detect CUDA availability for whisper device selection")
     return "cpu"
 
 class IdentityProfile:
@@ -396,17 +396,17 @@ def main():
             if vad_listener is not None:
                 vad_listener.stop()
         except Exception:
-            pass
+            logger.exception("Failed to stop VAD listener during identity restart")
         try:
             if tts_model.is_playing:
                 tts_model.stop_playback()
         except Exception:
-            pass
+            logger.exception("Failed to stop TTS playback during identity restart")
         try:
             if animator is not None:
                 animator.stop()
         except Exception:
-            pass
+            logger.exception("Failed to stop animator during identity restart")
 
         argv = sys.argv[1:]
         new_args: list[str] = []

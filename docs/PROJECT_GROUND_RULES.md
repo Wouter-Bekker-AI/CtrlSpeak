@@ -19,6 +19,7 @@
 ## Logging requirements
 - Every module must obtain loggers through `utils.config_paths.get_logger`. This seeds a rotating file handler that writes to `%APPDATA%\CtrlSpeak\logs\ctrlspeak.log` and wires global logging so warnings and exceptions are persisted. Never replace the logger wiring or redirect logs elsewhere.【F:utils/config_paths.py†L127-L163】
 - When errors occur (I/O, GUI, CUDA, networking, etc.), catch the exception and log via the project logger so the failure is captured in AppData. Existing code uses `logger.exception(...)` as the pattern—follow it for new code paths.【F:utils/config_paths.py†L73-L81】【F:utils/system.py†L781-L788】【F:utils/models.py†L62-L83】
+- Do not silence exceptions with `pass` inside `except` blocks. Always emit a log record (for example, `logger.exception(...)` or `logger.debug(..., exc_info=True)` for expected cases) so the failure is traceable in `%APPDATA%\CtrlSpeak\logs\ctrlspeak.log`.
 
 ## Conversation keyword ownership
 - CtrlSpeak’s main process **must** remain the sole owner of conversation control keywords (for example, “chat with …” and “goodbye …”). Never relocate these detectors into SocialRobot or any worker thread. The parent process is the only component permitted to start or stop the bot so shutdown always follows the hardened tray/button workflow and avoids hangs.

@@ -146,7 +146,7 @@ def _destroy_lockout_window() -> None:
         try:
             _lockout_progress.stop()
         except Exception:
-            pass
+            logger.exception("Failed to stop lockout progress indicator")
     _lockout_progress = None
 
 
@@ -219,7 +219,7 @@ def show_lockout_window(message: str, cancel_callback: Optional[Callable[[], Non
         try:
             _lockout_win.attributes("-toolwindow", True)
         except Exception:
-            pass
+            logger.debug("Lockout window does not support -toolwindow attribute", exc_info=True)
         apply_modern_theme(_lockout_win)
         _lockout_win.protocol("WM_DELETE_WINDOW", lambda: None)
 
@@ -294,7 +294,7 @@ def show_lockout_window(message: str, cancel_callback: Optional[Callable[[], Non
         try:
             _lockout_progress.start(12)
         except Exception:
-            pass
+            logger.exception("Failed to start lockout progress indicator")
 
     if _lockout_cancel_button is not None:
         try:
@@ -309,7 +309,7 @@ def show_lockout_window(message: str, cancel_callback: Optional[Callable[[], Non
         _lockout_win.lift()
         _lockout_win.focus_force()
     except Exception:
-        pass
+        logger.exception("Failed to focus lockout window")
 
 
 def update_lockout_message(message: str) -> None:
@@ -345,7 +345,7 @@ def close_lockout_window(message: Optional[str] = None) -> None:
         try:
             _lockout_progress.stop()
         except Exception:
-            pass
+            logger.exception("Failed to stop lockout progress indicator during close")
 
     if _lockout_cancel_button is not None:
         try:
@@ -358,7 +358,7 @@ def close_lockout_window(message: Optional[str] = None) -> None:
         try:
             _lockout_win.lift()
         except Exception:
-            pass
+            logger.exception("Failed to lift lockout window during close")
         try:
             _lockout_close_job = _lockout_win.after(2400, _destroy_lockout_window)
         except Exception:
@@ -703,7 +703,7 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
         try:
             window.grab_release()
         except Exception:
-            pass
+            logger.exception("Failed to release grab on mode selection window")
 
     def choose(mode: str) -> None:
         nonlocal available_servers
@@ -741,7 +741,7 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
             try:
                 window.transient(parent)
             except Exception:
-                pass
+                logger.exception("Failed to mark mode selection window as transient")
             try:
                 window.grab_set()
             except Exception:
@@ -766,7 +766,7 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
         try:
             window.destroy()
         except Exception:
-            pass
+            logger.exception("Failed to destroy mode selection window after theme error")
         trace_model_download_step(
             "prompt_initial_mode: theme initialization failed", "default to client_server"
         )
@@ -1033,7 +1033,7 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
             try:
                 window.quit()
             except Exception:
-                pass
+                logger.exception("Failed to quit mode selection window loop")
     else:
         try:
             window.wait_window()
@@ -1261,7 +1261,7 @@ def pump_management_events_once() -> None:
     try:
         root.update()
     except tk.TclError:
-        pass
+        logger.debug("Tk update failed during management pump", exc_info=True)
 
 
 def _teardown_management_ui() -> None:
@@ -1630,7 +1630,7 @@ class ManagementWindow:
             try:
                 self.window.after_cancel(self._bot_status_checker_job)
             except Exception:
-                pass
+                logger.exception("Failed to cancel bot status checker job during close")
             self._bot_status_checker_job = None
         self._unbind_mousewheel(None)
         self.window.destroy()
@@ -1661,7 +1661,7 @@ class ManagementWindow:
             try:
                 self.window.after_cancel(self._bot_status_checker_job)
             except Exception:
-                pass
+                logger.exception("Failed to cancel bot status checker job during close")
             self._bot_status_checker_job = None
         self._unbind_mousewheel(None)
         self.window.destroy()
@@ -1736,7 +1736,7 @@ class ManagementWindow:
                 self.bot_button.configure(text="Chat with Bot")
             self._refresh_bot_badges()
         except Exception:
-            pass
+            logger.exception("Failed to refresh bot toggle button state")
 
     def _toggle_bot(self) -> None:
         try:
@@ -2390,7 +2390,7 @@ class ManagementWindow:
         try:
             _bot_stop()
         except Exception:
-            pass
+            logger.exception("Failed to stop Chat with Bot during shutdown")
         self.refresh_status()
         self.window.after(200, self._icon.stop)
         self.close()
@@ -2412,7 +2412,7 @@ class ManagementWindow:
             try:
                 self.window.after_cancel(self._bot_status_checker_job)
             except Exception:
-                pass
+                logger.exception("Failed to cancel bot status checker job during management window close")
             self._bot_status_checker_job = None
 
         self._unbind_mousewheel(None)
