@@ -835,6 +835,58 @@ def stop_bot() -> None:
         _active_identity = None
 
 
+def request_goodbye(identity: Optional[str] = None, timeout: float = 3.0) -> bool:
+    """Ask the running bot to shut down via its stdin channel.
+
+    Returns ``True`` when the bot exits within ``timeout`` seconds. ``False``
+    indicates that the caller should fall back to :func:`stop_bot`.
+    """
+
+    global _bot_proc
+    proc = _bot_proc
+    identity_name = identity or _active_identity or ""
+    if proc is None or proc.poll() is not None or proc.stdin is None:
+        logger.debug(
+            "request_goodbye skipped because bot process is unavailable (identity=%s)",
+            identity_name or "<unknown>",
+        )
+        return False
+
+    payload = json.dumps(
+        {
+            "command": "goodbye",
+            "identity": (identity or _active_identity or ""),
+        }
+    )
+    try:
+        with _bot_stdin_lock:
+            proc.stdin.write(payload + "\n")
+            proc.stdin.flush()
+        logger.debug(
+            "Sent goodbye command to SocialRobot (identity=%s)",
+            identity_name or "<unknown>",
+        )
+    except Exception:
+        logger.exception("Failed to send 'goodbye' command to bot")
+        return False
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            logger.info(
+                "Bot process exited after goodbye request (identity=%s)",
+                identity_name or "<unknown>",
+            )
+            return True
+        time.sleep(0.05)
+    logger.info(
+        "Bot process still running %.1fs after goodbye request (identity=%s); caller should apply fallback",
+        timeout,
+        identity_name or "<unknown>",
+    )
+    return False
+
+
 def is_bot_running() -> bool:
     return _bot_proc is not None and _bot_proc.poll() is None
 

@@ -750,7 +750,15 @@ def handle_transcribed_text_from_hotkey(text: str) -> bool:
             return True
         logger.info("Hotkey command stopping bot '%s'", identity)
         try:
-            bot_integration.stop_bot()
+            request_goodbye = getattr(bot_integration, "request_goodbye", None)
+            should_fallback = True
+            if callable(request_goodbye):
+                try:
+                    should_fallback = not request_goodbye(identity=identity, timeout=3.0)
+                except Exception:
+                    logger.exception("Failed to request graceful shutdown for bot '%s'", identity)
+            if should_fallback:
+                bot_integration.stop_bot()
         except Exception:
             logger.exception("Failed to stop bot '%s' from hotkey command", identity)
         return True
@@ -878,25 +886,168 @@ def stop_client_listener() -> None:
     schedule_management_refresh()
 
 # ---------------- Server (HTTP) ----------------
+def handle_transcription_keyword(text: str) -> tuple[bool, str]:
+    """Intercept keywords in transcribed speech before forwarding to SocialRobot.
+
+    Returns a tuple of ``(handled, text)`` where ``handled`` is ``True`` when a
+    shutdown keyword was processed inside CtrlSpeak and ``text`` is the payload
+    that should be returned to the requesting client. When a goodbye keyword is
+    handled successfully the returned text is an empty string so the child
+    process will not re-process the utterance.
+    """
+
+    cleaned = text.strip()
+    if not cleaned:
+        return False, text
+
+    try:
+        from tools import keywords
+        from utils import bot_integration
+    except Exception:
+        logger.exception("Failed to import transcription keyword dependencies")
+        return False, text
+
+    start_match = keywords.detect_conversation_start_keyword(cleaned)
+    if start_match:
+        identity = start_match.keyword.payload
+        active_identity = bot_integration.get_active_identity()
+        if active_identity and active_identity.lower() == identity.lower():
+            logger.info(
+                "Transcription server ignoring start keyword for already active identity '%s'",
+                identity,
+            )
+            return True, ""
+
+        if active_identity:
+            logger.info(
+                "Transcription server switching bot from '%s' to '%s' after keyword",
+                active_identity,
+                identity,
+            )
+        else:
+            logger.info(
+                "Transcription server starting bot '%s' after keyword",
+                identity,
+            )
+
+        if active_identity:
+            should_fallback = True
+            request_goodbye = getattr(bot_integration, "request_goodbye", None)
+            if callable(request_goodbye):
+                try:
+                    should_fallback = not request_goodbye(identity=active_identity, timeout=3.0)
+                except Exception:
+                    logger.exception(
+                        "Failed to request graceful shutdown for bot '%s' before relaunch",
+                        active_identity,
+                    )
+            if should_fallback:
+                try:
+                    bot_integration.stop_bot()
+                except Exception:
+                    logger.exception(
+                        "Failed to hard-stop bot '%s' before relaunch",
+                        active_identity,
+                    )
+                    return True, ""
+
+        try:
+            started = bot_integration.start_bot(identity=identity)
+        except Exception:
+            logger.exception(
+                "Failed to start bot '%s' from transcription keyword",
+                identity,
+            )
+            return True, ""
+
+        if not started:
+            logger.error(
+                "Transcription server failed to start bot '%s' after keyword",
+                identity,
+            )
+
+        return True, ""
+
+    match = keywords.detect_conversation_end_keyword(cleaned)
+    if not match:
+        return False, text
+
+    identity = match.keyword.payload
+    active_identity = bot_integration.get_active_identity()
+    if not active_identity:
+        logger.debug(
+            "Transcription keyword '%s' ignored because no identity is active",
+            identity,
+        )
+        return False, text
+
+    if active_identity.lower() != identity.lower():
+        logger.debug(
+            "Transcription keyword '%s' ignored because '%s' remains active",
+            identity,
+            active_identity,
+        )
+        return False, text
+
+    logger.info("Transcription server stopping bot '%s' after goodbye keyword", identity)
+
+    should_fallback = True
+    request_goodbye = getattr(bot_integration, "request_goodbye", None)
+    if callable(request_goodbye):
+        try:
+            should_fallback = not request_goodbye(identity=identity, timeout=3.0)
+        except Exception:
+            logger.exception(
+                "Failed to request graceful shutdown for bot '%s' from transcription keyword",
+                identity,
+            )
+
+    if should_fallback:
+        try:
+            bot_integration.stop_bot()
+        except Exception:
+            logger.exception(
+                "Failed to hard-stop bot '%s' from transcription keyword",
+                identity,
+            )
+
+    return True, ""
+
+
 class TranscriptionRequestHandler(BaseHTTPRequestHandler):
     server_version = "CtrlSpeakServer/1.0"
+
+    def _safe_write(self, payload: bytes) -> None:
+        try:
+            self.end_headers()
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            logger.debug(
+                "Client disconnected before %s response finished", self.path
+            )
+        except Exception:
+            logger.exception("Failed to write %s response", self.path)
+
     def do_GET(self):
         if self.path in {"/ping", "/health", "/status"}:
             payload = json.dumps({"status": "ok", "mode": "server"}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
-            self.end_headers(); self.wfile.write(payload); return
+            self._safe_write(payload)
+            return
         if self.path == "/kill":
             logger.info("Received /kill request; shutting down server.")
+            payload = json.dumps({"status": "shutting down"}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "shutting down"}).encode("utf-8"))
+            self.send_header("Content-Length", str(len(payload)))
+            self._safe_write(payload)
             # Trigger server shutdown in a separate thread to avoid blocking the response
             threading.Thread(target=shutdown_server, daemon=True).start()
             return
         self.send_error(404, "Unknown endpoint")
+
     def do_POST(self):
         from utils.models import transcribe_local  # lazy import to avoid circulars
         if self.path != "/transcribe":
@@ -921,11 +1072,15 @@ class TranscriptionRequestHandler(BaseHTTPRequestHandler):
             logger.exception("Failed to remove temporary transcription upload %s", temp_path)
         if text is None:
             self.send_error(500, "Transcription failed"); return
+        try:
+            _, text = handle_transcription_keyword(text)
+        except Exception:
+            logger.exception("Transcription keyword handling failed")
         payload = json.dumps({"text": text, "elapsed": time.time() - start_time}).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
-        self.end_headers(); self.wfile.write(payload)
+        self._safe_write(payload)
     def log_message(self, format, *args): return
 
 # threads/events for server discovery helpers
