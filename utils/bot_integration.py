@@ -123,6 +123,23 @@ def _load_identity_config(identity: str, identities_dir: Optional[str]) -> tuple
     return config, identity_path
 
 
+def _identity_requires_text_cleaning(
+    identity: Optional[str], identities_dir: Optional[str]
+) -> bool:
+    target = _normalized_identity(identity)
+    config, _identity_path = _load_identity_config(target, identities_dir)
+    value = config.get("require_text_cleaning")
+    if isinstance(value, bool):
+        return value
+    if value is not None:
+        logger.warning(
+            "Ignoring require_text_cleaning for identity %s; expected boolean but received %r",
+            target,
+            value,
+        )
+    return True
+
+
 def _load_preprocessor_identity() -> tuple[Optional[Path], Optional[str], Optional[str], Dict[str, Any], Optional[str]]:
     agent_dir = _TTS_PREPROCESSOR_DIR
     if not agent_dir.exists():
@@ -697,15 +714,25 @@ def start_bot(
     if not _ensure_identity_llm_ready(identity, identities_dir, llm_model, llm_url):
         return False
 
-    (
-        _agent_dir,
-        agent_llm_url,
-        agent_llm_model,
-        agent_options,
-        agent_hardware,
-    ) = _load_preprocessor_identity()
-    if not _ensure_preprocessor_llm_ready(agent_llm_model, agent_llm_url):
-        return False
+    agent_llm_url: Optional[str] = None
+    agent_llm_model: Optional[str] = None
+    agent_options: Dict[str, Any] = {}
+    agent_hardware: Optional[str] = None
+    if _identity_requires_text_cleaning(target_identity, identities_dir):
+        (
+            _agent_dir,
+            agent_llm_url,
+            agent_llm_model,
+            agent_options,
+            agent_hardware,
+        ) = _load_preprocessor_identity()
+        if not _ensure_preprocessor_llm_ready(agent_llm_model, agent_llm_url):
+            return False
+    else:
+        logger.info(
+            "Identity %s does not require TTS preprocessing; skipping agent preparation",
+            target_identity,
+        )
 
     normalized_base_url: Optional[str] = None
     resolved_model_name: Optional[str] = None

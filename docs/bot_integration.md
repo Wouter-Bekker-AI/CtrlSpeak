@@ -4,7 +4,7 @@ CtrlSpeak includes an optional "Chat with Bot" experience accessible from the ma
 
 - **Speech to Text (STT)** - Uses CtrlSpeak's `/transcribe` endpoint. Audio captured by the VAD listener is sent to the running CtrlSpeak server (local or remote depending on mode). The server returns the recognized text.
 - **Language Model (LLM)** - The recognized text is sent to the Ollama-compatible client inside SocialRobot. By default CtrlSpeak ships with a lightweight fallback response if no LLM endpoint is reachable, but you can supply your own by setting the `BOT_LLM_URL` and `BOT_LLM_MODEL` environment variables (or the matching CLI flags) before launching CtrlSpeak.
-- **Speech rewrite (background agent)** - The LLM reply is routed through `background_agents/tts_preprocessing_agent`, which consults its `identity.json` to determine whether to prepend `header_text.txt`, load `system_prompt.txt`, or use both before sending the request to the Gemma 3 1B preprocessing helper. The agent rewrites the reply for smoother narration before speech is generated.
+- **Speech rewrite (background agent)** - Identities that opt into cleaning route the LLM reply through `background_agents/tts_preprocessing_agent`, which consults its `identity.json` to determine whether to prepend `header_text.txt`, load `system_prompt.txt`, or use both before sending the request to the Gemma 3 1B preprocessing helper. The agent rewrites the reply for smoother narration before speech is generated.
 - **Text to Speech (TTS)** - The LLM response is converted to audio via Kokoro-ONNX. CtrlSpeak defaults to the formal male `am_michael` voice; override it with `BOT_VOICE` or the `--voice` flag.
 - **Animated Face / Logo** - SocialRobot renders the default TrueAI transparent logo with amplitude-based scaling for visual feedback. Identity folders can still supply alternate assets under `third_party/social_robot/identities/<name>` when a different look is desired.
 
@@ -32,6 +32,7 @@ The loader understands the following `identity.json` keys:
     "num_ctx": 8192
   },
   "voice": "am_michael",
+  "require_text_cleaning": false,
   "vision": true,
   "tool": false,
   "memory_dir": "memory"
@@ -48,12 +49,13 @@ When present, `ollama_options` is merged into the payload that SocialRobot sends
 
 CtrlSpeak applies the same options and hardware preference when it pre-warms the checkpoint via `/generate`, ensuring the residency chosen during warm-up matches the settings SocialRobot will use at runtime.
 
-The additional boolean keys control multimodal and future extensibility features:
+The additional boolean keys control multimodal, cleaning, and future extensibility features:
 
+- `require_text_cleaning` – When `true`, SocialRobot loads the TTS preprocessing agent and rewrites replies before speech. When `false`, replies flow directly to Kokoro and CtrlSpeak skips staging the helper model.
 - `vision` – Enables image capture tooling documented in [`docs/tooling.md`](tooling.md). When `true`, SocialRobot listens for the spoken “look at my screen” and “look at my clipboard” commands, exposes matching context-menu actions on the floating logo, and routes captured images to the LLM. When `false`, the commands are ignored, the context-menu items are hidden, and no images are taken.
 - `tool` – Reserved flag for forthcoming external tool integrations. It defaults to `false` today but can be toggled once tool calling is implemented.
 
-CtrlSpeak ships with two bundled identities: `assistant` (vision enabled) and `default` (vision disabled). Both currently set `tool` to `false` and can be expanded as the tool feature matures.
+CtrlSpeak ships with two bundled identities: `assistant` (vision enabled, text cleaning enabled) and `default` (vision disabled, text cleaning disabled). Both currently set `tool` to `false` and can be expanded as the tool feature matures.
 
 You can switch identities from the command line with:
 
@@ -86,7 +88,7 @@ The speech rewrite pass lives under `background_agents/tts_preprocessing_agent`.
 
 `background_agents/tts_preprocessing_agent/background_agent.py` loads these files, constructs a non-streaming `OllamaClient`, and exposes `load_tts_preprocessing_agent()` for the main loop. The `preamble` key in `identity.json` accepts `header`, `system`, or `both` to control which assets are required—missing files for the chosen mode disable the helper so playback still succeeds. If the resources are missing or the helper raises `OllamaUnavailableError`, SocialRobot logs the failure and falls back to the original reply so the session keeps flowing.【F:background_agents/tts_preprocessing_agent/background_agent.py†L1-L199】【F:third_party/social_robot/main.py†L180-L271】
 
-CtrlSpeak treats the agent as a first-class asset: `utils.bot_integration.start_bot` stages the Gemma weights with the same welcome workflow used for identity models and pre-warms the checkpoint once it is available.【F:utils/bot_integration.py†L52-L226】【F:utils/bot_integration.py†L420-L637】 Packaged builds bundle `background_agents/` so the helper is present in single-file executables.【F:packaging/CtrlSpeak.spec†L42-L63】【F:packaging/CtrlSpeak_Watcher.spec†L42-L63】【F:utils/build_exe.py†L22-L82】
+CtrlSpeak treats the agent as a first-class asset for identities that request it: `utils.bot_integration.start_bot` only stages the Gemma weights and pre-warms the checkpoint when the selected identity advertises `require_text_cleaning: true`, skipping the additional download and warm-up otherwise.【F:utils/bot_integration.py†L116-L214】【F:utils/bot_integration.py†L635-L790】 Packaged builds bundle `background_agents/` so the helper is present in single-file executables.【F:packaging/CtrlSpeak.spec†L42-L63】【F:packaging/CtrlSpeak_Watcher.spec†L42-L63】【F:utils/build_exe.py†L22-L82】
 
 ## Runtime Requirements
 

@@ -7,7 +7,7 @@ Both flavours support Windows 10/11, enforce a single running instance, expose a
 ## Repository Layout
 
 - `main.py` – application entry point.
-- `background_agents/` – self-contained helpers that run alongside Chat with Bot. The bundled `tts_preprocessing_agent` rewrites LLM replies before Kokoro speaks them.
+- `background_agents/` – self-contained helpers that run alongside Chat with Bot. The bundled `tts_preprocessing_agent` rewrites LLM replies before Kokoro speaks them when an identity opts into text cleaning.
 - `assets/` – static resources such as the tray icon (`icon.ico`), the welcome video (`TrueAI_Intro_Video.mp4`), the fun-fact rotation list (`fun_facts.txt`), and the processing chime (`loading.wav`).
 - `utils/` – implementation modules (GUI, models, networking, configuration helpers, etc.).
 - `utils/build_exe.py` – helper script that runs PyInstaller with the correct data files.
@@ -53,7 +53,7 @@ Run `python main.py --help` for the full list.
 
 ### Chat with Bot speech pipeline
 
-When you launch **Chat with Bot**, the LLM reply is routed through `background_agents/tts_preprocessing_agent` before Kokoro generates speech. The helper reads `identity.json` to decide whether to prepend `header_text.txt`, supply `system_prompt.txt`, or do both based on the `preamble` setting (`header`, `system`, or `both`, with the agent defaulting to `both`). That instruction set asks Gemma 3 1B to smooth the phrasing for text-to-speech and returns the rewritten script. Adjust the files referenced in `identity.json` to tune how aggressively responses are reformatted. If the agent fails or the directory is missing, CtrlSpeak falls back to speaking the original reply so conversations continue uninterrupted.
+When you launch **Chat with Bot**, identities that set `require_text_cleaning: true` in their `identity.json` route the LLM reply through `background_agents/tts_preprocessing_agent` before Kokoro generates speech. The helper reads its own configuration to decide whether to prepend `header_text.txt`, supply `system_prompt.txt`, or do both based on the `preamble` setting (`header`, `system`, or `both`, with the agent defaulting to `both`). That instruction set asks Gemma 3 1B to smooth the phrasing for text-to-speech and returns the rewritten script. Identities with `require_text_cleaning: false` hand their responses directly to Kokoro. If the agent fails or the directory is missing, CtrlSpeak falls back to speaking the original reply so conversations continue uninterrupted.
 
 Voice keywords live in [`tools/keywords.py`](docs/tooling.md). Saying “look at my screen” or “look at my clipboard” captures an image via the shared vision tooling, “chat with <identity>” (for example, assistant or default) relaunches the bot with that persona unless it is already active, and “goodbye <identity>” stops the current conversation immediately.
 
