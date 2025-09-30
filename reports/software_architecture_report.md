@@ -1,0 +1,37 @@
+# CtrlSpeak Software Architecture Report
+
+## Report Purpose and Maintenance Notes
+This document catalogs the major architectural elements that make CtrlSpeak function as a speech-driven desktop assistant. It
+summarizes execution flow, highlights the responsibilities and interactions of core subsystems, and traces how runtime resources
+are orchestrated across the application. When this report needs to be refreshed or recreated, review the primary entry point in
+`main.py`, configuration helpers under `utils/config_paths.py`, model management logic inside `utils/models.py`, user-interface
+coordination within `utils/gui.py`, automation helpers in `tools/`, and the service orchestration code embedded in `utils/system.py`
+and related background modules. Audit any new packages added under `utils/`, `background_agents/`, or `tools/`, confirm how
+settings and file paths are persisted, and document lifecycle changes for networking or tray management components before
+updating the summaries below.
+
+## Overview
+CtrlSpeak is a Windows-focused speech assistant built around a modular Python codebase. The entry point coordinates startup, configuration, model management, networking, and UI concerns while delegating specialized work to dedicated utility packages and tooling modules.【F:main.py†L42-L195】【F:README.md†L1-L118】 Persistent data, including settings, logs, temporary audio, models, and CUDA assets, is centralized under the application configuration directory so both source and packaged builds share a consistent filesystem contract.【F:utils/config_paths.py†L19-L120】
+
+## Execution Flow
+The `main.main` function processes CLI switches (automation runs, CUDA staging, server-only execution, transcription of existing WAV files), enforces a single instance, loads persisted settings, and performs GPU prerequisite checks before driving the interactive workflow.【F:main.py†L42-L140】 Startup then primes the Tk-based management UI, prompts for client vs. client-server mode, configures voice keyword metadata, ensures the default Whisper model is installed, prepares local transcription assets when hosting the server, launches LAN discovery, and finally hands off to the tray UI to keep the application resident.【F:main.py†L142-L195】
+
+## Core Subsystems
+- **Configuration & Logging:** `utils.config_paths` exposes helpers to resolve the per-user data root, manage the JSON settings file, create temporary recording paths, and configure a rotating file logger shared across modules.【F:utils/config_paths.py†L19-L169】 The module is also the source of the `settings` map and synchronization primitives that gate concurrent updates.
+- **Speech Models:** `utils.models` orchestrates Whisper asset installation, device selection, and runtime initialization. It triggers GUI-guided downloads when model files are missing, records state in settings, selects CPU/GPU compute types, and lazily loads the Whisper model with fallbacks and user notifications for error cases.【F:utils/models.py†L2060-L2305】 All model operations reuse the configuration helpers so download traces, CUDA caches, and staging directories remain under `%APPDATA%\CtrlSpeak`.
+- **System Services:** `utils.system` bundles runtime services—hotkey handling, audio capture, transcription request routing, discovery state, tray lifecycle, and embedded HTTP server hosting. It exposes APIs used by `main.py` and UI code while keeping global state (threads, last-connected server, processing audio feedback, etc.) consistent across the client/server split.【F:utils/system.py†L611-L1389】
+- **GUI Management:** `utils.gui` owns the Tk root, splash, onboarding overlays, management window, and other dialogs. It ensures the root is created and pumped on the main thread while worker threads schedule UI work via a queue, preventing direct Tk calls outside the UI thread.【F:utils/gui.py†L1180-L1309】
+- **Tooling & Keywords:** Keyword detection lives in `tools/keywords.py`, which provides reusable helpers for registering identity-specific phrases and scanning transcripts for automation triggers. `main.py` and both hotkey/server pipelines rely on this module to keep conversation control centralized.【F:tools/keywords.py†L1-L196】【F:main.py†L154-L160】【F:utils/system.py†L685-L920】
+- **Bot Integration:** `utils.bot_integration` manages SocialRobot subprocesses, Ollama model readiness, and monitoring threads so conversational features stay synchronized with transcription services.【F:utils/bot_integration.py†L620-L860】 Background agents under `background_agents/` supplement these flows by preprocessing LLM replies before TTS playback.【F:README.md†L7-L60】
+
+## Networking and Discovery
+Local/remote speech modes share networking primitives implemented in `utils.net_discovery`. A daemon `DiscoveryListener` thread listens for UDP broadcasts, maintains a time-based registry, and exposes helpers to send manual queries, record preferred servers, and probe connectivity.【F:utils/net_discovery.py†L15-L200】 `utils.system` wraps these helpers to update global state, refresh UI descriptions, and bootstrap discovery threads alongside the HTTP transcription server.【F:utils/system.py†L818-L1141】 The HTTP server itself is a `ThreadingHTTPServer` instance that streams uploaded audio to the transcriber, honors keyword interceptors, and responds with JSON payloads.【F:utils/system.py†L1010-L1137】
+
+## User Interface Composition
+The tray icon—started via `utils.system.run_tray`—spawns the keyboard listener, exposes management and quit actions, and runs pystray in a dedicated thread so the Tk management loop can continue on the main thread.【F:utils/system.py†L1188-L1233】 The management UI leverages queued tasks to update server status, initiate downloads, and surface notifications without violating Tk’s single-thread rule.【F:utils/gui.py†L1180-L1309】 Feedback overlays (waveform capture, processing indicators, lockout windows) depend on coordination between `utils.gui`, `utils.system`, and `utils.models` to keep user prompts aligned with background work.【F:utils/system.py†L667-L887】【F:utils/models.py†L2140-L2289】
+
+## Data & Resource Management
+Static assets (icons, audio, onboarding media) are resolved relative to the application base via `utils.config_paths.get_app_base_dir`, ensuring packaged builds locate bundled resources while source runs use the repository layout.【F:utils/config_paths.py†L106-L120】 Runtime assets (temporary recordings, CUDA DLLs, Whisper weights) are staged in the config tree with trace logging so both automation flows and GUI interactions share a common audit trail.【F:utils/models.py†L2060-L2305】【F:README.md†L31-L84】
+
+## Extensibility Considerations
+The architecture isolates platform integrations (audio, clipboard, SendInput) inside `utils.system` and `utils.winio`, preserving a single owner for hotkey handling and text injection. Keyword expansion and additional tooling modules can be added without touching core loops by extending `tools/keywords` and referencing the new payloads in `utils.system`. Model variants, CUDA updates, or automation improvements flow through `utils.models` and `utils.automation`, limiting cross-module coupling and keeping the entry point focused on orchestration.【F:utils/system.py†L611-L1389】【F:tools/keywords.py†L65-L196】【F:utils/models.py†L2060-L2305】
