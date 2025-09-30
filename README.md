@@ -16,6 +16,18 @@ Both flavours support Windows 10/11, enforce a single running instance, expose a
 
 Generated folders such as `dist/` and `build/` are ignored via `.gitignore`.
 
+## Platform storage locations
+
+CtrlSpeak never writes to the project directory at runtime. Instead it resolves platform-aware roots for persistent artifacts:
+
+| Location    | Windows path                | Linux/macOS path                                   |
+| ----------- | --------------------------- | -------------------------------------------------- |
+| `data_root` | `%APPDATA%\\CtrlSpeak`      | `${XDG_DATA_HOME:-~/.local/share}/CtrlSpeak`       |
+| `config_root` | `%APPDATA%\\CtrlSpeak`   | `${XDG_CONFIG_HOME:-~/.config}/CtrlSpeak`          |
+| `logs_root` | `%APPDATA%\\CtrlSpeak\\logs` | `${XDG_DATA_HOME:-~/.local/share}/CtrlSpeak/logs` |
+
+Models, CUDA runtimes, automation artifacts, screenshots, vector stores, and temporary recordings live under `data_root`, while user settings (`settings.json`) remain in `config_root`. Loggers write to `logs_root/ctrlspeak.log` via a rotating handler.
+
 ## Environment Setup
 
 Create an isolated environment and install the dependencies:
@@ -28,7 +40,7 @@ pip install -r requirements.txt
 Note: The optional "Chat with Bot" feature using the logo animation style requires PySide6, which is included in requirements.txt.
 ```
 
-GPU acceleration requires an NVIDIA CUDA-capable GPU with compatible drivers, but CtrlSpeak always boots in CPU mode and skips CUDA validation unless you opt in. The Whisper `small` model is downloaded automatically on first launch so a fresh install is usable immediately. Selecting **GPU (CUDA)** in the management window now launches the same welcome-and-progress experience used for model downloads; the app installs the CUDA runtime, cuBLAS, and cuDNN automatically and only falls back to CPU if validation fails. The CUDA wheels are cached under `%APPDATA%\CtrlSpeak\cuda\downloads`, verified with the published SHA-256 digests, and reused on the next attempt so extraction failures no longer force a redownload; the cache is purged only after a validated install. You can also stage GPU support manually via `python main.py --download-cuda-only` (alias: `--setup-cuda`). When no CUDA-capable GPU is detected, the management UI hides the GPU option and the installer flag exits early with an explanatory message.
+GPU acceleration requires an NVIDIA CUDA-capable GPU with compatible drivers, but CtrlSpeak always boots in CPU mode and skips CUDA validation unless you opt in. The Whisper `small` model is downloaded automatically on first launch so a fresh install is usable immediately. Selecting **GPU (CUDA)** in the management window now launches the same welcome-and-progress experience used for model downloads; the app installs the CUDA runtime, cuBLAS, and cuDNN automatically and only falls back to CPU if validation fails. The CUDA wheels are cached under `${data_root}/cuda/downloads` (that is, `%APPDATA%\CtrlSpeak\cuda\downloads` on Windows or `${XDG_DATA_HOME:-~/.local/share}/CtrlSpeak/cuda/downloads` on Linux/macOS), verified with the published SHA-256 digests, and reused on the next attempt so extraction failures no longer force a redownload; the cache is purged only after a validated install. You can also stage GPU support manually via `python main.py --download-cuda-only` (alias: `--setup-cuda`). When no CUDA-capable GPU is detected, the management UI hides the GPU option and the installer flag exits early with an explanatory message.
 During the initial Whisper download, CtrlSpeak opens a centered welcome window sized to roughly 80% of a 1080p frame (about 1536×864) that plays the bundled intro clip (about five seconds for the default `TrueAI_Intro_Video.mp4`) with audio. Once the clip ends, the window transitions into a branded fun-facts card featuring the CtrlSpeak logo on a white tile and rotating onboarding tips sourced from `assets/fun_facts.txt`. A slim lockout window remains in the top-left corner with live status text and a red **Cancel download** button; cancelling stops the download subprocess immediately, exiting entirely if no model is available or otherwise returning you to the currently staged model.
 The same welcome-and-progress experience now runs whenever Chat with Bot needs to download an Ollama model for a selected identity, keeping the assistant in the intro/fun-facts flow until the LLM weights finish caching.
 
@@ -39,7 +51,7 @@ The same welcome-and-progress experience now runs whenever Chat with Bot needs t
 python main.py
 ```
 
-On first launch you will be prompted to choose between **Client + Server** or **Client Only** modes. The client-only card lets you refresh for LAN servers or manually enter a `host[:port]` so CtrlSpeak knows which remote host to target. Settings, models, and logs live under `%APPDATA%\CtrlSpeak` (the folder is created automatically).
+On first launch you will be prompted to choose between **Client + Server** or **Client Only** modes. The client-only card lets you refresh for LAN servers or manually enter a `host[:port]` so CtrlSpeak knows which remote host to target. Settings live under `config_root`, while models, CUDA runtimes, logs, and other runtime files live under `data_root` (see [Platform storage locations](#platform-storage-locations) for the exact paths per operating system).
 
 ### Command-line Flags
 
@@ -48,6 +60,7 @@ On first launch you will be prompted to choose between **Client + Server** or **
 - `--download-cuda-only` (alias: `--setup-cuda`) – stage the CUDA runtime, cuBLAS, and cuDNN support packages (reusing any cached wheels before downloading fresh copies) and exit; the command aborts immediately when no CUDA-capable GPU is detected.
 - `--transcribe <wav>` – batch process an audio file without the hotkey workflow.
 - `--uninstall` – remove the application data and executable (used by the packaged build).
+- `--health` (with optional `--health-identity <name>`) – run the AppData health probe that verifies writability, lock acquisition, Chroma initialization, and embedder metadata for the selected identity; exits non-zero when any check fails.
 
 Run `python main.py --help` for the full list.
 
@@ -58,6 +71,26 @@ When you launch **Chat with Bot**, identities that set `require_text_cleaning: t
 Voice keywords live in [`tools/keywords.py`](docs/tooling.md). Saying “look at my screen” or “look at my clipboard” captures an image via the shared vision tooling, “chat with <identity>” (for example, assistant or default) relaunches the bot with that persona unless it is already active, and both “chat with …” and “goodbye …” now trigger the CtrlSpeak transcription server so the parent process owns the stop/start cycle before the utterance reaches SocialRobot.
 
 Holding the right `Ctrl` hotkey also honours those keywords. When no bot is running, saying “chat with assistant” (or any configured identity) while using the push-to-talk workflow launches the requested bot instead of typing the phrase into the focused window. Saying “goodbye <identity>” through the same hotkey closes the active session using the same shutdown path as the tray menu, and switching identities issues a graceful stop before starting the new persona.
+
+### Bot memory storage
+
+CtrlSpeak persists each identity’s runtime state under `${data_root}/bot_memory/<identity>/`, creating canonical `conversation/`, `screenshots/`, `chroma/`, and `traces/` subdirectories on demand. Conversation history is written as append-only JSONL at `conversation/conversation.jsonl`; entries are flushed via atomic temp-file swaps and the active file rotates at 10 MB (keeping five archives) to prevent unbounded growth. Screenshots captured by the “look at my screen/clipboard” workflows land in the identity’s `screenshots/` directory when that identity’s settings enable screenshot retention.
+
+Vector memory lives in `chroma/`, which is backed by a single-writer Chroma collection tied to the per-identity lock. The collection stores embedder metadata (`ctrlspeak-minhash` by default), rejects concurrent writers, and automatically spawns a `_vN` suffix when the embedder name or version changes so upgrades never mix embeddings. Retention is enforced at 5 000 items per identity with LRU eviction, optional per-document TTL, and an opt-in PII redaction pass before embedding. All toggles are stored in per-identity configuration files under `${config_root}/identities/<identity>/memory.json`:
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `store_vector_memory` | `true` | Enables Chroma persistence and retrieval. |
+| `store_screenshots` | `true` | Controls whether captured images are saved to disk. |
+| `retrieval_top_k` | `5` | Number of memories fetched per turn when similarity exceeds the threshold. |
+| `retrieval_threshold` | `0.75` | Minimum cosine similarity required to inject retrieved context. |
+| `max_vector_items` | `5000` | Upper bound for stored embeddings before LRU eviction. |
+| `vector_ttl_days` | `null` | Optional time-to-live per embedding (in days). |
+| `pii_redaction` | `false` | Redacts light PII (emails, phone numbers, IDs) before embedding. |
+
+Each Chat with Bot turn flows through a LangGraph orchestrator (`use_langgraph_memory_orchestrator` setting) that sequences retrieval → planning → tool execution → LLM → persistence. Retrieval no-ops when the store is empty or below the similarity threshold, and asynchronous embedding/upsert keeps TTS playback responsive. Per-turn traces and a CSV metrics feed (`retrieval_hits`, `avg_similarity`, `persist_latency_ms`, `evictions`, `lock_wait_ms`) accumulate under `traces/` for observability.
+
+To avoid corruption, CtrlSpeak acquires `${data_root}/.locks/<identity>.lock` before launching SocialRobot. If another process already owns the identity, the launcher prints “Identity in use. Close the running session before starting another.” and aborts. The management window’s **Clear Bot Memory** action targets the AppData-backed directories, deleting the JSONL log (and rotated archives) plus the `screenshots/`, `chroma/`, and `traces/` folders so packaged builds stay read-only. See [`docs/memory_overhaul_plan.md`](docs/memory_overhaul_plan.md) for the implementation roadmap and acceptance tests that keep the architecture honest.
 
 ## Packaging with PyInstaller
 
@@ -71,7 +104,7 @@ The helper executes the maintained `packaging/CtrlSpeak.spec` so manual `pyinsta
 
 ## Manual Model Download
 
-CtrlSpeak caches Whisper model weights under `%APPDATA%\CtrlSpeak\models`. The default configuration selects the lightweight `small` Whisper checkpoint and runs on the CPU. If you want to preload the model without launching the GUI, use the Hugging Face CLI:
+CtrlSpeak caches Whisper model weights under `${data_root}/models`. The default configuration selects the lightweight `small` Whisper checkpoint and runs on the CPU. If you want to preload the model without launching the GUI, use the Hugging Face CLI:
 
 ```powershell
 pip install huggingface_hub
@@ -81,7 +114,7 @@ New-Item -ItemType File (Join-Path $target '.installed') -Force | Out-Null
 ```
 
 - Substitute a different `repo/model` name if you prefer another Whisper checkpoint.
-- To point CtrlSpeak at a custom directory, set the `CTRLSPEAK_MODEL_DIR` environment variable to the parent folder that contains the models (defaults to `%APPDATA%\CtrlSpeak\models`).
+- To point CtrlSpeak at a custom directory, set the `CTRLSPEAK_MODEL_DIR` environment variable to the parent folder that contains the models (defaults to `${data_root}/models`).
 
 ## Windows Server Provisioning
 
@@ -113,7 +146,7 @@ After updates you can re-run `--auto-setup client_server` to refresh the install
 
 ## Development Notes
 
-- Temporary recordings, configuration, logs, and downloaded Whisper models live under `%APPDATA%\CtrlSpeak`.
+- Temporary recordings and other runtime artifacts live under `data_root`, while configuration files stay under `config_root` (see [Platform storage locations](#platform-storage-locations)).
 - Test audio files such as `part1.wav` are intentionally excluded from Git to avoid large binaries.
 - Use the tray menu to manage the client/server lifecycle or to uninstall (`Delete CtrlSpeak`).
 - Track future enhancements in [`docs/TODO.md`](docs/TODO.md); keep the list current as tasks are added or completed.
@@ -126,13 +159,13 @@ Run the regression harness to validate a workstation without touching the GUI:
 python main.py --automation-flow
 ```
 
-The command performs a staged health-check entirely inside %APPDATA%\CtrlSpeak:
+The command performs a staged health-check entirely inside `data_root`:
 
-1. Ensure the default Whisper model is present under %APPDATA%\CtrlSpeak\models (downloading it when missing).
-2. Reuse or install the NVIDIA CUDA runtime stack (nvidia-cuda-runtime-cu12, nvidia-cublas-cu12, nvidia-cudnn-cu12) so the DLLs live under %APPDATA%\CtrlSpeak\cuda\12.3 when GPU testing is required.
-3. Transcribe assets/test.wav on the CPU.
-4. Transcribe the same clip on the GPU using the DLLs staged in %APPDATA%\CtrlSpeak\cuda\12.3.
-5. Simulate each text-injection strategy (direct insert, SendInput paste, clipboard paste, PyAutoGUI typing) and write a consolidated report to %APPDATA%\CtrlSpeak\automation\artifacts.
+1. Ensure the default Whisper model is present under `${data_root}/models` (downloading it when missing).
+2. Reuse or install the NVIDIA CUDA runtime stack (nvidia-cuda-runtime-cu12, nvidia-cublas-cu12, nvidia-cudnn-cu12) so the DLLs live under `${data_root}/cuda/12.3` when GPU testing is required.
+3. Transcribe `assets/test.wav` on the CPU.
+4. Transcribe the same clip on the GPU using the DLLs staged in `${data_root}/cuda/12.3`.
+5. Simulate each text-injection strategy (direct insert, SendInput paste, clipboard paste, PyAutoGUI typing) and write a consolidated report to `${data_root}/automation/artifacts`.
 
 If any stage fails the workflow stops at that checkpoint and leaves detailed logs plus the partially populated automation_state.json in the same automation folder. Fix the underlying system issue (drivers, CUDA DLLs, networking, etc.) and re-run the flag - the script resumes where it left off.
 
@@ -141,8 +174,8 @@ If any stage fails the workflow stops at that checkpoint and leaves detailed log
 Provide your helper with the single command above and the acceptance criteria:
 
 - All stages complete without errors on a single pass.
-- %APPDATA%\CtrlSpeak\automation\artifacts contains a report named automation_run_*.txt whose injection sections echo the canonical transcript.
-- %APPDATA%\CtrlSpeak\cuda\12.3 holds the CUDA DLLs and `python main.py` can select both CPU and GPU devices without warnings.
+- `${data_root}/automation/artifacts` contains a report named `automation_run_*.txt` whose injection sections echo the canonical transcript.
+- `${data_root}/cuda/12.3` holds the CUDA DLLs and `python main.py` can select both CPU and GPU devices without warnings.
 
 An agent can loop on `python main.py --automation-flow`, examine automation_state.json, and only make host-level changes (install drivers, adjust PATH, etc.) until the run succeeds - no code edits are required.
 

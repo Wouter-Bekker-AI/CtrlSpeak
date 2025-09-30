@@ -46,7 +46,7 @@ except Exception:  # pragma: no cover - optional dependency missing
 from utils.system import (
     settings, settings_lock,
     notify, notify_error, format_exception_details,
-    get_config_dir, save_settings,
+    save_settings,
     start_processing_feedback, stop_processing_feedback,
     ui_show_lockout_window, ui_update_lockout_message, ui_close_lockout_window,
     pump_management_events_once,
@@ -54,7 +54,7 @@ from utils.system import (
 )
 from utils.system import get_best_server, CLIENT_ONLY_BUILD
 from utils.ui_theme import apply_modern_theme
-from utils.config_paths import get_logger, asset_path
+from utils.config_paths import get_logger, asset_path, get_data_dir, get_logs_dir
 
 
 # ---------------- Env / defaults ----------------
@@ -66,14 +66,15 @@ ENV_DEVICE_PREF   = os.environ.get("CTRLSPEAK_DEVICE", "cpu").lower()
 COMPUTE_TYPE_OVERRIDE = os.environ.get("CTRLSPEAK_COMPUTE_TYPE")
 MODEL_REPO_OVERRIDE   = os.environ.get("CTRLSPEAK_MODEL_REPO")
 
-# All model content under %APPDATA%/CtrlSpeak/models
-MODEL_ROOT_PATH = get_config_dir() / "models"
-MODEL_TRACE_PATH = get_config_dir() / "logs" / "model_download_trace.log"
+# All model content under the platform data directory (e.g., %APPDATA%/CtrlSpeak/models)
+DATA_ROOT = get_data_dir()
+MODEL_ROOT_PATH = DATA_ROOT / "models"
+MODEL_TRACE_PATH = get_logs_dir() / "model_download_trace.log"
 
-CUDA_TRACE_PATH = get_config_dir() / "logs" / "cuda_download_trace.log"
+CUDA_TRACE_PATH = get_logs_dir() / "cuda_download_trace.log"
 
 CUDA_RUNTIME_VERSION = "12.9.79"
-CUDA_INSTALL_BASE = get_config_dir() / "cuda"
+CUDA_INSTALL_BASE = DATA_ROOT / "cuda"
 CUDA_DOWNLOAD_CACHE = CUDA_INSTALL_BASE / "downloads"
 
 CUDA_DOWNLOAD_SPEC: dict[str, list[dict[str, str]]] = {

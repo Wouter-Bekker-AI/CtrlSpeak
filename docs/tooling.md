@@ -32,8 +32,8 @@ The `vision` module centralizes every capture routine that SocialRobot and other
 ### Implementation details
 
 - Dependencies (PyAutoGUI, Pillow, pygame) are imported inside the functions so importing `tools.vision` never loads GUI libraries unless a capture actually runs.
-- Errors are reported through the shared logger obtained from `utils.config_paths.get_logger`, which means failures show up in `%APPDATA%\CtrlSpeak\logs\ctrlspeak.log` while callers can still recover gracefully.
-- Successful captures store their files in `<memory>/screenshots/` when the caller provides a directory. Filenames follow the pattern `<prefix>_<UTC timestamp>.png`, making it easy to correlate history entries with on-disk artifacts.
+- Errors are reported through the shared logger obtained from `utils.config_paths.get_logger`, which means failures show up in `${data_root}/logs/ctrlspeak.log` (e.g., %APPDATA%\CtrlSpeak\logs\ctrlspeak.log on Windows) while callers can still recover gracefully.
+- Successful captures store their files in `${data_root}/bot_memory/<identity>/screenshots` when the caller provides the identity’s memory directory. Filenames follow the pattern `<prefix>_<UTC timestamp>.png`, making it easy to correlate history entries with on-disk artifacts.
 - A lightweight shutter sound is played after every successful capture. The helper falls back silently when pygame is missing or audio initialization fails, so tests and headless environments stay stable.
 
 ### Usage pattern
