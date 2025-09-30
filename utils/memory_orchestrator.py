@@ -14,6 +14,8 @@ from typing import Any, Dict, Iterable, List, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 
+from utils.config_paths import get_logger
+from utils.image_store import is_image_request, load_identity_image
 from utils.io_atomic import atomic_append_lines, atomic_write_text
 from utils.metrics import MetricsRecorder
 from utils.memory_paths import get_bot_conversation_log, get_bot_traces_dir
@@ -24,6 +26,9 @@ from utils.vector_memory import RetrievedMemory, VectorMemoryStore
 CONVERSATION_MAX_BYTES = 10 * 1024 * 1024
 CONVERSATION_KEEP = 5
 PERSIST_START_DELAY_SECONDS = 0.01
+
+
+logger = get_logger(__name__)
 
 
 class _TurnState(TypedDict, total=False):
@@ -37,6 +42,7 @@ class _TurnState(TypedDict, total=False):
     metrics: Dict[str, float]
     errors: List[Dict[str, Any]]
     vision_metadata: Optional[Dict[str, Any]]
+    vision_attached: bool
 
 
 @dataclass
@@ -233,6 +239,51 @@ class MemoryOrchestrator:
         return graph.compile()
 
     # ------------------------------------------------------------------
+    def _resolve_vision_payload(
+        self,
+        augmented_text: str,
+        vision_metadata: Optional[Dict[str, Any]],
+    ) -> tuple[Optional[List[dict]], Optional[Dict[str, Any]], bool]:
+        metadata: Dict[str, Any] = {}
+        if isinstance(vision_metadata, dict):
+            metadata = dict(vision_metadata)
+
+        request_hint = metadata.get("vision_request")
+        include_image = bool(request_hint)
+        if not include_image and is_image_request(augmented_text):
+            include_image = True
+
+        if not include_image:
+            metadata.pop("vision_attached", None)
+            return None, (metadata or None), False
+
+        record = load_identity_image(self.identity)
+        if record is None:
+            logger.debug(
+                "Requested image attachment for identity '%s' but no stored PNG was found.",
+                self.identity,
+            )
+            metadata.pop("vision_attached", None)
+            return None, (metadata or None), False
+
+        metadata.update(
+            {
+                "vision_file": str(record.path),
+                "vision_updated": record.updated_at_iso,
+            }
+        )
+        if record.source and not metadata.get("vision_source"):
+            metadata["vision_source"] = record.source
+        metadata["vision_attached"] = True
+        metadata.pop("vision_request", None)
+
+        content = [
+            {"type": "text", "text": augmented_text},
+            {"type": "image", "image": record.image_b64},
+        ]
+        return content, metadata, True
+
+    # ------------------------------------------------------------------
     # Graph nodes
     # ------------------------------------------------------------------
     def _node_retrieve(self, state: _TurnState) -> _TurnState:
@@ -300,9 +351,14 @@ class MemoryOrchestrator:
         correlation_id = state["correlation_id"]
         response = state.get("response_text", "")
         user_text = state.get("user_text", "")
-        content_blocks = state.get("content_blocks")
         vision_metadata = state.get("vision_metadata")
-        entries = self._build_history_entries(user_text, response, content_blocks, vision_metadata)
+        attached_image = bool(state.get("vision_attached"))
+        entries = self._build_history_entries(
+            user_text,
+            response,
+            attached_image,
+            vision_metadata,
+        )
         self.history.extend(entries)
         vector_documents = [user_text, response]
         vector_metadata = [
@@ -324,15 +380,21 @@ class MemoryOrchestrator:
         self,
         user_text: str,
         response_text: str,
-        content_blocks: Optional[List[dict]],
+        attached_image: bool,
         vision_metadata: Optional[Dict[str, Any]],
     ) -> List[dict]:
         entries: List[dict] = []
-        if content_blocks:
-            record: Dict[str, Any] = {"role": "user", "content": content_blocks}
-            if vision_metadata:
-                record["metadata"] = vision_metadata
-            entries.append(record)
+        if attached_image:
+            entry_content: List[Dict[str, Any]] = [{"type": "text", "text": user_text}]
+            metadata: Dict[str, Any] = dict(vision_metadata or {})
+            file_path = metadata.get("vision_file")
+            if file_path:
+                entry_content.append({"type": "image_file", "path": file_path})
+            else:
+                entry_content.append({"type": "image_reference", "description": "latest identity image"})
+            metadata.pop("vision_request", None)
+            metadata["vision_attached"] = True
+            entries.append({"role": "user", "content": entry_content, "metadata": metadata})
         else:
             entries.append({"role": "user", "content": user_text})
         entries.append({"role": "assistant", "content": response_text})
@@ -348,13 +410,34 @@ class MemoryOrchestrator:
         vision_metadata: Optional[Dict[str, Any]] = None,
     ) -> TurnResult:
         correlation_id = uuid.uuid4().hex
+        augmented = augmented_text or user_text
+        resolved_blocks = content_blocks
+        resolved_metadata: Optional[Dict[str, Any]] = vision_metadata
+        attached_image = False
+        if resolved_blocks is None:
+            resolved_blocks, resolved_metadata, attached_image = self._resolve_vision_payload(
+                augmented,
+                vision_metadata,
+            )
+        else:
+            attached_image = any(
+                isinstance(block, dict) and block.get("type") == "image"
+                for block in resolved_blocks
+            )
+            if attached_image:
+                meta_container: Dict[str, Any] = {}
+                if isinstance(vision_metadata, dict):
+                    meta_container.update(vision_metadata)
+                meta_container["vision_attached"] = True
+                resolved_metadata = meta_container
         initial_state: _TurnState = {
             "correlation_id": correlation_id,
             "user_text": user_text,
-            "augmented_text": augmented_text or user_text,
-            "content_blocks": content_blocks,
+            "augmented_text": augmented,
+            "content_blocks": resolved_blocks,
             "history": list(self.history),
-            "vision_metadata": vision_metadata,
+            "vision_metadata": resolved_metadata,
+            "vision_attached": attached_image,
         }
         result_state = self._graph.invoke(initial_state)
         metrics = result_state.get("metrics", {})
@@ -365,11 +448,13 @@ class MemoryOrchestrator:
             RetrievedMemory(item["content"], item.get("metadata", {}), float(item.get("similarity", 0)))
             for item in result_state.get("retrieved", [])
         ]
+        result_metadata = result_state.get("vision_metadata")
+        result_attached = bool(result_state.get("vision_attached"))
         entries = self._build_history_entries(
             user_text,
             result_state.get("response_text", ""),
-            content_blocks,
-            vision_metadata,
+            result_attached,
+            result_metadata,
         )
         return TurnResult(
             correlation_id=correlation_id,
@@ -392,6 +477,9 @@ class MemoryOrchestrator:
             "response_text": state.get("response_text"),
             "errors": state.get("errors", []),
         }
+        trace["vision_attached"] = bool(state.get("vision_attached"))
+        if state.get("vision_metadata"):
+            trace["vision_metadata"] = state.get("vision_metadata")
         atomic_write_text(path, json.dumps(trace, indent=2, ensure_ascii=False))
         return path
 

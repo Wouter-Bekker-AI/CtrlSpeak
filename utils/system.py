@@ -42,6 +42,10 @@ from utils.config_paths import (
 logger = get_logger(__name__)
 
 
+_CLIPBOARD_WARN_COOLDOWN_SECONDS = 5.0
+_last_clipboard_warning: float = 0.0
+
+
 def _bootstrap_runtime_environment() -> None:
     """
     Ensure third-party services can establish HTTPS connections when running
@@ -266,9 +270,15 @@ def write_error_log(context: str, snippet: str) -> None:
 
 
 def copy_to_clipboard(text: str) -> None:
+    global _last_clipboard_warning
     try:
         if not set_clipboard_text(text):
-            logger.warning("Failed to stage clipboard text")
+            now = time.monotonic()
+            if now - _last_clipboard_warning >= _CLIPBOARD_WARN_COOLDOWN_SECONDS:
+                logger.warning(
+                    "Failed to stage clipboard text; the Windows clipboard is busy or unavailable."
+                )
+                _last_clipboard_warning = now
     except Exception:
         logger.exception("Failed to copy text to clipboard")
 

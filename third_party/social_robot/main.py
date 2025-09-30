@@ -29,6 +29,12 @@ from PySide6.QtCore import QTimer
 
 from tools import keywords, vision
 from utils.config_paths import get_logger
+from utils.image_store import (
+    IdentityImageRecord,
+    is_image_request,
+    load_identity_image,
+    write_identity_image_from_base64,
+)
 from utils.io_atomic import AtomicWriteError, atomic_append_lines
 from utils.memory_lock import IdentityLock, IdentityLockError, probe_lock_path
 from utils.memory_orchestrator import MemoryOrchestrator
@@ -383,7 +389,6 @@ def main():
         print("-> Identity does not require text cleaning; skipping TTS preprocessing agent.")
 
     identity_settings = load_identity_settings(profile.name)
-    store_screenshots = bool(identity_settings.get("store_screenshots", True))
 
     use_orchestrator = os.getenv("CTRLSPK_USE_LANGGRAPH_MEMORY_ORCHESTRATOR") == "1"
     metrics_env = os.getenv("CTRLSPK_METRICS_PATH")
@@ -741,6 +746,7 @@ def main():
         nonlocal use_orchestrator
 
         capture_result: Optional[vision.VisionCapture] = None
+        identity_image: Optional[IdentityImageRecord] = None
         augmented_text = cleaned
         capture_request = capture_override
         capture_pattern: Optional[Pattern[str]] = None
@@ -760,14 +766,10 @@ def main():
             capture_request = None
 
         if capture_request:
-            storage_dir: Optional[Path] = None
-            if profile.memory_path and store_screenshots:
-                storage_dir = profile.memory_path / "screenshots"
-
             if capture_request == "screen":
-                capture_result = vision.capture_screenshot(storage_dir)
+                capture_result = vision.capture_screenshot()
             elif capture_request == "clipboard":
-                capture_result = vision.capture_clipboard_image(storage_dir)
+                capture_result = vision.capture_clipboard_image()
             else:
                 print(f"-> Unknown vision capture request: {capture_request}")
                 capture_result = None
@@ -783,35 +785,35 @@ def main():
                     augmented_text = prompt_suffix
                 else:
                     augmented_text = cleaned
+                identity_image = write_identity_image_from_base64(
+                    profile.name,
+                    capture_result.image_b64,
+                    source=capture_result.source,
+                )
+                if identity_image is None:
+                    identity_image = load_identity_image(profile.name)
                 print(f"-> Captured {capture_result.source} image for analysis.")
             elif capture_result:
                 reason = capture_result.error or "capture failure"
                 print(f"-> Proceeding without vision capture due to: {reason}")
 
-        vision_b64: Optional[str] = None
-        vision_path: Optional[Path] = None
-        vision_source: Optional[str] = None
-        if capture_result and capture_result.success:
-            vision_b64 = capture_result.image_b64
-            vision_path = capture_result.saved_path
-            vision_source = capture_result.source
-
-        user_content: Optional[List[dict]] = None
-        if vision_b64:
-            user_content = [
-                {"type": "text", "text": augmented_text},
-                {"type": "image", "image": vision_b64},
-            ]
+        if identity_image is None and is_image_request(augmented_text):
+            identity_image = load_identity_image(profile.name)
 
         vision_metadata: Optional[dict[str, str]] = None
-        if vision_source or vision_path:
-            vision_metadata = {}
-            if vision_source:
-                vision_metadata["vision_source"] = vision_source
-            if vision_path:
-                vision_metadata["vision_file"] = str(vision_path)
-            if not vision_metadata:
-                vision_metadata = None
+        if identity_image is not None:
+            vision_metadata = identity_image.as_metadata(vision_request=capture_request)
+        elif capture_request:
+            vision_metadata = {"vision_request": capture_request}
+
+        fallback_content: Optional[List[dict]] = None
+        if identity_image is not None and (
+            capture_request or is_image_request(augmented_text)
+        ):
+            fallback_content = [
+                {"type": "text", "text": augmented_text},
+                {"type": "image", "image": identity_image.image_b64},
+            ]
 
         llm_response = ""
         used_orchestrator = False
@@ -820,7 +822,6 @@ def main():
                 turn_result = orchestrator.run_turn(
                     transcript,
                     augmented_text=augmented_text,
-                    content_blocks=user_content,
                     vision_metadata=vision_metadata,
                 )
                 llm_response = turn_result.response_text
@@ -838,7 +839,7 @@ def main():
                 llm_response = ollama_client.query(
                     augmented_text,
                     history=history,
-                    content=user_content,
+                    content=fallback_content,
                 )
             except OllamaUnavailableError as exc:
                 failure_message = str(exc)
@@ -850,10 +851,18 @@ def main():
                 return
 
             history_entry: dict
-            if user_content is not None:
-                history_entry = {"role": "user", "content": user_content}
+            if identity_image is not None and (
+                capture_request or is_image_request(augmented_text)
+            ):
+                entry_content = [
+                    {"type": "text", "text": transcript},
+                    {"type": "image_file", "path": str(identity_image.path)},
+                ]
+                history_entry = {"role": "user", "content": entry_content}
                 if vision_metadata:
-                    history_entry["metadata"] = vision_metadata
+                    sanitized_metadata = dict(vision_metadata)
+                    sanitized_metadata.pop("vision_request", None)
+                    history_entry["metadata"] = sanitized_metadata
             else:
                 history_entry = {"role": "user", "content": transcript}
 

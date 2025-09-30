@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import re
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Optional, Sequence
@@ -43,6 +44,14 @@ _LOOK_AT_CLIPBOARD = Keyword(
     category="vision",
     payload="clipboard",
 )
+
+_FUZZY_CLIPBOARD_PATTERN = re.compile(
+    r"\blook at my\s+(?P<target>[A-Za-z]+(?:[\s_-]+[A-Za-z]+)?)\b",
+    re.IGNORECASE,
+)
+
+_CLIPBOARD_CANONICAL = "clipboard"
+_CLIPBOARD_FUZZY_THRESHOLD = 0.88
 
 VISION_KEYWORDS: tuple[Keyword, ...] = (
     _LOOK_AT_SCREEN,
@@ -138,6 +147,8 @@ def iter_keyword_matches(text: str, keywords: Iterable[Keyword] = ALL_KEYWORDS) 
 
     for keyword in keywords:
         match = keyword.search(cleaned)
+        if not match and keyword is _LOOK_AT_CLIPBOARD:
+            match = _match_fuzzy_clipboard(cleaned)
         if match:
             yield KeywordMatch(keyword, match)
 
@@ -193,6 +204,24 @@ def get_conversation_end_keyword(payload: str) -> Optional[Keyword]:
     for keyword in _CONVERSATION_END_KEYWORDS:
         if keyword.payload.lower() == normalized.lower():
             return keyword
+    return None
+
+
+def _match_fuzzy_clipboard(text: str) -> Optional[re.Match[str]]:
+    """Return a regex match when ``text`` approximates the clipboard keyword."""
+
+    for match in _FUZZY_CLIPBOARD_PATTERN.finditer(text):
+        target = match.group("target")
+        normalized = re.sub(r"[\s_-]+", "", target.lower())
+        if not normalized:
+            continue
+        if normalized == _CLIPBOARD_CANONICAL:
+            return match
+        similarity = difflib.SequenceMatcher(
+            None, normalized, _CLIPBOARD_CANONICAL
+        ).ratio()
+        if similarity >= _CLIPBOARD_FUZZY_THRESHOLD:
+            return match
     return None
 
 

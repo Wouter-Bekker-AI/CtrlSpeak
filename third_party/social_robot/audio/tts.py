@@ -6,6 +6,7 @@ import hashlib
 import tempfile
 import threading
 import time
+import warnings
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -31,6 +32,7 @@ class KokoroTTS:
         speed: float = 1.0,
         model_dir: Optional[Path | str] = None,
     ) -> None:
+        warnings.filterwarnings("once", category=UserWarning, module="phonemizer")
         self.voice = voice
         self.speed = speed
         self.sample_rate = SAMPLE_RATE

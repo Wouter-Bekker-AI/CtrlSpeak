@@ -17,6 +17,22 @@ def test_detect_vision_keyword_clipboard():
     assert match.keyword.payload == "clipboard"
 
 
+def test_detect_vision_keyword_clipboard_fuzzy_variants():
+    for phrase in [
+        "look at my slipboard",
+        "look at my clupboard",
+        "look at my clip board",
+    ]:
+        match = keywords.detect_vision_keyword(phrase)
+        assert match is not None, phrase
+        assert match.keyword.payload == "clipboard"
+
+
+def test_detect_vision_keyword_clipboard_rejects_different_words():
+    match = keywords.detect_vision_keyword("please look at my keyboard")
+    assert match is None
+
+
 def test_detect_vision_keyword_empty():
     match = keywords.detect_vision_keyword("   ")
     assert match is None
