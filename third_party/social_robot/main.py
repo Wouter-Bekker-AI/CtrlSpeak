@@ -658,7 +658,7 @@ def main():
                 sample_rate=vad_listener.sample_rate,
             )
         except Exception as exc:
-            print("STT error:", exc)
+            # print("STT error:", exc)
             recognized_text = ""
 
         with processing_lock:
