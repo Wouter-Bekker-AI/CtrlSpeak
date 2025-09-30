@@ -28,12 +28,16 @@ class IdentityLock:
         if self._lock is not None:
             return
         try:
+            flags = portalocker.LOCK_EX
+            effective_timeout = timeout
+            if timeout is None or timeout <= 0:
+                flags |= portalocker.LOCK_NB
+                effective_timeout = 0
             lock = portalocker.Lock(
                 str(self.lock_path),
-                timeout=timeout,
-                flags=portalocker.LOCK_EX,
+                flags=flags,
             )
-            lock.acquire()
+            lock.acquire(timeout=effective_timeout)
         except portalocker.LockException as exc:
             raise IdentityLockError(f"Identity '{self.identity}' is already in use") from exc
         self._lock = lock

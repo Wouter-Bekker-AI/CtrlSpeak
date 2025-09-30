@@ -40,6 +40,8 @@ This roadmap captures the staged rebuild of CtrlSpeak's long-term memory system.
 ### 2.2 Atomic File Operations
 - Introduce `utils/io_atomic.py` with `atomic_write_text` and `atomic_rotate` helpers.
 - Use the helpers for settings and conversation persistence, ensuring temp files live beside targets and are removed on failure.
+- Harden the helpers for Windows by closing temp files before promotion and retrying `os.replace` when another process briefly
+  holds the destination open (for example, when the UI is reading the conversation log).
 
 ### 2.3 Cross-Process Identity Locks
 - Implement `${data_root}/.locks/<identity>.lock` via `portalocker` (Windows + POSIX).

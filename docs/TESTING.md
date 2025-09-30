@@ -28,7 +28,7 @@ Progress and failure diagnostics are recorded in `${data_root}/logs/ctrlspeak.lo
 
 ## 2. Core Headless Pytest Suite (`-m core_headless`)
 
-**Coverage:** Configuration helpers, CLI parsing, discovery utilities, AppData path resolution, atomic IO, per-identity memory settings, vector store retention/TTL enforcement, LangGraph orchestrator retrieval gating, and other logic that requires no GUI, audio, or large downloads.
+**Coverage:** Configuration helpers, CLI parsing, discovery utilities, AppData path resolution, atomic IO, per-identity memory settings, vector store retention/TTL enforcement, LangGraph orchestrator retrieval gating, and other logic that requires no GUI, audio, or large downloads. The suite relies on lightweight in-repo shims for LangGraph and Chroma when the real packages are unavailable; the shims persist collections to JSON beside each identity so retrieval and eviction behaviour remain fully exercised offline.
 
 **Invocation:**
 ```bash

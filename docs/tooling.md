@@ -33,7 +33,7 @@ The `vision` module centralizes every capture routine that SocialRobot and other
 
 - Dependencies (PyAutoGUI, Pillow, pygame) are imported inside the functions so importing `tools.vision` never loads GUI libraries unless a capture actually runs.
 - Errors are reported through the shared logger obtained from `utils.config_paths.get_logger`, which means failures show up in `${data_root}/logs/ctrlspeak.log` (e.g., %APPDATA%\CtrlSpeak\logs\ctrlspeak.log on Windows) while callers can still recover gracefully.
-- Successful captures store their files in `${data_root}/bot_memory/<identity>/screenshots` when the caller provides the identity’s memory directory. Filenames follow the pattern `<prefix>_<UTC timestamp>.png`, making it easy to correlate history entries with on-disk artifacts.
+- Successful captures store their files in `${data_root}/bot_memory/<identity>/screenshots` when the caller provides the identity’s memory directory. The LangGraph image-memory helpers collapse the folder down to a single `current.png` plus `metadata.json`, replacing the PNG atomically whenever a new capture arrives so identities keep only their latest image on disk.
 - A lightweight shutter sound is played after every successful capture. The helper falls back silently when pygame is missing or audio initialization fails, so tests and headless environments stay stable.
 
 ### Usage pattern
@@ -82,7 +82,7 @@ The keyword registry keeps voice and command triggers in one place so assistants
 ```python
 from tools import keywords
 
-match = keywords.detect_vision_keyword("please look at my clipboard")
+match = keywords.detect_vision_keyword("look at my clipboard")
 if match:
     if match.keyword.payload == "clipboard":
         handle_clipboard()
@@ -91,6 +91,17 @@ if match:
 ```
 
 SocialRobot consumes this module to decide whether the user asked for a screenshot or clipboard capture and to switch between identities when the user says “chat with assistant/default.” The CtrlSpeak transcription server inspects the same registry before forwarding speech to SocialRobot so both “chat with …” and “goodbye …” requests are handled in the parent process. This keeps shutdowns and relaunches consistent with the tray and hotkey controls. When you add new keywords, update the relevant identity system prompts (so assistants know which phrases to suggest) and refresh any UX documentation that references the trigger vocabulary.
+
+### Keyword reference
+
+The application responds to the following spoken or typed keywords. Each phrase is matched case-insensitively, and the clipboard trigger also accepts near-miss variations such as “look at my slipboard” or “look at my clupboard.”
+
+| Keyword | Category | Action |
+| --- | --- | --- |
+| `look at my screen` | Vision | Capture the user’s current desktop, store it as the identity’s latest image, and play the camera shutter sound. |
+| `look at my clipboard` (including close variants like “look at my slipboard”) | Vision | Read the latest image from the system clipboard, replace the identity’s stored image, and play the camera shutter sound. |
+| `chat with <identity>` | Conversation start | Relaunch the bot using the requested identity via the transcription server (ignored if that identity is already active). |
+| `goodbye <identity>` | Conversation end | Shut down the active conversation for the specified identity from the CtrlSpeak main process. |
 
 ### Conversation keywords
 
