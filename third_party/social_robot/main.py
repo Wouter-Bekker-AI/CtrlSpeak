@@ -3,16 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import io
 import json
 import os
-import re
 import sys
 import threading
-from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Pattern
 
 from audio.stt import FasterWhisperSTT
 from audio.remote_stt import RemoteSTT
@@ -27,16 +23,18 @@ from face_animation.face import FaceAnimator, FaceSettings
 from face_animation.logo import LogoAnimator
 from llm.ollama import OllamaClient, OllamaUnavailableError
 from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QTimer
+
+from tools import keywords, vision
 
 IDENTITIES_ROOT = Path(__file__).resolve().parent / "identities"
 DEFAULT_IDENTITY_NAME = "default"
 DEFAULT_SYSTEM_PROMPT = "You are a cheerful robotic companion speaking concisely."
 
-_LOOK_AT_SCREEN_PATTERN = re.compile(r"\blook at my screen\b", re.IGNORECASE)
-
-_camera_sound_lock = threading.Lock()
-_camera_sound: Optional[object] = None
-_camera_sound_failed = False
+_VISION_PROMPT_SUFFIX = {
+    "screen": "Please describe the attached screenshot and let me know anything important you notice.",
+    "clipboard": "Please describe the clipboard image I attached and summarize anything relevant you notice.",
+}
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -85,6 +83,14 @@ def _resolve_identities_root(arg_value: Optional[str]) -> Path:
     if arg_value:
         return Path(arg_value).expanduser().resolve()
     return IDENTITIES_ROOT
+
+
+def _list_identity_names(root: Path) -> list[str]:
+    try:
+        return sorted(p.name for p in root.iterdir() if p.is_dir())
+    except Exception as exc:
+        print(f"-> Failed to enumerate identities under {root}: {exc}")
+        return []
 
 def _load_identity_config(root: Path, name: str) -> tuple[dict, Path]:
     identity_path = (root / name).expanduser().resolve()
@@ -245,49 +251,16 @@ def save_history(memory_path: Optional[Path], history: List[dict]) -> None:
         except Exception as exc:
             print(f"-> Failed to save conversation history: {exc}")
 
-def _play_camera_shutter() -> None:
-    """Play the camera shutter sound if available."""
-    global _camera_sound, _camera_sound_failed
-
-    if _camera_sound_failed:
-        return
-
-    with _camera_sound_lock:
-        if _camera_sound_failed:
-            return
-        try:
-            import pygame
-        except Exception as exc:
-            print(f"-> Camera sound unavailable: {exc}")
-            _camera_sound_failed = True
-            return
-
-        try:
-            if not pygame.mixer.get_init():
-                pygame.mixer.init()
-        except Exception as exc:
-            print(f"-> Camera sound unavailable: {exc}")
-            _camera_sound_failed = True
-            return
-
-        if _camera_sound is None:
-            sound_path = Path(__file__).resolve().parents[2] / "assets" / "camera.wav"
-            try:
-                _camera_sound = pygame.mixer.Sound(str(sound_path))
-            except Exception as exc:
-                print(f"-> Failed to load camera sound: {exc}")
-                _camera_sound_failed = True
-                return
-
-        try:
-            _camera_sound.play()
-        except Exception as exc:
-            print(f"-> Failed to play camera sound: {exc}")
-            _camera_sound_failed = True
-
 def main():
     args = parse_args()
     profile, config = resolve_identity(args)
+
+    identities_root = _resolve_identities_root(args.identities_dir)
+    available_identities = _list_identity_names(identities_root)
+    if profile.name not in available_identities:
+        available_identities.append(profile.name)
+    keywords.configure_identity_keywords(available_identities)
+    identity_lookup = {name.lower(): name for name in available_identities}
 
     # STT backend selection
     if args.stt == "remote":
@@ -377,14 +350,117 @@ def main():
     vad_listener: Optional[VADListener] = None
     last_bot_response: str = ""
     processing_lock = threading.Lock()
+    shutdown_requested = threading.Event()
+
+    def _identity_display(name: str) -> str:
+        return name.replace("_", " ").strip().title() or name
+
+    def _resolve_identity_name(candidate: str) -> Optional[str]:
+        if not candidate:
+            return None
+        normalized = candidate.strip().lower()
+        if not normalized:
+            return None
+        if normalized == profile.name.lower():
+            return profile.name
+        return identity_lookup.get(normalized)
+
+    def _restart_with_identity(target_identity: str) -> None:
+        print(f"-> Voice command switching to identity '{target_identity}'.")
+        shutdown_requested.set()
+        try:
+            if vad_listener is not None:
+                vad_listener.stop()
+        except Exception:
+            pass
+        try:
+            if tts_model.is_playing:
+                tts_model.stop_playback()
+        except Exception:
+            pass
+        try:
+            if animator is not None:
+                animator.stop()
+        except Exception:
+            pass
+
+        argv = sys.argv[1:]
+        new_args: list[str] = []
+        skip_next = False
+        replaced = False
+        for index, value in enumerate(argv):
+            if skip_next:
+                skip_next = False
+                continue
+            if value == "--identity":
+                replaced = True
+                new_args.extend(["--identity", target_identity])
+                skip_next = True
+            else:
+                new_args.append(value)
+        if not replaced:
+            new_args.extend(["--identity", target_identity])
+
+        os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve())] + new_args)
+
+    def _request_shutdown() -> None:
+        shutdown_requested.set()
+        print(f"-> Ending conversation with '{profile.name}'.")
+        try:
+            if vad_listener is not None:
+                vad_listener.stop()
+        except Exception:
+            pass
+        try:
+            if tts_model.is_playing:
+                tts_model.stop_playback()
+        except Exception:
+            pass
+        try:
+            if animator is not None:
+                animator.stop()
+        except Exception:
+            pass
+        qt_app = QApplication.instance()
+        if qt_app is not None:
+            QTimer.singleShot(0, qt_app.quit)
+
+    def _handle_conversation_start(identity_name: str) -> None:
+        target = _resolve_identity_name(identity_name)
+        if not target:
+            print(f"-> Ignoring conversation start request for unknown identity '{identity_name}'.")
+            return
+        if target == profile.name:
+            print(f"-> Already chatting with '{target}'.")
+            return
+
+        display_target = _identity_display(target)
+        display_current = _identity_display(profile.name)
+        print(f"-> Switching from {display_current} to {display_target} on user request.")
+        _restart_with_identity(target)
+
+    def _handle_conversation_end(identity_name: str) -> None:
+        normalized = identity_name.strip().lower()
+        if normalized != profile.name.lower():
+            print(
+                f"-> Ignoring goodbye for '{identity_name}' because the active identity is '{profile.name}'."
+            )
+            return
+
+        display_name = _identity_display(profile.name)
+        print(f"-> Ending conversation with {display_name} on user request.")
+        _request_shutdown()
 
     def _handle_user_request(
         transcript: str,
         *,
-        force_screenshot: bool = False,
+        capture_override: Optional[str] = None,
         source: str = "voice",
     ) -> None:
         nonlocal last_bot_response, vad_listener
+
+        if shutdown_requested.is_set():
+            return
 
         cleaned = transcript.strip()
         if not cleaned:
@@ -415,40 +491,82 @@ def main():
             animator.update_amplitude(0.0)
             return
 
-        screenshot_b64: Optional[str] = None
-        screenshot_path: Optional[Path] = None
+        if not shutdown_requested.is_set():
+            start_match = keywords.detect_conversation_start_keyword(cleaned)
+            if start_match:
+                _handle_conversation_start(start_match.keyword.payload)
+                animator.update_amplitude(0.0)
+                return
+
+            end_match = keywords.detect_conversation_end_keyword(cleaned)
+            if end_match:
+                _handle_conversation_end(end_match.keyword.payload)
+                animator.update_amplitude(0.0)
+                return
+
+        capture_result: Optional[vision.VisionCapture] = None
         augmented_text = cleaned
+        capture_request = capture_override
+        capture_pattern: Optional[Pattern[str]] = None
 
-        should_capture = False
         if profile.vision_enabled:
-            should_capture = force_screenshot or ("look at my screen" in normalized_user)
-        elif force_screenshot:
-            print("-> Screenshot capture is disabled for this identity.")
-
-        if should_capture:
-            screenshot_b64, screenshot_path = _capture_screenshot()
-            if screenshot_b64:
-                prompt_suffix = (
-                    "Please describe the attached screenshot and let me know anything important you notice."
-                )
-                trimmed_prompt = cleaned
-                if "look at my screen" in normalized_user or force_screenshot:
-                    trimmed_prompt = _LOOK_AT_SCREEN_PATTERN.sub(" ", cleaned)
-                has_additional_prompt = bool(trimmed_prompt.strip())
-                if has_additional_prompt:
-                    augmented_text = cleaned
-                else:
-                    augmented_text = prompt_suffix
+            if capture_request is None:
+                keyword_match = keywords.detect_vision_keyword(cleaned)
+                if keyword_match:
+                    capture_request = keyword_match.keyword.payload
+                    capture_pattern = keyword_match.keyword.pattern
             else:
-                print("-> Proceeding without screenshot due to capture failure.")
+                keyword_config = keywords.get_vision_keyword(capture_request)
+                if keyword_config:
+                    capture_pattern = keyword_config.pattern
+        elif capture_request is not None:
+            print("-> Vision capture is disabled for this identity.")
+            capture_request = None
+
+        if capture_request:
+            storage_dir: Optional[Path] = None
+            if profile.memory_path:
+                storage_dir = profile.memory_path / "screenshots"
+
+            if capture_request == "screen":
+                capture_result = vision.capture_screenshot(storage_dir)
+            elif capture_request == "clipboard":
+                capture_result = vision.capture_clipboard_image(storage_dir)
+            else:
+                print(f"-> Unknown vision capture request: {capture_request}")
+                capture_result = None
+                capture_request = None
+
+            if capture_result and capture_result.success:
+                prompt_suffix = _VISION_PROMPT_SUFFIX.get(capture_result.source, "")
+                trimmed_prompt = cleaned
+                if capture_pattern:
+                    trimmed_prompt = capture_pattern.sub(" ", cleaned)
+                has_additional_prompt = bool(trimmed_prompt.strip())
+                if not has_additional_prompt and prompt_suffix:
+                    augmented_text = prompt_suffix
+                else:
+                    augmented_text = cleaned
+                print(f"-> Captured {capture_result.source} image for analysis.")
+            elif capture_result:
+                reason = capture_result.error or "capture failure"
+                print(f"-> Proceeding without vision capture due to: {reason}")
+
+        vision_b64: Optional[str] = None
+        vision_path: Optional[Path] = None
+        vision_source: Optional[str] = None
+        if capture_result and capture_result.success:
+            vision_b64 = capture_result.image_b64
+            vision_path = capture_result.saved_path
+            vision_source = capture_result.source
 
         history = load_history(profile.memory_path)
         try:
             user_content: Optional[List[dict]] = None
-            if screenshot_b64:
+            if vision_b64:
                 user_content = [
                     {"type": "text", "text": augmented_text},
-                    {"type": "image", "image": screenshot_b64},
+                    {"type": "image", "image": vision_b64},
                 ]
             llm_response = ollama_client.query(
                 augmented_text,
@@ -467,8 +585,13 @@ def main():
         history_entry: dict
         if user_content is not None:
             history_entry = {"role": "user", "content": user_content}
-            if screenshot_path:
-                history_entry["metadata"] = {"screenshot_file": str(screenshot_path)}
+            metadata: dict[str, str] = {}
+            if vision_source:
+                metadata["vision_source"] = vision_source
+            if vision_path:
+                metadata["vision_file"] = str(vision_path)
+            if metadata:
+                history_entry["metadata"] = metadata
         else:
             history_entry = {"role": "user", "content": transcript}
 
@@ -506,45 +629,6 @@ def main():
         tts_thread = threading.Thread(target=play_tts_in_thread, daemon=True)
         tts_thread.start()
 
-    def _capture_screenshot() -> tuple[Optional[str], Optional[Path]]:
-        try:
-            import pyautogui  # Local import to avoid heavy dependency on startup
-        except Exception as exc:
-            print(f"-> Screenshot capture unavailable: {exc}")
-            return None, None
-
-        try:
-            image = pyautogui.screenshot()
-        except Exception as exc:
-            print(f"-> Failed to capture screenshot: {exc}")
-            return None, None
-
-        buffer = io.BytesIO()
-        try:
-            image.save(buffer, format="PNG")
-        except Exception as exc:
-            print(f"-> Failed to encode screenshot: {exc}")
-            return None, None
-
-        screenshot_bytes = buffer.getvalue()
-        image_b64 = base64.b64encode(screenshot_bytes).decode("ascii")
-
-        saved_path: Optional[Path] = None
-        if profile.memory_path:
-            try:
-                screenshot_dir = profile.memory_path / "screenshots"
-                screenshot_dir.mkdir(parents=True, exist_ok=True)
-                timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
-                saved_path = screenshot_dir / f"screenshot_{timestamp}.png"
-                saved_path.write_bytes(screenshot_bytes)
-            except Exception as exc:
-                print(f"-> Failed to persist screenshot to disk: {exc}")
-                saved_path = None
-
-        print("-> Captured screenshot for analysis.")
-        _play_camera_shutter()
-        return image_b64, saved_path
-
     def on_speech_detected(raw_bytes: bytes) -> None:
         nonlocal vad_listener
         if vad_listener is None:
@@ -560,7 +644,7 @@ def main():
             recognized_text = ""
 
         with processing_lock:
-            _handle_user_request(recognized_text, force_screenshot=False, source="voice")
+            _handle_user_request(recognized_text, source="voice")
 
     def _trigger_look_at_screen() -> None:
         if not profile.vision_enabled:
@@ -569,15 +653,28 @@ def main():
         with processing_lock:
             _handle_user_request(
                 "look at my screen",
-                force_screenshot=True,
+                capture_override="screen",
+                source="command",
+            )
+
+    def _trigger_look_at_clipboard() -> None:
+        if not profile.vision_enabled:
+            print("-> Look at my Clipboard is disabled for this identity.")
+            return
+        with processing_lock:
+            _handle_user_request(
+                "look at my clipboard",
+                capture_override="clipboard",
                 source="command",
             )
 
     if isinstance(animator, LogoAnimator):
         if profile.vision_enabled:
             animator.set_look_at_screen_callback(_trigger_look_at_screen)
+            animator.set_look_at_clipboard_callback(_trigger_look_at_clipboard)
         else:
             animator.set_look_at_screen_callback(None)
+            animator.set_look_at_clipboard_callback(None)
 
     def _stdin_command_listener() -> None:
         if sys.stdin is None or sys.stdin.closed:
@@ -603,6 +700,18 @@ def main():
                 continue
             if command == "look_at_my_screen":
                 _trigger_look_at_screen()
+            elif command == "look_at_my_clipboard":
+                _trigger_look_at_clipboard()
+            elif command == "chat_with":
+                target_identity = str(payload.get("identity") or "")
+                if target_identity:
+                    with processing_lock:
+                        _handle_conversation_start(target_identity)
+            elif command == "goodbye":
+                target_identity = str(payload.get("identity") or "")
+                if target_identity:
+                    with processing_lock:
+                        _handle_conversation_end(target_identity)
             else:
                 print(f"-> Unknown control command: {command}")
 

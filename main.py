@@ -6,6 +6,8 @@ import time
 import logging
 
 import utils.system as sysmod
+from tools import keywords
+from utils.bot_integration import list_available_identities
 from utils.config_paths import get_logger
 from utils.system import (
     APP_VERSION,
@@ -16,9 +18,11 @@ from utils.system import (
     notify,
     load_settings,
     save_settings,
-    settings, settings_lock,
+    settings,
+    settings_lock,
     start_discovery_listener,
-    parse_cli_args, transcribe_cli,
+    parse_cli_args,
+    transcribe_cli,
     CLIENT_ONLY_BUILD,
     start_server,
     run_tray,
@@ -146,6 +150,14 @@ def main(argv: list[str]) -> int:
     # Ensure mode selected (client or client_server)
     logger.debug("Ensuring operating mode is selected")
     ensure_mode_selected()
+
+    # Configure keyword registry for available Chat with Bot identities
+    try:
+        available_identities = list_available_identities()
+    except Exception:
+        logger.exception("Failed to enumerate bot identities for keyword configuration")
+        available_identities = []
+    keywords.configure_identity_keywords(available_identities)
 
     # Auto-install the default speech model on first launch
     if not ensure_initial_model_installation():

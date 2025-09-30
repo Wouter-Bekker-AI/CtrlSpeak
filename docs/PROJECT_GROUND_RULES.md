@@ -5,7 +5,7 @@
 - The ground rules themselves cannot be relaxed or ignored. When you extend the project, redesign within these boundaries rather than weakening them.
 
 ## Mandatory orientation for AI agents
-- On your first pass through this repository, read **every** Markdown file so you understand the existing expectations before editing code. That includes `README.md`, everything under `docs/`, and the testing notes under `tests/` (especially `tests/TESTING.md`).
+- On your first pass through this repository, read **every** Markdown file so you understand the existing expectations before editing code. That includes `README.md`, everything under `docs/` (notably [`docs/tooling.md`](tooling.md) for shared tooling guidance), and the testing notes under `tests/` (especially `tests/TESTING.md`).
 - When you make code changes that affect or invalidate existing documentation, update the impacted Markdown files in the same pull request so the written guidance never diverges from reality.
 
 ## Repository mutability lifecycle
@@ -23,6 +23,7 @@
 ## Tkinter and UI threading
 - The hidden Tk root and all GUI windows are created on the **main thread** by `_initialize_management_ui_on_main_thread`. Do not create additional Tk roots or run `mainloop` outside the main thread.【F:utils/gui.py†L807-L870】
 - Background threads may request UI work only through the management queue helpers (for example `_call_on_management_ui`). Direct Tk calls from worker threads are forbidden, and `pump_management_events_once` enforces that by raising if called off-thread.【F:utils/gui.py†L780-L899】
+- Calling Tk APIs (even lightweight queries such as `winfo_exists`) from a worker thread will raise `RuntimeError: main thread is not in main loop` and can wedge shutdown paths. Always route those checks through the shared helpers in `utils.gui` so the main thread performs the Tk work.
 
 ## Mode selection and preference persistence
 - `DEFAULT_SETTINGS` codifies first-run behavior: mode unset, device preference `cpu`, and Whisper model `small`. Keep these defaults intact to ensure safe startup on machines without GPU support.【F:utils/config_paths.py†L19-L28】
