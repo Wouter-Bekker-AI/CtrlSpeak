@@ -4,7 +4,7 @@ CtrlSpeak includes an optional "Chat with Bot" experience accessible from the ma
 
 - **Speech to Text (STT)** - Uses CtrlSpeak's `/transcribe` endpoint. Audio captured by the VAD listener is sent to the running CtrlSpeak server (local or remote depending on mode). The server returns the recognized text.
 - **Language Model (LLM)** - The recognized text is sent to the Ollama-compatible client inside SocialRobot. By default CtrlSpeak ships with a lightweight fallback response if no LLM endpoint is reachable, but you can supply your own by setting the `BOT_LLM_URL` and `BOT_LLM_MODEL` environment variables (or the matching CLI flags) before launching CtrlSpeak.
-- **Speech rewrite (background agent)** - The LLM reply is routed through `background_agents/tts_preprocessing_agent`, which consults its `identity.json` to determine whether to prepend `header_text.txt`, load `system_prompt.txt`, or use both before sending the request to the Gemma 3 1B preprocessing helper. The agent rewrites the reply for smoother narration before speech is generated.
+- **Speech rewrite (background agent)** - Identities that opt into cleaning route the LLM reply through `background_agents/tts_preprocessing_agent`, which consults its `identity.json` to determine whether to prepend `header_text.txt`, load `system_prompt.txt`, or use both before sending the request to the Gemma 3 1B preprocessing helper. The agent rewrites the reply for smoother narration before speech is generated.
 - **Text to Speech (TTS)** - The LLM response is converted to audio via Kokoro-ONNX. CtrlSpeak defaults to the formal male `am_michael` voice; override it with `BOT_VOICE` or the `--voice` flag.
 - **Animated Face / Logo** - SocialRobot renders the default TrueAI transparent logo with amplitude-based scaling for visual feedback. Identity folders can still supply alternate assets under `third_party/social_robot/identities/<name>` when a different look is desired.
 
@@ -32,6 +32,7 @@ The loader understands the following `identity.json` keys:
     "num_ctx": 8192
   },
   "voice": "am_michael",
+  "require_text_cleaning": false,
   "vision": true,
   "tool": false,
   "memory_dir": "memory"
@@ -48,12 +49,13 @@ When present, `ollama_options` is merged into the payload that SocialRobot sends
 
 CtrlSpeak applies the same options and hardware preference when it pre-warms the checkpoint via `/generate`, ensuring the residency chosen during warm-up matches the settings SocialRobot will use at runtime.
 
-The additional boolean keys control multimodal and future extensibility features:
+The additional boolean keys control multimodal, cleaning, and future extensibility features:
 
-- `vision` – Enables screenshot capture and the **Look at my Screen** workflow. When `true`, SocialRobot listens for the spoken “look at my screen” command, exposes the matching context-menu action on the floating logo, and pipes captured images to the LLM. When `false`, the command is ignored, the context-menu item is hidden, and no screenshots are taken.
+- `require_text_cleaning` – When `true`, SocialRobot loads the TTS preprocessing agent and rewrites replies before speech. When `false`, replies flow directly to Kokoro and CtrlSpeak skips staging the helper model.
+- `vision` – Enables image capture tooling documented in [`docs/tooling.md`](tooling.md). When `true`, SocialRobot listens for the spoken “look at my screen” and “look at my clipboard” commands, exposes matching context-menu actions on the floating logo, and routes captured images to the LLM. When `false`, the commands are ignored, the context-menu items are hidden, and no images are taken.
 - `tool` – Reserved flag for forthcoming external tool integrations. It defaults to `false` today but can be toggled once tool calling is implemented.
 
-CtrlSpeak ships with two bundled identities: `assistant` (vision enabled) and `default` (vision disabled). Both currently set `tool` to `false` and can be expanded as the tool feature matures.
+CtrlSpeak ships with two bundled identities: `assistant` (vision enabled, text cleaning enabled) and `default` (vision disabled, text cleaning disabled). Both currently set `tool` to `false` and can be expanded as the tool feature matures.
 
 You can switch identities from the command line with:
 
@@ -62,6 +64,21 @@ python third_party/social_robot/main.py --identity ross
 ```
 
 or by setting `BOT_IDENTITY=ross` before launching CtrlSpeak so the management window uses that persona.
+
+## Voice keywords
+
+SocialRobot loads [`tools/keywords.py`](tooling.md) at startup and registers one keyword set per identity directory. The following phrases are recognized out of the box:
+
+- **look at my screen** – Captures a screenshot via `tools/vision.py` when the active identity has `vision: true`.
+- **look at my clipboard** – Pulls the most recent image from the system clipboard and forwards it like a screenshot.
+- **chat with `<identity>`** – Immediately relaunches SocialRobot with the target persona through the transcription server so the parent process coordinates the shutdown and restart (requests that target the already-active identity are ignored).
+- **goodbye `<identity>`** – Immediately ends the current conversation and shuts down the SocialRobot process from the CtrlSpeak transcription server so the parent process controls the teardown.
+
+The push-to-talk workflow (hold the right Ctrl key while speaking) shares the same keyword registry. When VAD is idle because no bot session is active, saying “chat with assistant” through the hotkey launches that identity and skips text injection entirely. If another persona is already running, the helper first asks it to exit cooperatively via `utils.bot_integration.request_goodbye()` and falls back to `stop_bot()` only when the child process fails to exit within the timeout. Spoken “goodbye <identity>” commands are now intercepted in the CtrlSpeak main process (the transcription server), which issues the same graceful-then-hard stop sequence used by the tray menu so the parent always holds the shutdown controls. Each shutdown stage emits debug-level entries under `third_party.social_robot.main` in `%APPDATA%\CtrlSpeak\logs\ctrlspeak.log`, so you can see exactly which component executed when diagnosing a stalled goodbye.
+
+> **Do not** move the goodbye/chat keyword detection back into SocialRobot or another worker thread. Keeping the logic in the CtrlSpeak main process is a hard requirement so the parent can enforce the proven shutdown path. Route any future conversation controls through the same helpers described above and send explicit stdin commands to the bot only after the parent has taken ownership of the request.
+
+When you add new keywords, update `tools/keywords.py`, refresh [`docs/tooling.md`](tooling.md), and adjust the system prompts for any identities that should advertise the new commands. The assistant prompt bundled with CtrlSpeak now explicitly mentions the clipboard trigger and instructs the model to guide users toward the exact phrases when they hint at wanting a capture.
 
 ## Background agents
 
@@ -73,7 +90,7 @@ The speech rewrite pass lives under `background_agents/tts_preprocessing_agent`.
 
 `background_agents/tts_preprocessing_agent/background_agent.py` loads these files, constructs a non-streaming `OllamaClient`, and exposes `load_tts_preprocessing_agent()` for the main loop. The `preamble` key in `identity.json` accepts `header`, `system`, or `both` to control which assets are required—missing files for the chosen mode disable the helper so playback still succeeds. If the resources are missing or the helper raises `OllamaUnavailableError`, SocialRobot logs the failure and falls back to the original reply so the session keeps flowing.【F:background_agents/tts_preprocessing_agent/background_agent.py†L1-L199】【F:third_party/social_robot/main.py†L180-L271】
 
-CtrlSpeak treats the agent as a first-class asset: `utils.bot_integration.start_bot` stages the Gemma weights with the same welcome workflow used for identity models and pre-warms the checkpoint once it is available.【F:utils/bot_integration.py†L52-L226】【F:utils/bot_integration.py†L420-L637】 Packaged builds bundle `background_agents/` so the helper is present in single-file executables.【F:packaging/CtrlSpeak.spec†L42-L63】【F:packaging/CtrlSpeak_Watcher.spec†L42-L63】【F:utils/build_exe.py†L22-L82】
+CtrlSpeak treats the agent as a first-class asset for identities that request it: `utils.bot_integration.start_bot` only stages the Gemma weights and pre-warms the checkpoint when the selected identity advertises `require_text_cleaning: true`, skipping the additional download and warm-up otherwise.【F:utils/bot_integration.py†L116-L214】【F:utils/bot_integration.py†L635-L790】 Packaged builds bundle `background_agents/` so the helper is present in single-file executables.【F:packaging/CtrlSpeak.spec†L42-L63】【F:packaging/CtrlSpeak_Watcher.spec†L42-L63】【F:utils/build_exe.py†L22-L82】
 
 ## Runtime Requirements
 
@@ -124,7 +141,7 @@ Launching Chat with Bot from the management window now verifies that the Ollama 
 
 ## Screenshot workflow
 
-When you launch an identity with `vision: true` (for example the bundled **Assistant** persona) and say “look at my screen,” SocialRobot captures the current desktop, stores a PNG copy under the identity’s `memory/screenshots` directory, and forwards the encoded image to the configured Ollama model. The spoken request is automatically augmented with a clarification asking the model to describe the screenshot, so multimodal checkpoints such as `gemma3:12b` can respond with contextual commentary. If the capture fails (for example, when `pyautogui` cannot access the display), the bot logs the issue and continues as a text-only exchange. Identities with `vision: false` skip these hooks entirely—the floating logo omits the **Look at my Screen** context-menu option and voice commands fall back to a standard text-only exchange.
+When you launch an identity with `vision: true` (for example the bundled **Assistant** persona) and say “look at my screen,” SocialRobot captures the current desktop, stores a PNG copy under the identity’s `memory/screenshots` directory, and forwards the encoded image to the configured Ollama model. Saying “look at my clipboard” (or choosing **Look at my Clipboard** from the floating logo) pulls the most recent image from the system clipboard via `tools/vision.py` and follows the same storage and upload workflow. Keyword detection for both phrases lives in `tools/keywords.py`, which keeps the trigger vocabulary centralized as new commands are added. Both routes annotate history entries with the saved file path and the capture source so downstream agents can tell whether the data came from a screenshot or a clipboard snip. If a capture fails—because PyAutoGUI cannot access the display, the clipboard has no image, or dependencies are missing—the bot logs the issue and continues as a text-only exchange. Identities with `vision: false` skip these hooks entirely; the floating logo omits both context-menu options and voice commands fall back to a standard text-only exchange.
 
 As soon as you pick an identity, CtrlSpeak now pings the configured Ollama endpoint with that profile’s model so the checkpoint is fully loaded before you speak. This avoids the first-turn lag that previously occurred while Ollama initialized the weights after receiving the initial utterance.
 
@@ -135,10 +152,10 @@ Use the **Clear Bot Memory** button in the management window when you need to wi
 ## GUI Workflow
 
 1. Start CtrlSpeak in Client + Server mode.
-2. Right-click the tray icon, choose **Manage CtrlSpeak**, then click **Chat with Bot**.
-3. The management UI toggles the bot: click once to launch, again to stop. The button text reflects the current state.
+2. Right-click the tray icon, choose **Manage CtrlSpeak**, then use the Assistants card to review identity availability badges and click **Chat with Bot**.【F:utils/gui.py†L1424-L1455】
+3. The management UI toggles the bot: click once to launch, again to stop. The active persona's badge switches to **active** while other identities remain marked **available**.【F:utils/gui.py†L1730-L1812】
 4. Speak once the "-> Starting the VAD listener..." message appears in the terminal; responses are spoken back and logged to the console as `-> Bot replied: ...`.
-5. Right-click the transparent logo to open its context menu. Choose **Look at my Screen** to capture the desktop and run the same augmented LLM request you would get from speaking the phrase aloud. The menu still includes **Quit** when you need to close the bot quickly.
+5. Right-click the transparent logo to open its context menu. Choose **Look at my Screen** to capture the desktop or **Look at my Clipboard** to forward the latest snip stored in the clipboard. Both actions mirror the spoken commands and share the tooling documented in [`docs/tooling.md`](tooling.md). The menu still includes **Quit** when you need to close the bot quickly.
 
 The SocialRobot process keeps running if you close the management window—you can reopen it later without interrupting the conversation. To shut the bot down, either click **Stop Chat with Bot** in the management window or choose **Quit** from the floating logo's context menu.
 

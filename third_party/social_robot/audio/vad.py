@@ -126,7 +126,7 @@ class VADListener:
                         voiced_frames.clear()
                         ring_buffer.clear()
                         if speech_audio and self.on_speech_callback:
-                            print("-> Speech segment detected ({} bytes).".format(len(speech_audio)))
+                            # print("-> Speech segment detected ({} bytes).".format(len(speech_audio)))
                             self.on_speech_callback(speech_audio)
 
         self._stream.stop_stream()

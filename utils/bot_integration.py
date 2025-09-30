@@ -56,8 +56,22 @@ _TTS_PREPROCESSOR_DIR = _BACKGROUND_AGENTS_ROOT / "tts_preprocessing_agent"
 
 _bot_proc: Optional[subprocess.Popen] = None
 _bot_stdin_lock = threading.Lock()
+_active_identity: Optional[str] = None
 
 _OLLAMA_HARDWARE_CHOICES = {"cpu_only", "cpu_and_gpu", "gpu_only"}
+
+
+def list_available_identities(identities_dir: Optional[str] = None) -> list[str]:
+    """Return the sorted list of SocialRobot identity folder names."""
+
+    root = _resolve_identities_root(identities_dir)
+    try:
+        return sorted(entry.name for entry in root.iterdir() if entry.is_dir())
+    except FileNotFoundError:
+        logger.warning("Identities directory %s does not exist", root)
+    except Exception:
+        logger.exception("Failed to enumerate identities under %s", root)
+    return []
 
 
 def _resolve_stt_url() -> Optional[str]:
@@ -107,6 +121,23 @@ def _load_identity_config(identity: str, identities_dir: Optional[str]) -> tuple
             logger.exception("Failed to parse identity config at %s", config_path)
 
     return config, identity_path
+
+
+def _identity_requires_text_cleaning(
+    identity: Optional[str], identities_dir: Optional[str]
+) -> bool:
+    target = _normalized_identity(identity)
+    config, _identity_path = _load_identity_config(target, identities_dir)
+    value = config.get("require_text_cleaning")
+    if isinstance(value, bool):
+        return value
+    if value is not None:
+        logger.warning(
+            "Ignoring require_text_cleaning for identity %s; expected boolean but received %r",
+            target,
+            value,
+        )
+    return True
 
 
 def _load_preprocessor_identity() -> tuple[Optional[Path], Optional[str], Optional[str], Dict[str, Any], Optional[str]]:
@@ -604,6 +635,22 @@ def _warm_ollama_model(
         logger.warning("Failed to preload Ollama model %s", llm_model, exc_info=True)
 
 
+def _normalized_identity(identity: Optional[str]) -> str:
+    candidate = (identity or os.getenv("BOT_IDENTITY") or _DEFAULT_IDENTITY_NAME).strip()
+    return candidate or _DEFAULT_IDENTITY_NAME
+
+
+def _monitor_bot_exit(proc: subprocess.Popen) -> None:
+    global _active_identity
+    try:
+        proc.wait()
+    except Exception:
+        logger.exception("Bot monitor thread encountered an error")
+    finally:
+        if _bot_proc is not None and _bot_proc is proc:
+            _active_identity = None
+
+
 def start_bot(
     llm_url: Optional[str] = None,
     llm_model: Optional[str] = None,
@@ -622,7 +669,7 @@ def start_bot(
     overriding the Kokoro voice or LLM settings, or pointing at alternate identity
     directories and prompt files.
     """
-    global _bot_proc
+    global _bot_proc, _active_identity
     if _bot_proc and _bot_proc.poll() is None:
         logger.info("Bot already running")
         return True
@@ -631,6 +678,8 @@ def start_bot(
     if not stt_url:
         logger.error("No CtrlSpeak STT server available; cannot start bot")
         return False
+
+    target_identity = _normalized_identity(identity)
 
     # Assume SocialRobot vendored under third_party/social_robot
     root = Path(__file__).resolve().parents[1]
@@ -665,15 +714,25 @@ def start_bot(
     if not _ensure_identity_llm_ready(identity, identities_dir, llm_model, llm_url):
         return False
 
-    (
-        _agent_dir,
-        agent_llm_url,
-        agent_llm_model,
-        agent_options,
-        agent_hardware,
-    ) = _load_preprocessor_identity()
-    if not _ensure_preprocessor_llm_ready(agent_llm_model, agent_llm_url):
-        return False
+    agent_llm_url: Optional[str] = None
+    agent_llm_model: Optional[str] = None
+    agent_options: Dict[str, Any] = {}
+    agent_hardware: Optional[str] = None
+    if _identity_requires_text_cleaning(target_identity, identities_dir):
+        (
+            _agent_dir,
+            agent_llm_url,
+            agent_llm_model,
+            agent_options,
+            agent_hardware,
+        ) = _load_preprocessor_identity()
+        if not _ensure_preprocessor_llm_ready(agent_llm_model, agent_llm_url):
+            return False
+    else:
+        logger.info(
+            "Identity %s does not require TTS preprocessing; skipping agent preparation",
+            target_identity,
+        )
 
     normalized_base_url: Optional[str] = None
     resolved_model_name: Optional[str] = None
@@ -763,16 +822,19 @@ def start_bot(
             errors="replace",
             bufsize=1,
         )
+        _active_identity = target_identity
+        threading.Thread(target=_monitor_bot_exit, args=(_bot_proc,), daemon=True).start()
         time.sleep(0.35)  # give it a moment to open the window
         return True
     except Exception:
         logger.exception("Failed to start SocialRobot")
         _bot_proc = None
+        _active_identity = None
         return False
 
 
 def stop_bot() -> None:
-    global _bot_proc
+    global _bot_proc, _active_identity
     if _bot_proc is None:
         return
     try:
@@ -797,10 +859,71 @@ def stop_bot() -> None:
         logger.exception("Error while stopping SocialRobot")
     finally:
         _bot_proc = None
+        _active_identity = None
+
+
+def request_goodbye(identity: Optional[str] = None, timeout: float = 3.0) -> bool:
+    """Ask the running bot to shut down via its stdin channel.
+
+    Returns ``True`` when the bot exits within ``timeout`` seconds. ``False``
+    indicates that the caller should fall back to :func:`stop_bot`.
+    """
+
+    global _bot_proc
+    proc = _bot_proc
+    identity_name = identity or _active_identity or ""
+    if proc is None or proc.poll() is not None or proc.stdin is None:
+        logger.debug(
+            "request_goodbye skipped because bot process is unavailable (identity=%s)",
+            identity_name or "<unknown>",
+        )
+        return False
+
+    payload = json.dumps(
+        {
+            "command": "goodbye",
+            "identity": (identity or _active_identity or ""),
+        }
+    )
+    try:
+        with _bot_stdin_lock:
+            proc.stdin.write(payload + "\n")
+            proc.stdin.flush()
+        logger.debug(
+            "Sent goodbye command to SocialRobot (identity=%s)",
+            identity_name or "<unknown>",
+        )
+    except Exception:
+        logger.exception("Failed to send 'goodbye' command to bot")
+        return False
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            logger.info(
+                "Bot process exited after goodbye request (identity=%s)",
+                identity_name or "<unknown>",
+            )
+            return True
+        time.sleep(0.05)
+    logger.info(
+        "Bot process still running %.1fs after goodbye request (identity=%s); caller should apply fallback",
+        timeout,
+        identity_name or "<unknown>",
+    )
+    return False
 
 
 def is_bot_running() -> bool:
     return _bot_proc is not None and _bot_proc.poll() is None
+
+
+def get_active_identity() -> Optional[str]:
+    """Return the currently running identity name, if any."""
+
+    if not is_bot_running():
+        return None
+    return _active_identity
 
 
 def request_bot_screenshot() -> bool:
