@@ -54,6 +54,7 @@
 
 ## Documentation synchronization
 - When code changes alter behavior, configuration, or user interaction, update the relevant Markdown documentation (`README.md`, files in `docs/`, `tests/TESTING.md`, etc.) in the same change set.
+- Maintain the running backlog in [`docs/TODO.md`](TODO.md) so pending enhancements stay discoverable and current.
 - This ground-rules document sets the guardrails those updates must respect; do not rewrite history to relax these requirements.
 
 Adhering to this reference protects packaging constraints, logging visibility, client/server interoperability, UI stability, and operational readiness. Any change that conflicts with these principles must be redesigned until it complies.
