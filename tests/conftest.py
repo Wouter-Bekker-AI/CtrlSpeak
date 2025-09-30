@@ -9,6 +9,11 @@ from pathlib import Path
 
 import pytest
 
+from utils.config_paths import get_logger
+
+
+logger = get_logger(__name__)
+
 # Ensure configuration paths stay inside a temporary directory so tests remain
 # hermetic even when they exercise the real helpers.
 _TEST_CONFIG_ROOT = Path(tempfile.mkdtemp(prefix="ctrlspeak-tests-"))
@@ -108,8 +113,9 @@ def reset_settings(tmp_path, monkeypatch):
     try:
         system.shutdown_server()
     except Exception:
-        pass
+        logger.exception("Failed to shut down transcription server during test cleanup")
     try:
         system.stop_discovery_listener()
     except Exception:
-        pass
+        logger.exception("Failed to stop discovery listener during test cleanup")
+

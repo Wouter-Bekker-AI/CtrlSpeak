@@ -110,7 +110,7 @@ def _load_identity_config(identity: str, identities_dir: Optional[str]) -> tuple
     try:
         identity_path = identity_path.resolve()
     except Exception:
-        pass
+        logger.exception("Failed to resolve identity path for %s", identity)
 
     config: dict = {}
     config_path = identity_path / "identity.json"
@@ -290,7 +290,7 @@ def _ollama_pull_worker(model_name: str, base_url: str, queue: MPQueue) -> None:
         try:
             queue.put_nowait(payload)
         except Exception:
-            pass
+            logger.exception("Failed to enqueue Ollama pull progress update")
 
     session: Optional[requests.Session] = None
     try:
@@ -343,7 +343,7 @@ def _ollama_pull_worker(model_name: str, base_url: str, queue: MPQueue) -> None:
             try:
                 session.close()
             except Exception:
-                pass
+                logger.exception("Failed to close Ollama pull session")
 
 
 def _download_ollama_model_with_gui(
@@ -375,7 +375,7 @@ def _download_ollama_model_with_gui(
         try:
             progress_queue.put_nowait(("cancelled",))
         except Exception:
-            pass
+            logger.exception("Failed to enqueue Ollama download cancellation notification")
 
     pretty_name = (identity_display or "assistant").strip() or "assistant"
     if pretty_name.lower().endswith("assistant"):
@@ -404,11 +404,11 @@ def _download_ollama_model_with_gui(
                 try:
                     progress_queue.put_nowait(("stage", f"Preparing the {assistant_label}…"))
                 except Exception:
-                    pass
+                    logger.exception("Failed to enqueue Ollama preparation stage update")
                 try:
                     progress_queue.put_nowait(("done",))
                 except Exception:
-                    pass
+                    logger.exception("Failed to enqueue Ollama download completion signal")
                 return
 
             # If Ollama can't confirm the model yet just keep waiting – a
@@ -443,11 +443,11 @@ def _download_ollama_model_with_gui(
     try:
         progress_queue.close()
     except Exception:
-        pass
+        logger.exception("Failed to close Ollama download progress queue")
     try:
         progress_queue.join_thread()
     except Exception:
-        pass
+        logger.exception("Failed to join Ollama download queue thread")
 
     if status == "success":
         # Double-check with Ollama so we don't race returning before the model
@@ -698,7 +698,7 @@ def start_bot(
     try:
         identities_root = identities_root.resolve()
     except FileNotFoundError:
-        pass
+        logger.exception("Failed to resolve SocialRobot identities root at %s", identities_root)
 
     (
         resolved_llm_url,
@@ -848,13 +848,13 @@ def stop_bot() -> None:
             try:
                 _bot_proc.wait(timeout=5)
             except Exception:
-                pass
+                logger.exception("Failed to wait for SocialRobot to exit after terminate")
             if _bot_proc.poll() is None:
                 _bot_proc.kill()
                 try:
                     _bot_proc.wait(timeout=3)
                 except Exception:
-                    pass
+                    logger.exception("Failed to wait for SocialRobot to exit after kill")
     except Exception:
         logger.exception("Error while stopping SocialRobot")
     finally:
@@ -1003,7 +1003,7 @@ def run_bot_test(
     try:
         identities_root = identities_root.resolve()
     except FileNotFoundError:
-        pass
+        logger.exception("Failed to resolve SocialRobot identities root at %s", identities_root)
 
     (
         resolved_llm_url,

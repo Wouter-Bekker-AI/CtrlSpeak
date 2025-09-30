@@ -841,7 +841,7 @@ def _refresh_best_server_async():
     try:
         manual_discovery_refresh()
     except Exception:
-        pass
+        logger.exception("Background discovery refresh failed")
 
 def start_client_listener() -> None:
     global listener, client_enabled

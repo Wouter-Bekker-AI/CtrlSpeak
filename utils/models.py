@@ -845,7 +845,7 @@ def _download_cuda_runtime(progress_queue: MPQueue | None = None) -> None:
         try:
             progress_queue.put_nowait(payload)
         except Exception:
-            pass
+            logger.exception("Failed to enqueue CUDA download progress update")
 
     staging_root: Optional[Path] = None
     try:
@@ -964,7 +964,7 @@ def _download_cuda_runtime(progress_queue: MPQueue | None = None) -> None:
             try:
                 progress_queue.put_nowait(("error", f"CUDA download failed: {exc}"))
             except Exception:
-                pass
+                logger.exception("Failed to enqueue CUDA download error notification")
         else:
             raise
     finally:
@@ -1001,7 +1001,7 @@ def download_cuda_runtime_with_gui() -> bool:
         try:
             progress_queue.put_nowait(("cancelled",))
         except Exception:
-            pass
+            logger.exception("Failed to enqueue CUDA download cancellation notification")
 
     initial_message = (
         "CtrlSpeak is downloading CUDA runtime components. Use Cancel download if you need to stop the download."
@@ -1028,11 +1028,11 @@ def download_cuda_runtime_with_gui() -> bool:
     try:
         progress_queue.close()
     except Exception:
-        pass
+        logger.exception("Failed to close CUDA download progress queue")
     try:
         progress_queue.join_thread()
     except Exception:
-        pass
+        logger.exception("Failed to join CUDA download progress queue thread")
 
     if status == "success":
         try:
@@ -1131,7 +1131,7 @@ def _probe_video_metadata(video_path: Path) -> Dict[str, Any]:
         try:
             player.close_player()
         except Exception:
-            pass
+            logger.exception("Failed to close welcome video metadata probe player")
     return metadata
 
 
@@ -1381,7 +1381,7 @@ class WelcomeWindow:
                 try:
                     player.set_pause(True)
                 except Exception:
-                    pass
+                    logger.exception("Failed to pause welcome video player before closing")
                 try:
                     player.close_player()
                 except Exception:
@@ -1664,7 +1664,7 @@ def _model_download_worker(model_name: str, queue: MPQueue) -> None:
         try:
             queue.put_nowait(payload)
         except Exception:
-            pass
+            logger.exception("Failed to enqueue Whisper model download progress update")
 
     try:
         repo_id = _model_repo_id(model_name)
@@ -1728,7 +1728,7 @@ def _model_download_worker(model_name: str, queue: MPQueue) -> None:
                 try:
                     temp_path.unlink()
                 except FileNotFoundError:
-                    pass
+                    logger.debug("Temporary download path %s was already removed", temp_path, exc_info=True)
 
                 url = hf_hub_url(repo_id, filename=rel_path)
                 with session.get(url, stream=True, timeout=(10, 90)) as response:
@@ -1849,7 +1849,7 @@ def download_model_with_gui(
         try:
             progress_queue.put_nowait(("cancelled",))
         except Exception:
-            pass
+            logger.exception("Failed to enqueue model download cancellation notification")
 
     initial_message = (
         "CtrlSpeak is downloading the Whisper model. Use Cancel download if you need to stop the download."
@@ -1881,11 +1881,11 @@ def download_model_with_gui(
     try:
         progress_queue.close()
     except Exception:
-        pass
+        logger.exception("Failed to close model download progress queue")
     try:
         progress_queue.join_thread()
     except Exception:
-        pass
+        logger.exception("Failed to join model download progress queue thread")
 
     if status == "success":
         try:
@@ -2307,7 +2307,7 @@ def transcribe_local(file_path: str, play_feedback: bool = True, allow_client: b
                 try:
                     _sysmod.schedule_management_refresh()
                 except Exception:
-                    pass
+                    logger.exception("Failed to schedule management refresh after local transcription")
         return text or None
     except Exception as exc:
         notify_error("Transcription failed", format_exception_details(exc))

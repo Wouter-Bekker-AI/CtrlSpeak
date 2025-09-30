@@ -9,7 +9,12 @@ from typing import Optional
 
 from llm.ollama import OllamaClient, OllamaUnavailableError
 
+from utils.config_paths import get_logger
+
 _DEFAULT_AGENT_DIR = Path(__file__).resolve().parent
+
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -106,7 +111,7 @@ def load_background_agent_resources(base_path: Optional[Path] = None) -> Optiona
     try:
         agent_path = agent_path.resolve()
     except FileNotFoundError:
-        pass
+        logger.exception("Background agent directory %s could not be resolved", agent_path)
 
     identity_path = agent_path / "identity.json"
 
