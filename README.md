@@ -116,6 +116,7 @@ After updates you can re-run `--auto-setup client_server` to refresh the install
 - Temporary recordings, configuration, logs, and downloaded Whisper models live under `%APPDATA%\CtrlSpeak`.
 - Test audio files such as `part1.wav` are intentionally excluded from Git to avoid large binaries.
 - Use the tray menu to manage the client/server lifecycle or to uninstall (`Delete CtrlSpeak`).
+- Track future enhancements in [`docs/TODO.md`](docs/TODO.md); keep the list current as tasks are added or completed.
 
 ## Automation Flow
 
