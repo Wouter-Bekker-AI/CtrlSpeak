@@ -20,6 +20,11 @@
 - Every module must obtain loggers through `utils.config_paths.get_logger`. This seeds a rotating file handler that writes to `%APPDATA%\CtrlSpeak\logs\ctrlspeak.log` and wires global logging so warnings and exceptions are persisted. Never replace the logger wiring or redirect logs elsewhere.【F:utils/config_paths.py†L127-L163】
 - When errors occur (I/O, GUI, CUDA, networking, etc.), catch the exception and log via the project logger so the failure is captured in AppData. Existing code uses `logger.exception(...)` as the pattern—follow it for new code paths.【F:utils/config_paths.py†L73-L81】【F:utils/system.py†L781-L788】【F:utils/models.py†L62-L83】
 
+## Conversation keyword ownership
+- CtrlSpeak’s main process **must** remain the sole owner of conversation control keywords (for example, “chat with …” and “goodbye …”). Never relocate these detectors into SocialRobot or any worker thread. The parent process is the only component permitted to start or stop the bot so shutdown always follows the hardened tray/button workflow and avoids hangs.
+- When you introduce new conversation triggers, extend `utils.system.handle_transcription_keyword` and `utils.system.handle_transcribed_text_from_hotkey` so the CtrlSpeak main loop processes them before any transcript is forwarded to SocialRobot. If the bot needs to react, have the parent send an explicit stdin control command (see `utils.bot_integration.request_goodbye`) rather than letting the child interpret raw speech.
+- Document any new keywords alongside these helpers to keep future contributors from bypassing the main-thread enforcement. Regressions that reintroduce keyword handling inside the child process are blocked because they revive the historical bug where “goodbye” phrases left SocialRobot running.
+
 ## Tkinter and UI threading
 - The hidden Tk root and all GUI windows are created on the **main thread** by `_initialize_management_ui_on_main_thread`. Do not create additional Tk roots or run `mainloop` outside the main thread.【F:utils/gui.py†L807-L870】
 - Background threads may request UI work only through the management queue helpers (for example `_call_on_management_ui`). Direct Tk calls from worker threads are forbidden, and `pump_management_events_once` enforces that by raising if called off-thread.【F:utils/gui.py†L780-L899】

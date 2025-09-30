@@ -26,6 +26,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QTimer
 
 from tools import keywords, vision
+from utils.config_paths import get_logger
 
 IDENTITIES_ROOT = Path(__file__).resolve().parent / "identities"
 DEFAULT_IDENTITY_NAME = "default"
@@ -41,6 +42,9 @@ try:
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
+
+
+logger = get_logger(__name__)
 
 def _detect_whisper_device() -> str:
     """Detects the best available device for ctranslate2 (CUDA or CPU)."""
@@ -369,6 +373,8 @@ def main():
     last_bot_response: str = ""
     processing_lock = threading.Lock()
     shutdown_requested = threading.Event()
+    shutdown_complete = threading.Event()
+    failsafe_timer: Optional[threading.Timer] = None
 
     def _identity_display(name: str) -> str:
         return name.replace("_", " ").strip().title() or name
@@ -422,26 +428,87 @@ def main():
         os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve())] + new_args)
 
     def _request_shutdown() -> None:
+        nonlocal failsafe_timer
+
+        first_request = not shutdown_requested.is_set()
         shutdown_requested.set()
+        if first_request:
+            logger.info("Shutdown requested for identity '%s'", profile.name)
+        else:
+            logger.debug("Shutdown already requested for identity '%s'", profile.name)
+
         print(f"-> Ending conversation with '{profile.name}'.")
+
+        logger.debug("Shutdown stage: stopping VAD listener")
         try:
             if vad_listener is not None:
                 vad_listener.stop()
+                logger.debug("Shutdown stage complete: VAD listener stopped")
         except Exception:
-            pass
+            logger.exception("Failed to stop VAD listener during shutdown")
+
+        logger.debug("Shutdown stage: stopping active TTS playback")
         try:
             if tts_model.is_playing:
                 tts_model.stop_playback()
+                logger.debug("Shutdown stage complete: TTS playback halted")
         except Exception:
-            pass
+            logger.exception("Failed to stop TTS playback during shutdown")
+
+        logger.debug("Shutdown stage: stopping animator")
         try:
             if animator is not None:
                 animator.stop()
+                logger.debug("Shutdown stage complete: animator stop requested")
         except Exception:
-            pass
+            logger.exception("Failed to stop animator during shutdown")
+
+        logger.debug("Shutdown stage: joining animator thread")
+        try:
+            if animator_thread and animator_thread.is_alive():
+                animator_thread.join(timeout=1.5)
+                if animator_thread.is_alive():
+                    logger.debug("Animator thread still running after timeout")
+                else:
+                    logger.debug("Animator thread joined successfully")
+        except Exception:
+            logger.exception("Failed while waiting for animator thread during shutdown")
+
         qt_app = QApplication.instance()
         if qt_app is not None:
+            logger.debug("Shutdown stage: requesting Qt application quit")
             QTimer.singleShot(0, qt_app.quit)
+        else:
+            logger.debug("Shutdown stage: Qt application not running")
+
+        logger.debug("Shutdown stage: closing stdin control pipe")
+        try:
+            if sys.stdin is not None and not sys.stdin.closed:
+                sys.stdin.close()
+                logger.debug("Shutdown stage complete: stdin closed")
+        except Exception:
+            logger.exception("Failed to close stdin during shutdown")
+
+        def _force_exit() -> None:
+            if not shutdown_requested.is_set() or shutdown_complete.is_set():
+                logger.debug("Goodbye failsafe aborted; shutdown already resolved")
+                return
+            logger.error("Goodbye failsafe triggered; forcing process exit for '%s'", profile.name)
+            print("-> Goodbye failsafe: forcing process exit.")
+            try:
+                sys.stdout.flush()
+            except Exception:
+                logger.exception("Failed to flush stdout before forced exit")
+            os._exit(0)
+
+        if failsafe_timer is not None:
+            failsafe_timer.cancel()
+
+        timer = threading.Timer(3.0, _force_exit)
+        timer.daemon = True
+        failsafe_timer = timer
+        timer.start()
+        logger.debug("Goodbye failsafe armed for identity '%s'", profile.name)
 
     def _handle_conversation_start(identity_name: str) -> None:
         target = _resolve_identity_name(identity_name)
@@ -458,14 +525,25 @@ def main():
         _restart_with_identity(target)
 
     def _handle_conversation_end(identity_name: str) -> None:
+        logger.debug(
+            "Conversation end requested for '%s' (active '%s')",
+            identity_name,
+            profile.name,
+        )
         normalized = identity_name.strip().lower()
         if normalized != profile.name.lower():
             print(
                 f"-> Ignoring goodbye for '{identity_name}' because the active identity is '{profile.name}'."
             )
+            logger.debug(
+                "Ignored goodbye for '%s' because '%s' remains active",
+                identity_name,
+                profile.name,
+            )
             return
 
         display_name = _identity_display(profile.name)
+        logger.info("Conversation end keyword accepted for '%s'", profile.name)
         print(f"-> Ending conversation with {display_name} on user request.")
         _request_shutdown()
 
@@ -478,6 +556,10 @@ def main():
         nonlocal last_bot_response, vad_listener
 
         if shutdown_requested.is_set():
+            logger.debug(
+                "Discarding user input because shutdown is in progress for '%s'",
+                profile.name,
+            )
             return
 
         cleaned = transcript.strip()
@@ -485,6 +567,11 @@ def main():
             animator.update_amplitude(0.0)
             return
 
+        logger.debug(
+            "Processing user input from %s channel: %s",
+            source,
+            cleaned,
+        )
         if source == "command":
             print("-> Simulating user request:", transcript)
         else:
@@ -512,12 +599,24 @@ def main():
         if not shutdown_requested.is_set():
             start_match = keywords.detect_conversation_start_keyword(cleaned)
             if start_match:
+                logger.debug(
+                    "Detected conversation start keyword for '%s' via %s input",
+                    start_match.keyword.payload,
+                    source,
+                )
                 _handle_conversation_start(start_match.keyword.payload)
                 animator.update_amplitude(0.0)
                 return
 
-            end_match = keywords.detect_conversation_end_keyword(cleaned)
+            end_match = None
+            if source != "voice":
+                end_match = keywords.detect_conversation_end_keyword(cleaned)
             if end_match:
+                logger.debug(
+                    "Detected conversation end keyword targeting '%s' via %s input",
+                    end_match.keyword.payload,
+                    source,
+                )
                 _handle_conversation_end(end_match.keyword.payload)
                 animator.update_amplitude(0.0)
                 return
@@ -696,14 +795,18 @@ def main():
 
     def _stdin_command_listener() -> None:
         if sys.stdin is None or sys.stdin.closed:
+            logger.debug("stdin control channel unavailable; skipping listener for '%s'", profile.name)
             return
-        while True:
+        logger.debug("Starting stdin control listener for '%s'", profile.name)
+        while not shutdown_requested.is_set():
             try:
                 line = sys.stdin.readline()
             except Exception as exc:
                 print(f"-> Control listener error: {exc}")
+                logger.exception("Control listener error while reading stdin")
                 break
             if not line:
+                logger.debug("stdin control listener received EOF")
                 break
             stripped = line.strip()
             if not stripped:
@@ -712,26 +815,40 @@ def main():
                 payload = json.loads(stripped)
             except Exception as exc:
                 print(f"-> Ignoring malformed control payload: {exc}")
+                logger.debug("Malformed control payload ignored: %s", stripped)
                 continue
             command = str(payload.get("command") or "").strip().lower()
             if not command:
                 continue
             if command == "look_at_my_screen":
+                logger.debug("stdin control command received: look_at_my_screen")
                 _trigger_look_at_screen()
             elif command == "look_at_my_clipboard":
+                logger.debug("stdin control command received: look_at_my_clipboard")
                 _trigger_look_at_clipboard()
             elif command == "chat_with":
                 target_identity = str(payload.get("identity") or "")
                 if target_identity:
+                    logger.debug(
+                        "stdin control command received: chat_with %s",
+                        target_identity,
+                    )
                     with processing_lock:
                         _handle_conversation_start(target_identity)
             elif command == "goodbye":
                 target_identity = str(payload.get("identity") or "")
                 if target_identity:
+                    logger.debug(
+                        "stdin control command received: goodbye %s",
+                        target_identity,
+                    )
                     with processing_lock:
                         _handle_conversation_end(target_identity)
             else:
                 print(f"-> Unknown control command: {command}")
+                logger.debug("Unknown control command received: %s", command)
+
+        logger.debug("stdin control listener exiting for '%s'", profile.name)
 
     command_thread = threading.Thread(target=_stdin_command_listener, daemon=True)
     command_thread.start()
@@ -749,13 +866,43 @@ def main():
         if app:
             app.exec()
         elif animator_thread:
-            animator_thread.join()
+            while animator_thread.is_alive():
+                animator_thread.join(timeout=0.5)
+                if not animator_thread.is_alive():
+                    break
+                if shutdown_requested.is_set():
+                    break
     except KeyboardInterrupt:
         print("Shutting down...")
     finally:
-        vad_listener.stop()
-        animator.stop()
-        ollama_client.unload()
+        logger.info("Shutdown cleanup starting for '%s'", profile.name)
+        shutdown_complete.set()
+        try:
+            if vad_listener is not None:
+                logger.debug("Cleanup stage: stopping VAD listener")
+                vad_listener.stop()
+                logger.debug("Cleanup stage complete: VAD listener stopped")
+        except Exception:
+            logger.exception("Failed to stop VAD listener during cleanup")
+        try:
+            if animator is not None:
+                logger.debug("Cleanup stage: stopping animator")
+                animator.stop()
+                logger.debug("Cleanup stage complete: animator stopped")
+        except Exception:
+            logger.exception("Failed to stop animator during cleanup")
+        try:
+            logger.debug("Cleanup stage: unloading Ollama client")
+            ollama_client.unload()
+            logger.debug("Cleanup stage complete: Ollama client unloaded")
+        except Exception:
+            logger.exception("Failed to unload Ollama client during cleanup")
+
+        if failsafe_timer is not None:
+            failsafe_timer.cancel()
+            failsafe_timer = None
+            logger.debug("Goodbye failsafe timer cancelled after cleanup")
+        logger.info("Shutdown cleanup finished for '%s'", profile.name)
 
 if __name__ == "__main__":
     main()
