@@ -13,6 +13,7 @@
     "num_ctx": 8192
   },
   "voice": "af_sky",
+  "require_text_cleaning": true,
   "vision": true,
   "tool": false,
   "memory_dir": "memory"

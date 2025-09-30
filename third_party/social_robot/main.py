@@ -66,6 +66,7 @@ class IdentityProfile:
         ollama_hardware: Optional[str] = None,
         vision_enabled: bool = False,
         tool_enabled: bool = False,
+        require_text_cleaning: bool = True,
     ) -> None:
         self.name = name
         self.system_prompt = system_prompt
@@ -78,6 +79,7 @@ class IdentityProfile:
         self.ollama_hardware = ollama_hardware
         self.vision_enabled = vision_enabled
         self.tool_enabled = tool_enabled
+        self.require_text_cleaning = require_text_cleaning
 
 def _resolve_identities_root(arg_value: Optional[str]) -> Path:
     if arg_value:
@@ -194,6 +196,15 @@ def resolve_identity(args) -> tuple[IdentityProfile, dict]:
     else:
         tool_enabled = False
 
+    cleaning_flag = config.get("require_text_cleaning")
+    if isinstance(cleaning_flag, bool):
+        require_text_cleaning = cleaning_flag
+    elif cleaning_flag is not None:
+        print("-> Ignoring require_text_cleaning value; expected a boolean true/false.")
+        require_text_cleaning = True
+    else:
+        require_text_cleaning = True
+
     profile = IdentityProfile(
         name=identity_name,
         system_prompt=system_prompt,
@@ -206,6 +217,7 @@ def resolve_identity(args) -> tuple[IdentityProfile, dict]:
         ollama_hardware=normalized_hardware,
         vision_enabled=vision_enabled,
         tool_enabled=tool_enabled,
+        require_text_cleaning=require_text_cleaning,
     )
 
     print(f"-> Loaded identity '{profile.name}' (voice={profile.voice}, model={profile.llm_model})")
@@ -279,7 +291,13 @@ def main():
     )
 
     tts_model = KokoroTTS(voice=profile.voice, speed=1.0)
-    preprocessing_agent = load_tts_preprocessing_agent()
+    if profile.require_text_cleaning:
+        preprocessing_agent = load_tts_preprocessing_agent()
+        if preprocessing_agent is None:
+            print("-> TTS preprocessing agent unavailable; falling back to raw replies.")
+    else:
+        preprocessing_agent = None
+        print("-> Identity does not require text cleaning; skipping TTS preprocessing agent.")
 
     if args.test_wav:
         import wave
