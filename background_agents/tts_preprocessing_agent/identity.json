@@ -1,0 +1,12 @@
+{
+  "name": "tts_preprocessing_agent",
+  "description": "Rewrites assistant replies for natural speech synthesis",
+  "llm_model": "gemma3:1b",
+  "llm_url": "http://localhost:11434/api/chat",
+  "ollama_options": {
+    "temperature": 0.2
+  },
+  "header_text_file": "header_text.txt",
+  "prompt_file": "system_prompt.txt",
+  "preamble": "both"
+}

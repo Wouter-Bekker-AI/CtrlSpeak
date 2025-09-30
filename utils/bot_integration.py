@@ -4,7 +4,6 @@ import json
 import os
 import sys
 import time
-import json
 import threading
 import subprocess
 from multiprocessing import Process, Queue as MPQueue
@@ -52,6 +51,8 @@ _DEFAULT_IDENTITIES_ROOT = _SOCIAL_ROBOT_ROOT / "identities"
 _DEFAULT_IDENTITY_NAME = "default"
 _DEFAULT_LLM_MODEL = "gemma3:1b"
 _DEFAULT_LLM_URL = "http://localhost:11434/api/chat"
+_BACKGROUND_AGENTS_ROOT = Path(__file__).resolve().parents[1] / "background_agents"
+_TTS_PREPROCESSOR_DIR = _BACKGROUND_AGENTS_ROOT / "tts_preprocessing_agent"
 
 _bot_proc: Optional[subprocess.Popen] = None
 _bot_stdin_lock = threading.Lock()
@@ -106,6 +107,29 @@ def _load_identity_config(identity: str, identities_dir: Optional[str]) -> tuple
             logger.exception("Failed to parse identity config at %s", config_path)
 
     return config, identity_path
+
+
+def _load_preprocessor_identity() -> tuple[Optional[Path], Optional[str], Optional[str], Dict[str, Any], Optional[str]]:
+    agent_dir = _TTS_PREPROCESSOR_DIR
+    if not agent_dir.exists():
+        logger.warning("TTS preprocessing agent directory not found at %s", agent_dir)
+        return None, None, None, {}, None
+
+    identity_path = agent_dir / "identity.json"
+    if not identity_path.exists():
+        logger.warning("TTS preprocessing agent identity.json missing at %s", identity_path)
+        return agent_dir, None, None, {}, None
+
+    try:
+        config = json.loads(identity_path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.exception("Failed to parse TTS preprocessing agent identity at %s", identity_path)
+        return agent_dir, None, None, {}, None
+
+    options, hardware = _extract_ollama_preferences(config)
+    llm_url = config.get("llm_url")
+    llm_model = config.get("llm_model")
+    return agent_dir, llm_url, llm_model, options, hardware
 
 
 def _extract_ollama_preferences(config: dict) -> tuple[Dict[str, Any], Optional[str]]:
@@ -472,6 +496,43 @@ def _ensure_identity_llm_ready(
     return _download_ollama_model_with_gui(display_name, resolved_model, base_url)
 
 
+def _ensure_preprocessor_llm_ready(llm_model: Optional[str], llm_url: Optional[str]) -> bool:
+    model_name = (llm_model or "").strip()
+    resolved_url = (llm_url or "").strip()
+    if not model_name or not resolved_url:
+        logger.debug(
+            "Skipping TTS preprocessing agent model management (model=%s, url=%s)",
+            model_name,
+            resolved_url,
+        )
+        return True
+
+    base_url = _normalize_ollama_base_url(resolved_url)
+    if not base_url:
+        logger.warning(
+            "Unable to normalize Ollama URL %s for TTS preprocessing agent", resolved_url
+        )
+        return True
+
+    state = _ollama_model_state(base_url, model_name)
+    if state is True:
+        logger.info("Ollama model %s already present for TTS preprocessing agent", model_name)
+        return True
+
+    if state is None:
+        logger.warning(
+            "Unable to confirm Ollama model %s for TTS preprocessing agent; proceeding without managed download.",
+            model_name,
+        )
+        return True
+
+    logger.info(
+        "Downloading Ollama model %s for TTS preprocessing agent via welcome workflow",
+        model_name,
+    )
+    return _download_ollama_model_with_gui("TTS preprocessing agent", model_name, base_url)
+
+
 def _load_identity_llm_config(
     identity: str, identities_root: Path
 ) -> tuple[Optional[str], Optional[str], Dict[str, Any], Optional[str]]:
@@ -604,6 +665,16 @@ def start_bot(
     if not _ensure_identity_llm_ready(identity, identities_dir, llm_model, llm_url):
         return False
 
+    (
+        _agent_dir,
+        agent_llm_url,
+        agent_llm_model,
+        agent_options,
+        agent_hardware,
+    ) = _load_preprocessor_identity()
+    if not _ensure_preprocessor_llm_ready(agent_llm_model, agent_llm_url):
+        return False
+
     normalized_base_url: Optional[str] = None
     resolved_model_name: Optional[str] = None
     if resolved_llm_model:
@@ -625,6 +696,29 @@ def start_bot(
                 "Skipping Ollama warm-up for model %s (state=%s)",
                 resolved_model_name,
                 state,
+            )
+
+    agent_base_url: Optional[str] = None
+    agent_model_name: Optional[str] = None
+    if agent_llm_model:
+        agent_model_name = agent_llm_model.strip() or None
+    if agent_llm_url:
+        agent_base_url = _normalize_ollama_base_url(agent_llm_url)
+
+    if agent_base_url and agent_model_name:
+        agent_state = _ollama_model_state(agent_base_url, agent_model_name)
+        if agent_state is True:
+            _warm_ollama_model(
+                agent_llm_url,
+                agent_model_name,
+                agent_options,
+                agent_hardware,
+            )
+        else:
+            logger.debug(
+                "Skipping Ollama warm-up for preprocessing model %s (state=%s)",
+                agent_model_name,
+                agent_state,
             )
 
     env = os.environ.copy()
