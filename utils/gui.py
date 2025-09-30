@@ -34,6 +34,8 @@ from utils.bot_integration import (
     start_bot as _bot_start,
     stop_bot as _bot_stop,
     is_bot_running as _bot_is_running,
+    list_available_identities as _list_bot_identities,
+    get_active_identity as _bot_active_identity,
 )
 
 # ---- Model/CUDA helpers kept in utils.models to avoid GUI bloat ----
@@ -1419,6 +1421,39 @@ class ManagementWindow:
         ttk.Label(status_card, textvariable=self.server_status_var, style="Caption.TLabel",
                   justify=tk.LEFT).pack(anchor=tk.W)
 
+        # Assistants / Chat with Bot controls
+        bot_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
+        bot_card.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(bot_card, text="Assistants", style="SectionHeading.TLabel").pack(anchor=tk.W)
+        bot_accent = ttk.Frame(bot_card, style="AccentLine.TFrame")
+        bot_accent.configure(height=2)
+        bot_accent.pack(fill=tk.X, pady=(10, 12))
+
+        self._bot_badge_frame = ttk.Frame(bot_card, style="ModernCardInner.TFrame")
+        self._bot_badge_frame.pack(fill=tk.X, pady=(4, 12))
+        self._bot_badge_labels: dict[str, ttk.Label] = {}
+        self._bot_identity_display: dict[str, str] = {}
+        self._bot_identities_cache: list[str] = []
+        self._bot_empty_label: Optional[ttk.Label] = None
+
+        bot_buttons = ttk.Frame(bot_card, style="ModernCardInner.TFrame")
+        bot_buttons.pack(fill=tk.X, pady=(4, 0))
+        self.bot_button = ttk.Button(
+            bot_buttons,
+            text="Chat with Bot",
+            style="Accent.TButton",
+            command=self._toggle_bot,
+        )
+        self.bot_button.pack(fill=tk.X, pady=4)
+        self.clear_memory_button = ttk.Button(
+            bot_buttons,
+            text="Clear Bot Memory",
+            style="Subtle.TButton",
+            command=self._clear_bot_memory,
+        )
+        self.clear_memory_button.pack(fill=tk.X, pady=4)
+        self._refresh_bot_button()
+
         # Device preferences
         device_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
         device_card.pack(fill=tk.X, pady=(0, 12))
@@ -1566,17 +1601,6 @@ class ManagementWindow:
             except Exception:
                 logger.exception("Failed to disable change mode button for client-only build")
 
-        self.bot_button = ttk.Button(
-            controls,
-            text="Chat with Bot",
-            style="Accent.TButton",
-            command=self._toggle_bot,
-        )
-        self.bot_button.pack(fill=tk.X, pady=4)
-        self.clear_memory_button = ttk.Button(controls, text="Clear Bot Memory", style="Subtle.TButton",
-                                              command=self._clear_bot_memory)
-        self.clear_memory_button.pack(fill=tk.X, pady=4)
-        self._refresh_bot_button()
         exit_label = "Exit CtrlSpeak" if CLIENT_ONLY_BUILD else "Stop everything"
         self.stop_all_button = ttk.Button(controls, text=exit_label, style="Danger.TButton",
                                           command=self.stop_everything)
@@ -1710,6 +1734,7 @@ class ManagementWindow:
                 self.bot_button.configure(text="Stop Chat with Bot")
             else:
                 self.bot_button.configure(text="Chat with Bot")
+            self._refresh_bot_badges()
         except Exception:
             pass
 
@@ -1723,6 +1748,68 @@ class ManagementWindow:
         except Exception:
             logger.exception("Bot toggle failed")
             messagebox.showerror("Chat with Bot", "Failed to toggle the bot. Check logs.")
+
+    def _refresh_bot_badges(self) -> None:
+        frame = getattr(self, "_bot_badge_frame", None)
+        if frame is None or not frame.winfo_exists():
+            return
+
+        try:
+            identities = _list_bot_identities()
+        except Exception:
+            logger.exception("Failed to list bot identities")
+            identities = []
+
+        active_identity = _bot_active_identity()
+        if active_identity and active_identity not in identities:
+            identities = [*identities, active_identity]
+
+        if identities != self._bot_identities_cache:
+            for child in list(frame.winfo_children()):
+                try:
+                    child.destroy()
+                except Exception:
+                    logger.exception("Failed to destroy bot badge widget")
+            self._bot_badge_labels.clear()
+            self._bot_identity_display.clear()
+            self._bot_empty_label = None
+
+            if not identities:
+                self._bot_empty_label = ttk.Label(
+                    frame,
+                    text="No assistants detected.",
+                    style="Caption.TLabel",
+                )
+                self._bot_empty_label.pack(anchor=tk.W)
+            else:
+                for index, identity in enumerate(identities):
+                    display = identity.replace("_", " ").title()
+                    label = ttk.Label(frame, text="", style="PillMuted.TLabel")
+                    pady = (0, 0) if index == 0 else (8, 0)
+                    label.pack(anchor=tk.W, pady=pady)
+                    self._bot_badge_labels[identity] = label
+                    self._bot_identity_display[identity] = display
+
+            self._bot_identities_cache = identities
+
+        if not self._bot_identities_cache:
+            return
+
+        running = _bot_is_running()
+        for identity, label in list(self._bot_badge_labels.items()):
+            if not label.winfo_exists():
+                continue
+            display = self._bot_identity_display.get(identity, identity)
+            if running and active_identity == identity:
+                style = "PillAccent.TLabel"
+                state_text = "active"
+            else:
+                style = "PillMuted.TLabel"
+                state_text = "available"
+            try:
+                label.configure(text=f"{display}: {state_text}", style=style)
+            except Exception:
+                logger.exception("Failed to update bot badge for %s", identity)
 
     def _select_identity_and_start_bot(self) -> None:
         from pathlib import Path
@@ -1932,6 +2019,8 @@ class ManagementWindow:
             self.start_button.state(["disabled"]); self.stop_button.state(["!disabled"])
         else:
             self.start_button.state(["!disabled"]); self.stop_button.state(["disabled"])
+
+        self._refresh_bot_badges()
 
     def _reload_transcriber_async(
         self,

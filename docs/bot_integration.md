@@ -148,8 +148,8 @@ Use the **Clear Bot Memory** button in the management window when you need to wi
 ## GUI Workflow
 
 1. Start CtrlSpeak in Client + Server mode.
-2. Right-click the tray icon, choose **Manage CtrlSpeak**, then click **Chat with Bot**.
-3. The management UI toggles the bot: click once to launch, again to stop. The button text reflects the current state.
+2. Right-click the tray icon, choose **Manage CtrlSpeak**, then use the Assistants card to review identity availability badges and click **Chat with Bot**.【F:utils/gui.py†L1424-L1455】
+3. The management UI toggles the bot: click once to launch, again to stop. The active persona's badge switches to **active** while other identities remain marked **available**.【F:utils/gui.py†L1730-L1812】
 4. Speak once the "-> Starting the VAD listener..." message appears in the terminal; responses are spoken back and logged to the console as `-> Bot replied: ...`.
 5. Right-click the transparent logo to open its context menu. Choose **Look at my Screen** to capture the desktop or **Look at my Clipboard** to forward the latest snip stored in the clipboard. Both actions mirror the spoken commands and share the tooling documented in [`docs/tooling.md`](tooling.md). The menu still includes **Quit** when you need to close the bot quickly.
 
