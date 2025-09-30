@@ -29,6 +29,7 @@ COMMON_REQUIRED_ASSETS = {
     "processing chime": assets_dir / "loading.wav",
     "automation clip": assets_dir / "test.wav",
     "fun facts list": assets_dir / "fun_facts.txt",
+    "TTS preprocessing agent": project_root / "background_agents" / "tts_preprocessing_agent",
 }
 
 

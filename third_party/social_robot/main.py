@@ -18,6 +18,11 @@ from audio.stt import FasterWhisperSTT
 from audio.remote_stt import RemoteSTT
 from audio.tts import KokoroTTS
 from audio.vad import VADListener, VADConfig
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from background_agents import load_tts_preprocessing_agent
 from face_animation.face import FaceAnimator, FaceSettings
 from face_animation.logo import LogoAnimator
 from llm.ollama import OllamaClient, OllamaUnavailableError
@@ -301,6 +306,7 @@ def main():
     )
 
     tts_model = KokoroTTS(voice=profile.voice, speed=1.0)
+    preprocessing_agent = load_tts_preprocessing_agent()
 
     if args.test_wav:
         import wave
@@ -470,16 +476,23 @@ def main():
         history.append({"role": "assistant", "content": llm_response})
         save_history(profile.memory_path, history)
 
-        print("-> Bot replied:", llm_response)
+        processed_response = llm_response
+        if preprocessing_agent is not None:
+            rewritten = preprocessing_agent.rewrite(llm_response)
+            if rewritten != llm_response:
+                print("-> Preprocessed bot reply for TTS.")
+            processed_response = rewritten
+
+        print("-> Bot replied:", processed_response)
 
         try:
-            audio_data = tts_model.synthesize(llm_response)
+            audio_data = tts_model.synthesize(processed_response)
         except Exception as exc:
             print("TTS error:", exc)
             animator.update_amplitude(0.0)
             return
 
-        last_bot_response = llm_response
+        last_bot_response = processed_response
 
         def amplitude_callback(level: float) -> None:
             animator.update_amplitude(level)

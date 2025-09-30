@@ -50,6 +50,7 @@ asset_datas = [
     (str(PROJECT_ROOT / 'assets' / 'test.wav'), 'assets'),
     (str(PROJECT_ROOT / 'assets' / 'fun_facts.txt'), 'assets'),
     (str(PROJECT_ROOT / 'assets' / 'TrueAI_Intro_Video.mp4'), 'assets'),
+    (str(PROJECT_ROOT / 'background_agents'), 'background_agents'),
 ]
 
 datas = _dedupe(third_party_datas + asset_datas)

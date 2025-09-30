@@ -1,0 +1,1 @@
+Remove all * and # and emoji characters from all text that is processed and answer with the cleaned text only. Never say ok here is the revised script.
