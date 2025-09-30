@@ -57,6 +57,8 @@ The additional boolean keys control multimodal, cleaning, and future extensibili
 
 CtrlSpeak ships with two bundled identities: `assistant` (vision enabled, text cleaning enabled) and `default` (vision disabled, text cleaning disabled). Both currently set `tool` to `false` and can be expanded as the tool feature matures.
 
+All face, mouth, and logo assets now live inside the identity directories; the legacy `third_party/social_robot/images/` placeholders have been removed so new personas should bundle their own art alongside `identity.json`. Likewise, shared prompt templates are deprecated—store any reusable system prompts with the identity that consumes them so packaging stays self-contained.
+
 You can switch identities from the command line with:
 
 ```powershell
@@ -80,6 +82,10 @@ The push-to-talk workflow (hold the right Ctrl key while speaking) shares the sa
 
 When you add new keywords, update `tools/keywords.py`, refresh [`docs/tooling.md`](tooling.md), and adjust the system prompts for any identities that should advertise the new commands. The assistant prompt bundled with CtrlSpeak now explicitly mentions the clipboard trigger and instructs the model to guide users toward the exact phrases when they hint at wanting a capture.
 
+## SocialRobot entrypoint responsibilities
+
+`third_party/social_robot/main.py` remains the authoritative entrypoint for the Chat with Bot workflow. CtrlSpeak launches it as a subprocess from `utils.bot_integration.start_bot`, passes the resolved identity settings and CtrlSpeak STT URL, and relies on its stdin control channel for graceful shutdowns.【F:utils/bot_integration.py†L667-L760】【F:third_party/social_robot/main.py†L251-L399】 The module bootstraps speech recognition, Ollama chat streaming, Kokoro playback, optional preprocessing, and the animated face/logo UI before wiring the stdin listener that handles `goodbye` commands issued by the parent process.【F:third_party/social_robot/main.py†L146-L532】 Removing or partially deleting this file will break bot startup and teardown, so trim functionality only when you can update every caller and test path accordingly.
+
 ## Background agents
 
 The speech rewrite pass lives under `background_agents/tts_preprocessing_agent`. The directory mirrors an identity folder:
@@ -97,7 +103,7 @@ CtrlSpeak treats the agent as a first-class asset for identities that request it
 Using Chat with Bot requires:
 
 1. CtrlSpeak running in **Client + Server** mode with the transcription server active.
-2. The dependencies listed in `requirements.txt` (pygame, Kokoro-ONNX, faster-whisper, etc.). Installing CtrlSpeak's root requirements covers these.
+2. The dependencies listed in the repository-level `requirements.txt` (pygame, Kokoro-ONNX, faster-whisper, etc.). Installing the root requirements is sufficient; no separate `third_party/social_robot/requirements.txt` file exists anymore.
 3. Optional: a reachable Ollama server if you want real LLM responses. Without one, the bot echoes a graceful fallback derived from the user's input.
 
 ## Launching the Bot Manually
