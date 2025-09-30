@@ -151,6 +151,8 @@ When you launch an identity with `vision: true` (for example the bundled **Assis
 
 As soon as you pick an identity, CtrlSpeak now pings the configured Ollama endpoint with that profile’s model so the checkpoint is fully loaded before you speak. This avoids the first-turn lag that previously occurred while Ollama initialized the weights after receiving the initial utterance.
 
+To keep the prompt context small, SocialRobot only retains the **most recent** image payload in the conversation history. When a new screenshot or clipboard capture is added, earlier history entries have their base64 payload removed and are replaced with a short `[previous image removed]` marker so the transcript still notes that a capture occurred without exhausting the model context window.
+
 ## Clearing stored memory
 
 Use the **Clear Bot Memory** button in the management window when you need to wipe a persona’s stored context. After you choose an identity and confirm the prompt, CtrlSpeak removes that profile’s `memory/conversation.json` file and deletes the entire `memory/screenshots` directory so no cached captures remain. If neither artifact exists, the dialog reports that there is nothing to clear.

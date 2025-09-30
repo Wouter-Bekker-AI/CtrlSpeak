@@ -27,6 +27,7 @@ from PySide6.QtCore import QTimer
 
 from tools import keywords, vision
 from utils.config_paths import get_logger
+from history_utils import load_history, save_history, prune_history_images
 
 
 logger = get_logger(__name__)
@@ -248,24 +249,6 @@ def parse_args():
     p.add_argument("--memory-dir", default=os.getenv("BOT_MEMORY_DIR"))
     p.add_argument("--test-wav", help="Path to a WAV file to process for testing (bypasses VAD/mic).")
     return p.parse_args()
-
-def load_history(memory_path: Optional[Path]) -> List[dict]:
-    if memory_path:
-        history_file = memory_path / "conversation.json"
-        if history_file.exists():
-            try:
-                return json.loads(history_file.read_text(encoding="utf-8"))
-            except Exception as exc:
-                print(f"-> Failed to load conversation history: {exc}")
-    return []
-
-def save_history(memory_path: Optional[Path], history: List[dict]) -> None:
-    if memory_path:
-        try:
-            history_file = memory_path / "conversation.json"
-            history_file.write_text(json.dumps(history, indent=2), encoding="utf-8")
-        except Exception as exc:
-            print(f"-> Failed to save conversation history: {exc}")
 
 def main():
     args = parse_args()
@@ -678,9 +661,11 @@ def main():
             vision_source = capture_result.source
 
         history = load_history(profile.memory_path)
+        prune_history_images(history)
         try:
             user_content: Optional[List[dict]] = None
             if vision_b64:
+                prune_history_images(history, keep_latest=False)
                 user_content = [
                     {"type": "text", "text": augmented_text},
                     {"type": "image", "image": vision_b64},
