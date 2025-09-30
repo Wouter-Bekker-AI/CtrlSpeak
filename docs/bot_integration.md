@@ -50,7 +50,7 @@ CtrlSpeak applies the same options and hardware preference when it pre-warms the
 
 The additional boolean keys control multimodal and future extensibility features:
 
-- `vision` – Enables screenshot capture and the **Look at my Screen** workflow. When `true`, SocialRobot listens for the spoken “look at my screen” command, exposes the matching context-menu action on the floating logo, and pipes captured images to the LLM. When `false`, the command is ignored, the context-menu item is hidden, and no screenshots are taken.
+- `vision` – Enables image capture tooling documented in [`docs/tooling.md`](tooling.md). When `true`, SocialRobot listens for the spoken “look at my screen” and “look at my clipboard” commands, exposes matching context-menu actions on the floating logo, and routes captured images to the LLM. When `false`, the commands are ignored, the context-menu items are hidden, and no images are taken.
 - `tool` – Reserved flag for forthcoming external tool integrations. It defaults to `false` today but can be toggled once tool calling is implemented.
 
 CtrlSpeak ships with two bundled identities: `assistant` (vision enabled) and `default` (vision disabled). Both currently set `tool` to `false` and can be expanded as the tool feature matures.
@@ -62,6 +62,19 @@ python third_party/social_robot/main.py --identity ross
 ```
 
 or by setting `BOT_IDENTITY=ross` before launching CtrlSpeak so the management window uses that persona.
+
+## Voice keywords
+
+SocialRobot loads [`tools/keywords.py`](tooling.md) at startup and registers one keyword set per identity directory. The following phrases are recognized out of the box:
+
+- **look at my screen** – Captures a screenshot via `tools/vision.py` when the active identity has `vision: true`.
+- **look at my clipboard** – Pulls the most recent image from the system clipboard and forwards it like a screenshot.
+- **chat with `<identity>`** – Immediately relaunches SocialRobot with the target persona so the conversation restarts seamlessly (requests that target the already-active identity are ignored).
+- **goodbye `<identity>`** – Immediately ends the current conversation and shuts down the SocialRobot process.
+
+The push-to-talk workflow (hold the right Ctrl key while speaking) shares the same keyword registry. When VAD is idle because no bot session is active, saying “chat with assistant” through the hotkey launches that identity and skips text injection entirely. If another persona is already running, the helper stops it via `utils.bot_integration.stop_bot()` before starting the requested one, and “goodbye <identity>” tears down the session using the same stop helper the tray menu invokes.
+
+When you add new keywords, update `tools/keywords.py`, refresh [`docs/tooling.md`](tooling.md), and adjust the system prompts for any identities that should advertise the new commands. The assistant prompt bundled with CtrlSpeak now explicitly mentions the clipboard trigger and instructs the model to guide users toward the exact phrases when they hint at wanting a capture.
 
 ## Background agents
 
@@ -124,7 +137,7 @@ Launching Chat with Bot from the management window now verifies that the Ollama 
 
 ## Screenshot workflow
 
-When you launch an identity with `vision: true` (for example the bundled **Assistant** persona) and say “look at my screen,” SocialRobot captures the current desktop, stores a PNG copy under the identity’s `memory/screenshots` directory, and forwards the encoded image to the configured Ollama model. The spoken request is automatically augmented with a clarification asking the model to describe the screenshot, so multimodal checkpoints such as `gemma3:12b` can respond with contextual commentary. If the capture fails (for example, when `pyautogui` cannot access the display), the bot logs the issue and continues as a text-only exchange. Identities with `vision: false` skip these hooks entirely—the floating logo omits the **Look at my Screen** context-menu option and voice commands fall back to a standard text-only exchange.
+When you launch an identity with `vision: true` (for example the bundled **Assistant** persona) and say “look at my screen,” SocialRobot captures the current desktop, stores a PNG copy under the identity’s `memory/screenshots` directory, and forwards the encoded image to the configured Ollama model. Saying “look at my clipboard” (or choosing **Look at my Clipboard** from the floating logo) pulls the most recent image from the system clipboard via `tools/vision.py` and follows the same storage and upload workflow. Keyword detection for both phrases lives in `tools/keywords.py`, which keeps the trigger vocabulary centralized as new commands are added. Both routes annotate history entries with the saved file path and the capture source so downstream agents can tell whether the data came from a screenshot or a clipboard snip. If a capture fails—because PyAutoGUI cannot access the display, the clipboard has no image, or dependencies are missing—the bot logs the issue and continues as a text-only exchange. Identities with `vision: false` skip these hooks entirely; the floating logo omits both context-menu options and voice commands fall back to a standard text-only exchange.
 
 As soon as you pick an identity, CtrlSpeak now pings the configured Ollama endpoint with that profile’s model so the checkpoint is fully loaded before you speak. This avoids the first-turn lag that previously occurred while Ollama initialized the weights after receiving the initial utterance.
 
@@ -138,7 +151,7 @@ Use the **Clear Bot Memory** button in the management window when you need to wi
 2. Right-click the tray icon, choose **Manage CtrlSpeak**, then click **Chat with Bot**.
 3. The management UI toggles the bot: click once to launch, again to stop. The button text reflects the current state.
 4. Speak once the "-> Starting the VAD listener..." message appears in the terminal; responses are spoken back and logged to the console as `-> Bot replied: ...`.
-5. Right-click the transparent logo to open its context menu. Choose **Look at my Screen** to capture the desktop and run the same augmented LLM request you would get from speaking the phrase aloud. The menu still includes **Quit** when you need to close the bot quickly.
+5. Right-click the transparent logo to open its context menu. Choose **Look at my Screen** to capture the desktop or **Look at my Clipboard** to forward the latest snip stored in the clipboard. Both actions mirror the spoken commands and share the tooling documented in [`docs/tooling.md`](tooling.md). The menu still includes **Quit** when you need to close the bot quickly.
 
 The SocialRobot process keeps running if you close the management window—you can reopen it later without interrupting the conversation. To shut the bot down, either click **Stop Chat with Bot** in the management window or choose **Quit** from the floating logo's context menu.
 

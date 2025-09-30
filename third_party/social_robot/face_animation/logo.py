@@ -22,11 +22,13 @@ class FloatingLogo(QWidget):
         pixmap: QPixmap,
         stay_on_top: bool,
         on_look_at_screen: Optional[Callable[[], None]] = None,
+        on_look_at_clipboard: Optional[Callable[[], None]] = None,
     ) -> None:
         super().__init__()
         self._drag_pos: QPoint | None = None
         self.original_pixmap = pixmap
         self._on_look_at_screen = on_look_at_screen
+        self._on_look_at_clipboard = on_look_at_clipboard
         self._on_top_timer: Optional[QTimer] = None
 
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
@@ -46,6 +48,9 @@ class FloatingLogo(QWidget):
         self._look_action = QAction("Look at my Screen", self)
         self._look_action.triggered.connect(self._trigger_look_at_screen)
         self._look_action.setEnabled(on_look_at_screen is not None)
+        self._clipboard_action = QAction("Look at my Clipboard", self)
+        self._clipboard_action.triggered.connect(self._trigger_look_at_clipboard)
+        self._clipboard_action.setEnabled(on_look_at_clipboard is not None)
         self._quit_action = QAction("Quit", self)
         self._quit_action.triggered.connect(QApplication.instance().quit)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -70,11 +75,32 @@ class FloatingLogo(QWidget):
         self.label.setPixmap(scaled_pm)
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+    def set_capture_callbacks(
+        self,
+        *,
+        screen: Optional[Callable[[], None]],
+        clipboard: Optional[Callable[[], None]],
+    ) -> None:
+        self._on_look_at_screen = screen
+        self._on_look_at_clipboard = clipboard
+        self._look_action.setEnabled(screen is not None)
+        self._clipboard_action.setEnabled(clipboard is not None)
+
     def set_look_at_screen_callback(
         self, callback: Optional[Callable[[], None]]
     ) -> None:
-        self._on_look_at_screen = callback
-        self._look_action.setEnabled(callback is not None)
+        self.set_capture_callbacks(
+            screen=callback,
+            clipboard=self._on_look_at_clipboard,
+        )
+
+    def set_look_at_clipboard_callback(
+        self, callback: Optional[Callable[[], None]]
+    ) -> None:
+        self.set_capture_callbacks(
+            screen=self._on_look_at_screen,
+            clipboard=callback,
+        )
 
     def _trigger_look_at_screen(self) -> None:
         if self._on_look_at_screen is None:
@@ -87,10 +113,22 @@ class FloatingLogo(QWidget):
 
             traceback.print_exc()
 
+    def _trigger_look_at_clipboard(self) -> None:
+        if self._on_look_at_clipboard is None:
+            return
+        try:
+            self._on_look_at_clipboard()
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+
     def _open_menu(self, pos) -> None:
         menu = QMenu(self)
         if self._on_look_at_screen is not None:
             menu.addAction(self._look_action)
+        if self._on_look_at_clipboard is not None:
+            menu.addAction(self._clipboard_action)
         menu.addAction(self._quit_action)
         menu.exec_(self.mapToGlobal(pos))
 
@@ -139,13 +177,18 @@ class LogoAnimator(QObject):
         self._thread: Optional[threading.Thread] = None
         self._running = threading.Event()
         self.original_pixmap: Optional[QPixmap] = None
-        self._look_callback: Optional[Callable[[], None]] = None
+        self._on_look_at_screen: Optional[Callable[[], None]] = None
+        self._on_look_at_clipboard: Optional[Callable[[], None]] = None
 
     def setup_widget(
-        self, on_look_at_screen: Optional[Callable[[], None]] = None
+        self,
+        on_look_at_screen: Optional[Callable[[], None]] = None,
+        on_look_at_clipboard: Optional[Callable[[], None]] = None,
     ) -> None:
         if on_look_at_screen is not None:
-            self._look_callback = on_look_at_screen
+            self._on_look_at_screen = on_look_at_screen
+        if on_look_at_clipboard is not None:
+            self._on_look_at_clipboard = on_look_at_clipboard
 
         self.app = QApplication.instance() or QApplication(sys.argv)
 
@@ -163,7 +206,8 @@ class LogoAnimator(QObject):
         self.widget = FloatingLogo(
             self.original_pixmap,
             self.on_top,
-            on_look_at_screen=self._look_callback,
+            on_look_at_screen=self._on_look_at_screen,
+            on_look_at_clipboard=self._on_look_at_clipboard,
         )
         self.widget.setFixedSize(max_width, max_height)
         self.update_signal.connect(self.widget.set_scale)
@@ -197,6 +241,19 @@ class LogoAnimator(QObject):
     def set_look_at_screen_callback(
         self, callback: Optional[Callable[[], None]]
     ) -> None:
-        self._look_callback = callback
+        self._on_look_at_screen = callback
         if self.widget is not None:
-            self.widget.set_look_at_screen_callback(callback)
+            self.widget.set_capture_callbacks(
+                screen=callback,
+                clipboard=self._on_look_at_clipboard,
+            )
+
+    def set_look_at_clipboard_callback(
+        self, callback: Optional[Callable[[], None]]
+    ) -> None:
+        self._on_look_at_clipboard = callback
+        if self.widget is not None:
+            self.widget.set_capture_callbacks(
+                screen=self._on_look_at_screen,
+                clipboard=callback,
+            )

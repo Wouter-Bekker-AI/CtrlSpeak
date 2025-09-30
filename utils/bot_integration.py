@@ -56,8 +56,22 @@ _TTS_PREPROCESSOR_DIR = _BACKGROUND_AGENTS_ROOT / "tts_preprocessing_agent"
 
 _bot_proc: Optional[subprocess.Popen] = None
 _bot_stdin_lock = threading.Lock()
+_active_identity: Optional[str] = None
 
 _OLLAMA_HARDWARE_CHOICES = {"cpu_only", "cpu_and_gpu", "gpu_only"}
+
+
+def list_available_identities(identities_dir: Optional[str] = None) -> list[str]:
+    """Return the sorted list of SocialRobot identity folder names."""
+
+    root = _resolve_identities_root(identities_dir)
+    try:
+        return sorted(entry.name for entry in root.iterdir() if entry.is_dir())
+    except FileNotFoundError:
+        logger.warning("Identities directory %s does not exist", root)
+    except Exception:
+        logger.exception("Failed to enumerate identities under %s", root)
+    return []
 
 
 def _resolve_stt_url() -> Optional[str]:
@@ -604,6 +618,22 @@ def _warm_ollama_model(
         logger.warning("Failed to preload Ollama model %s", llm_model, exc_info=True)
 
 
+def _normalized_identity(identity: Optional[str]) -> str:
+    candidate = (identity or os.getenv("BOT_IDENTITY") or _DEFAULT_IDENTITY_NAME).strip()
+    return candidate or _DEFAULT_IDENTITY_NAME
+
+
+def _monitor_bot_exit(proc: subprocess.Popen) -> None:
+    global _active_identity
+    try:
+        proc.wait()
+    except Exception:
+        logger.exception("Bot monitor thread encountered an error")
+    finally:
+        if _bot_proc is not None and _bot_proc is proc:
+            _active_identity = None
+
+
 def start_bot(
     llm_url: Optional[str] = None,
     llm_model: Optional[str] = None,
@@ -622,7 +652,7 @@ def start_bot(
     overriding the Kokoro voice or LLM settings, or pointing at alternate identity
     directories and prompt files.
     """
-    global _bot_proc
+    global _bot_proc, _active_identity
     if _bot_proc and _bot_proc.poll() is None:
         logger.info("Bot already running")
         return True
@@ -631,6 +661,8 @@ def start_bot(
     if not stt_url:
         logger.error("No CtrlSpeak STT server available; cannot start bot")
         return False
+
+    target_identity = _normalized_identity(identity)
 
     # Assume SocialRobot vendored under third_party/social_robot
     root = Path(__file__).resolve().parents[1]
@@ -763,16 +795,19 @@ def start_bot(
             errors="replace",
             bufsize=1,
         )
+        _active_identity = target_identity
+        threading.Thread(target=_monitor_bot_exit, args=(_bot_proc,), daemon=True).start()
         time.sleep(0.35)  # give it a moment to open the window
         return True
     except Exception:
         logger.exception("Failed to start SocialRobot")
         _bot_proc = None
+        _active_identity = None
         return False
 
 
 def stop_bot() -> None:
-    global _bot_proc
+    global _bot_proc, _active_identity
     if _bot_proc is None:
         return
     try:
@@ -797,10 +832,19 @@ def stop_bot() -> None:
         logger.exception("Error while stopping SocialRobot")
     finally:
         _bot_proc = None
+        _active_identity = None
 
 
 def is_bot_running() -> bool:
     return _bot_proc is not None and _bot_proc.poll() is None
+
+
+def get_active_identity() -> Optional[str]:
+    """Return the currently running identity name, if any."""
+
+    if not is_bot_running():
+        return None
+    return _active_identity
 
 
 def request_bot_screenshot() -> bool:

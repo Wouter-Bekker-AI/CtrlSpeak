@@ -682,6 +682,82 @@ def on_press(key):
             logger.exception("Failed to show waveform overlay while recording")
 
 
+def handle_transcribed_text_from_hotkey(text: str) -> bool:
+    """Process keywords detected in the hotkey transcription stream.
+
+    Returns ``True`` when the text represents a handled keyword so the
+    transcription should *not* be injected into the focused control.
+    """
+
+    cleaned = text.strip()
+    if not cleaned:
+        return False
+
+    try:
+        from tools import keywords
+        from utils import bot_integration
+    except Exception:
+        logger.exception("Failed to import keyword handlers for hotkey processing")
+        return False
+
+    match = keywords.detect_conversation_start_keyword(cleaned)
+    if match:
+        identity = match.keyword.payload
+        active_identity = bot_integration.get_active_identity()
+        if active_identity and active_identity.lower() == identity.lower():
+            logger.info(
+                "Ignoring hotkey chat-with command for already active identity '%s'",
+                identity,
+            )
+            return True
+        if active_identity:
+            logger.info(
+                "Hotkey command switching bot from '%s' to '%s'",
+                active_identity,
+                identity,
+            )
+            try:
+                bot_integration.stop_bot()
+            except Exception:
+                logger.exception("Failed to stop bot '%s' before relaunch", active_identity)
+        else:
+            logger.info("Hotkey command starting bot '%s'", identity)
+        try:
+            started = bot_integration.start_bot(identity=identity)
+        except Exception:
+            logger.exception("Failed to start bot '%s' from hotkey command", identity)
+            return True
+        if not started:
+            logger.error("Failed to start bot '%s' from hotkey command", identity)
+        return True
+
+    match = keywords.detect_conversation_end_keyword(cleaned)
+    if match:
+        identity = match.keyword.payload
+        active_identity = bot_integration.get_active_identity()
+        if not active_identity:
+            logger.info(
+                "Hotkey goodbye for '%s' ignored because no bot is active",
+                identity,
+            )
+            return True
+        if active_identity.lower() != identity.lower():
+            logger.info(
+                "Hotkey goodbye for '%s' ignored because '%s' is active",
+                identity,
+                active_identity,
+            )
+            return True
+        logger.info("Hotkey command stopping bot '%s'", identity)
+        try:
+            bot_integration.stop_bot()
+        except Exception:
+            logger.exception("Failed to stop bot '%s' from hotkey command", identity)
+        return True
+
+    return False
+
+
 def on_release(key):
     from utils.models import transcribe_audio
     global recording, recording_thread, recording_file_path
@@ -709,8 +785,16 @@ def on_release(key):
             except Exception as exc:
                 notify_error("Transcription failed", format_exception_details(exc)); text = None
             if text:
-                try: insert_text_into_focus(text)
-                except Exception as exc: notify_error("Text insertion failed", format_exception_details(exc))
+                handled_keyword = False
+                try:
+                    handled_keyword = handle_transcribed_text_from_hotkey(text)
+                except Exception:
+                    logger.exception("Hotkey keyword handling failed")
+                if not handled_keyword:
+                    try:
+                        insert_text_into_focus(text)
+                    except Exception as exc:
+                        notify_error("Text insertion failed", format_exception_details(exc))
             try:
                 stop_processing_feedback()
             except Exception:

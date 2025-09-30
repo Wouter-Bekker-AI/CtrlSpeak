@@ -83,11 +83,32 @@ _lockout_cancel_callback: Optional[Callable[[], None]] = None
 # -------- Notification helpers --------
 
 
+def _management_root_if_ready() -> Optional[tk.Tk]:
+    """Return the Tk root when it is safe for the current thread to interact with it."""
+
+    root = tk_root
+    if root is None:
+        return None
+
+    if threading.current_thread() is threading.main_thread():
+        try:
+            if not root.winfo_exists():
+                return None
+        except Exception:
+            logger.exception("Failed to query management UI state on main thread")
+            return None
+    else:
+        if not _management_thread_ready.is_set():
+            return None
+
+    return root
+
+
 def _call_on_management_ui(callback: Callable[[], None], *, log_message: str) -> None:
     """Execute *callback* on the management UI thread."""
 
-    root = tk_root
-    if root is None or not root.winfo_exists():
+    root = _management_root_if_ready()
+    if root is None:
         return
 
     try:
@@ -1187,11 +1208,11 @@ def _initialize_management_ui_on_main_thread() -> None:
 def ensure_management_ui_thread() -> None:
     """Ensure the management UI root exists on the main thread."""
 
-    if tk_root is not None and tk_root.winfo_exists():
+    if _management_root_if_ready() is not None:
         return
 
     with _management_thread_lock:
-        if tk_root is not None and tk_root.winfo_exists():
+        if _management_root_if_ready() is not None:
             return
 
         if threading.current_thread() is threading.main_thread():
@@ -1270,8 +1291,8 @@ def _teardown_management_ui() -> None:
 def request_management_ui_shutdown() -> None:
     """Request the Tk mainloop to exit."""
 
-    root = tk_root
-    if root is None or not root.winfo_exists():
+    root = _management_root_if_ready()
+    if root is None:
         return
 
     def _quit() -> None:
