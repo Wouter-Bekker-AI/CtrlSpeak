@@ -22,15 +22,20 @@ def test_parse_cli_args_auto_setup():
 
 
 def test_acquire_single_instance_lock(tmp_path, monkeypatch):
-    lock_dir = tmp_path / "cfg"
-    lock_dir.mkdir()
+    data_home = tmp_path / "data"
+    config_home = tmp_path / "cfg"
+    data_home.mkdir()
+    config_home.mkdir()
     if system.sys.platform.startswith("win"):
-        monkeypatch.setenv("APPDATA", str(lock_dir))
+        monkeypatch.setenv("APPDATA", str(data_home))
     else:
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(lock_dir))
+        monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
 
     import importlib
+    from utils import config_paths
 
+    importlib.reload(config_paths)
     importlib.reload(system)
 
     assert system.acquire_single_instance_lock() is True
@@ -38,7 +43,7 @@ def test_acquire_single_instance_lock(tmp_path, monkeypatch):
     assert system.acquire_single_instance_lock() is False
     assert system.instance_lock_handle is not None
 
-    lock_path = system.get_config_dir() / system.LOCK_FILENAME
+    lock_path = system.get_data_dir() / system.LOCK_FILENAME
     assert lock_path.exists()
 
     system.release_single_instance_lock()

@@ -6,8 +6,7 @@ This living backlog tracks follow-up work the developer wants to schedule for Ct
 - Add a "look at my cursor" / "look at my mouse" keyword that captures a 640×480 image centered on the cursor and passes it to the assistant agent.
 - Gate cursor- and vision-related keywords so they only trigger when the active assistant has vision capabilities.
 - Integrate a Qwen3 model with tooling support, starting with Gemini CLI interactions and web search actions.
-- Add a LangGraph- or LangChain-style orchestration layer so background agents and tool calls can share a common planner.
-- Introduce a vector database such as Chroma for long-term memory storage and retrieval inside bot identities.
+- Extend automated tests to cover additional LangGraph tool nodes once external integrations land (current coverage focuses on retrieval gating, async persistence, and embedder upgrades).
 - Build a parsing tool that can read local files to gather contextual information for the assistant.
 
 ## Suggested Work

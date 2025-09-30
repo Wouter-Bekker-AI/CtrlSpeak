@@ -14,7 +14,8 @@ Personalities for the bot live under `third_party/social_robot/identities/<name>
 
 - `identity.json` - configuration for the profile (voice, model, prompt settings, optional memory directory).
 - `system_prompt.txt` (or another file referenced by the config) - the text injected as the LLM system prompt when the profile is loaded.
-- `memory/` - reserved space for future long-term memory storage (per-identity state, LangChain vector stores, etc.).
+- Runtime memory lives under `${data_root}/bot_memory/<identity>/`, which CtrlSpeak creates automatically with `conversation/`, `screenshots/`, `chroma/`, and `traces/` subfolders. Packaged builds ignore any legacy `memory/` folders inside the repository tree so all writes land in AppData.
+- Identity-specific defaults live under `${config_root}/identities/<identity>/memory.json`. CtrlSpeak seeds these files with `store_vector_memory: true`, `store_screenshots: true`, `retrieval_top_k: 5`, `retrieval_threshold: 0.75`, `max_vector_items: 5000`, `vector_ttl_days: null`, and `pii_redaction: false` so personas can independently tune retention and privacy.
 
 The loader understands the following `identity.json` keys:
 
@@ -49,6 +50,12 @@ When present, `ollama_options` is merged into the payload that SocialRobot sends
 
 CtrlSpeak applies the same options and hardware preference when it pre-warms the checkpoint via `/generate`, ensuring the residency chosen during warm-up matches the settings SocialRobot will use at runtime.
 
+> **Note**
+> The `memory_dir` field remains in legacy identity configs for compatibility, but CtrlSpeak always resolves runtime storage through the AppData helpers described above. Repository-relative memory paths are ignored so packaged builds stay read-only.
+
+> **Tip**
+> Update `${config_root}/identities/<identity>/memory.json` when you need to disable screenshot storage, change retrieval thresholds, adjust the vector-cap limit, apply a TTL, or enable the PII redactor for a specific persona.
+
 The additional boolean keys control multimodal, cleaning, and future extensibility features:
 
 - `require_text_cleaning` – When `true`, SocialRobot loads the TTS preprocessing agent and rewrites replies before speech. When `false`, replies flow directly to Kokoro and CtrlSpeak skips staging the helper model.
@@ -76,11 +83,25 @@ SocialRobot loads [`tools/keywords.py`](tooling.md) at startup and registers one
 - **chat with `<identity>`** – Immediately relaunches SocialRobot with the target persona through the transcription server so the parent process coordinates the shutdown and restart (requests that target the already-active identity are ignored).
 - **goodbye `<identity>`** – Immediately ends the current conversation and shuts down the SocialRobot process from the CtrlSpeak transcription server so the parent process controls the teardown.
 
-The push-to-talk workflow (hold the right Ctrl key while speaking) shares the same keyword registry. When VAD is idle because no bot session is active, saying “chat with assistant” through the hotkey launches that identity and skips text injection entirely. If another persona is already running, the helper first asks it to exit cooperatively via `utils.bot_integration.request_goodbye()` and falls back to `stop_bot()` only when the child process fails to exit within the timeout. Spoken “goodbye <identity>” commands are now intercepted in the CtrlSpeak main process (the transcription server), which issues the same graceful-then-hard stop sequence used by the tray menu so the parent always holds the shutdown controls. Each shutdown stage emits debug-level entries under `third_party.social_robot.main` in `%APPDATA%\CtrlSpeak\logs\ctrlspeak.log`, so you can see exactly which component executed when diagnosing a stalled goodbye.
+The push-to-talk workflow (hold the right Ctrl key while speaking) shares the same keyword registry. When VAD is idle because no bot session is active, saying “chat with assistant” through the hotkey launches that identity and skips text injection entirely. If another persona is already running, the helper first asks it to exit cooperatively via `utils.bot_integration.request_goodbye()` and falls back to `stop_bot()` only when the child process fails to exit within the timeout. Spoken “goodbye <identity>” commands are now intercepted in the CtrlSpeak main process (the transcription server), which issues the same graceful-then-hard stop sequence used by the tray menu so the parent always holds the shutdown controls. Each shutdown stage emits debug-level entries under `third_party.social_robot.main` in `${data_root}/logs/ctrlspeak.log` (for example, `%APPDATA%\CtrlSpeak\logs\ctrlspeak.log` on Windows), so you can see exactly which component executed when diagnosing a stalled goodbye.
 
 > **Do not** move the goodbye/chat keyword detection back into SocialRobot or another worker thread. Keeping the logic in the CtrlSpeak main process is a hard requirement so the parent can enforce the proven shutdown path. Route any future conversation controls through the same helpers described above and send explicit stdin commands to the bot only after the parent has taken ownership of the request.
 
 When you add new keywords, update `tools/keywords.py`, refresh [`docs/tooling.md`](tooling.md), and adjust the system prompts for any identities that should advertise the new commands. The assistant prompt bundled with CtrlSpeak now explicitly mentions the clipboard trigger and instructs the model to guide users toward the exact phrases when they hint at wanting a capture.
+
+## LangGraph orchestration and persistence
+
+Setting `use_langgraph_memory_orchestrator: true` in `settings.json` (or exporting `CTRLSPK_USE_LANGGRAPH_MEMORY_ORCHESTRATOR=1`) routes every conversation turn through `utils.memory_orchestrator`:
+
+1. **retrieve** – query Chroma for up to `retrieval_top_k` memories above `retrieval_threshold`; empty stores or low scores short-circuit.
+2. **plan_tools** – reserved for future branching/tooling (currently a pass-through node).
+3. **call_tools** – executes planned tools (no-ops today).
+4. **llm** – calls the Ollama client with the existing history plus any retrieved memory preamble.
+5. **persist** – enqueues atomic JSONL appends and Chroma upserts on a background worker so Kokoro playback can start immediately.
+
+Persistence enforces the 10 MB/5-file JSONL rotation, 5 000-vector cap with LRU eviction, optional TTL, and the `pii_redaction` toggle before embedding. Per-turn traces (`run_<timestamp>_<correlation>.json`) and CSV metrics (`retrieval_hits`, `avg_similarity`, `persist_latency_ms`, `evictions`, `lock_wait_ms`) accumulate under `${data_root}/bot_memory/<identity>/traces` for post-mortems. If initialization fails (missing AppData, Chroma errors, LangGraph import issues), SocialRobot prints “LangGraph orchestrator failure; falling back to legacy conversation.”, logs the exception, and resumes the synchronous history writer.
+
+Run `python main.py --health [--health-identity <name>]` to probe the same pipeline. The command verifies data/log root writability, acquires/releases the identity lock, initializes the Chroma collection, and reports embedder metadata. Failures return a non-zero exit code and a JSON payload explaining the failing check.
 
 ## SocialRobot entrypoint responsibilities
 
@@ -147,13 +168,13 @@ Launching Chat with Bot from the management window now verifies that the Ollama 
 
 ## Screenshot workflow
 
-When you launch an identity with `vision: true` (for example the bundled **Assistant** persona) and say “look at my screen,” SocialRobot captures the current desktop, stores a PNG copy under the identity’s `memory/screenshots` directory, and forwards the encoded image to the configured Ollama model. Saying “look at my clipboard” (or choosing **Look at my Clipboard** from the floating logo) pulls the most recent image from the system clipboard via `tools/vision.py` and follows the same storage and upload workflow. Keyword detection for both phrases lives in `tools/keywords.py`, which keeps the trigger vocabulary centralized as new commands are added. Both routes annotate history entries with the saved file path and the capture source so downstream agents can tell whether the data came from a screenshot or a clipboard snip. If a capture fails—because PyAutoGUI cannot access the display, the clipboard has no image, or dependencies are missing—the bot logs the issue and continues as a text-only exchange. Identities with `vision: false` skip these hooks entirely; the floating logo omits both context-menu options and voice commands fall back to a standard text-only exchange.
+When you launch an identity with `vision: true` (for example the bundled **Assistant** persona) and say “look at my screen,” SocialRobot captures the current desktop. If that persona’s `store_screenshots` toggle remains `true`, the PNG copy lands under `${data_root}/bot_memory/<identity>/screenshots` before being forwarded to the Ollama model; otherwise the capture is streamed to the LLM without hitting disk. Saying “look at my clipboard” (or choosing **Look at my Clipboard** from the floating logo) pulls the most recent image from the system clipboard via `tools/vision.py` and follows the same storage-or-stream workflow. Keyword detection for both phrases lives in `tools/keywords.py`, which keeps the trigger vocabulary centralized as new commands are added. Both routes annotate history entries with the saved file path (when persisted) and the capture source so downstream agents can tell whether the data came from a screenshot or a clipboard snip. If a capture fails—because PyAutoGUI cannot access the display, the clipboard has no image, or dependencies are missing—the bot logs the issue and continues as a text-only exchange. Identities with `vision: false` skip these hooks entirely; the floating logo omits both context-menu options and voice commands fall back to a standard text-only exchange.
 
 As soon as you pick an identity, CtrlSpeak now pings the configured Ollama endpoint with that profile’s model so the checkpoint is fully loaded before you speak. This avoids the first-turn lag that previously occurred while Ollama initialized the weights after receiving the initial utterance.
 
 ## Clearing stored memory
 
-Use the **Clear Bot Memory** button in the management window when you need to wipe a persona’s stored context. After you choose an identity and confirm the prompt, CtrlSpeak removes that profile’s `memory/conversation.json` file and deletes the entire `memory/screenshots` directory so no cached captures remain. If neither artifact exists, the dialog reports that there is nothing to clear.
+Use the **Clear Bot Memory** button in the management window when you need to wipe a persona’s stored context. After you choose an identity and confirm the prompt, CtrlSpeak removes that profile’s `${data_root}/bot_memory/<identity>/conversation/conversation.jsonl` log (plus any rotated archives) and deletes the `screenshots/`, `chroma/`, and `traces/` subdirectories so cached captures, vector embeddings, traces, and metrics are cleared. If nothing exists under the identity’s AppData tree, the dialog reports that there is nothing to clear.
 
 ## GUI Workflow
 

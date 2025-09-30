@@ -6,7 +6,9 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import threading
+import atexit
 from pathlib import Path
 from typing import Optional, List, Dict, Pattern
 
@@ -27,6 +29,10 @@ from PySide6.QtCore import QTimer
 
 from tools import keywords, vision
 from utils.config_paths import get_logger
+from utils.io_atomic import AtomicWriteError, atomic_append_lines
+from utils.memory_lock import IdentityLock, IdentityLockError, probe_lock_path
+from utils.memory_orchestrator import MemoryOrchestrator
+from utils.memory_settings import load_identity_settings
 
 
 logger = get_logger(__name__)
@@ -34,6 +40,56 @@ logger = get_logger(__name__)
 IDENTITIES_ROOT = Path(__file__).resolve().parent / "identities"
 DEFAULT_IDENTITY_NAME = "default"
 DEFAULT_SYSTEM_PROMPT = "You are a cheerful robotic companion speaking concisely."
+
+CONVERSATION_MAX_BYTES = 10 * 1024 * 1024
+CONVERSATION_KEEP = 5
+
+_identity_lock_handle: Optional[IdentityLock] = None
+_memory_orchestrator: Optional[MemoryOrchestrator] = None
+
+
+def _release_identity_lock_handle() -> None:
+    global _identity_lock_handle
+    if _identity_lock_handle is not None:
+        _identity_lock_handle.release()
+        _identity_lock_handle = None
+
+
+def _shutdown_orchestrator() -> None:
+    global _memory_orchestrator
+    if _memory_orchestrator is None:
+        return
+    try:
+        _memory_orchestrator.close()
+    except Exception:
+        logger.exception("Failed to close memory orchestrator")
+    finally:
+        _memory_orchestrator = None
+
+
+def _ensure_identity_lock(identity_name: str) -> None:
+    global _identity_lock_handle
+    lock_path_hint = os.getenv("CTRLSPK_IDENTITY_LOCK_PATH")
+    parent_locked = os.getenv("CTRLSPK_PARENT_LOCKED") == "1"
+
+    if parent_locked and lock_path_hint:
+        try:
+            if probe_lock_path(Path(lock_path_hint)):
+                return
+        except Exception:
+            return
+    if parent_locked:
+        return
+
+    try:
+        lock = IdentityLock(identity_name)
+        lock.acquire(timeout=0.0)
+    except IdentityLockError:
+        print("-> Identity in use. Close the running session before starting another.")
+        sys.exit(3)
+
+    _identity_lock_handle = lock
+    atexit.register(_release_identity_lock_handle)
 
 _VISION_PROMPT_SUFFIX = {
     "screen": "Please describe the attached screenshot and let me know anything important you notice.",
@@ -150,14 +206,14 @@ def resolve_identity(args) -> tuple[IdentityProfile, dict]:
     if not system_prompt:
         system_prompt = DEFAULT_SYSTEM_PROMPT
 
-    memory_dir = args.memory_dir or config.get("memory_dir")
+    memory_dir = args.memory_dir or os.getenv("CTRLSPK_BOT_MEMORY_ROOT")
     memory_path: Optional[Path] = None
     if memory_dir:
         memory_path = Path(memory_dir)
-        if not memory_path.is_absolute():
-            memory_path = (identity_path / memory_dir).resolve()
         try:
-            memory_path.mkdir(parents=True, exist_ok=True)
+            memory_path = memory_path.expanduser().resolve()
+            for sub in ("conversation", "screenshots", "chroma", "traces"):
+                (memory_path / sub).mkdir(parents=True, exist_ok=True)
         except Exception as exc:
             print(f"-> Failed to ensure memory directory {memory_path}: {exc}")
             memory_path = None
@@ -250,26 +306,49 @@ def parse_args():
     return p.parse_args()
 
 def load_history(memory_path: Optional[Path]) -> List[dict]:
-    if memory_path:
-        history_file = memory_path / "conversation.json"
-        if history_file.exists():
-            try:
-                return json.loads(history_file.read_text(encoding="utf-8"))
-            except Exception as exc:
-                print(f"-> Failed to load conversation history: {exc}")
-    return []
+    if not memory_path:
+        return []
 
-def save_history(memory_path: Optional[Path], history: List[dict]) -> None:
-    if memory_path:
-        try:
-            history_file = memory_path / "conversation.json"
-            history_file.write_text(json.dumps(history, indent=2), encoding="utf-8")
-        except Exception as exc:
-            print(f"-> Failed to save conversation history: {exc}")
+    history_file = memory_path / "conversation" / "conversation.jsonl"
+    entries: List[dict] = []
+    try:
+        with history_file.open("r", encoding="utf-8") as src:
+            for raw_line in src:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except Exception as exc:
+                    print(f"-> Ignoring malformed history line: {exc}")
+    except FileNotFoundError:
+        return []
+    except Exception as exc:
+        print(f"-> Failed to load conversation history: {exc}")
+    return entries
+
+
+def save_history(memory_path: Optional[Path], entries: List[dict]) -> None:
+    if not memory_path or not entries:
+        return
+
+    history_file = memory_path / "conversation" / "conversation.jsonl"
+    try:
+        atomic_append_lines(
+            history_file,
+            [json.dumps(entry, ensure_ascii=False) for entry in entries],
+            max_bytes=CONVERSATION_MAX_BYTES,
+            keep=CONVERSATION_KEEP,
+        )
+    except AtomicWriteError as exc:
+        print(f"-> Failed to save conversation history: {exc}")
+
 
 def main():
     args = parse_args()
     profile, config = resolve_identity(args)
+
+    _ensure_identity_lock(profile.name)
 
     identities_root = _resolve_identities_root(args.identities_dir)
     available_identities = _list_identity_names(identities_root)
@@ -302,6 +381,44 @@ def main():
     else:
         preprocessing_agent = None
         print("-> Identity does not require text cleaning; skipping TTS preprocessing agent.")
+
+    identity_settings = load_identity_settings(profile.name)
+    store_screenshots = bool(identity_settings.get("store_screenshots", True))
+
+    use_orchestrator = os.getenv("CTRLSPK_USE_LANGGRAPH_MEMORY_ORCHESTRATOR") == "1"
+    metrics_env = os.getenv("CTRLSPK_METRICS_PATH")
+    if metrics_env:
+        metrics_path = Path(metrics_env).expanduser()
+    elif profile.memory_path:
+        metrics_path = profile.memory_path / "traces" / "metrics.csv"
+    else:
+        metrics_path = Path(tempfile.gettempdir()) / "ctrlspeak_metrics.csv"
+    orchestrator: Optional[MemoryOrchestrator] = None
+    global _memory_orchestrator
+    if use_orchestrator and profile.memory_path is None:
+        print("-> LangGraph orchestrator requires an AppData memory directory; disabling.")
+        use_orchestrator = False
+    if use_orchestrator and profile.memory_path is not None:
+        try:
+            metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            orchestrator = MemoryOrchestrator(
+                profile.name,
+                ollama_client,
+                memory_dir=profile.memory_path,
+                metrics_path=metrics_path,
+                identity_settings=identity_settings,
+            )
+            _memory_orchestrator = orchestrator
+            atexit.register(_shutdown_orchestrator)
+            print("-> LangGraph memory orchestrator enabled.")
+        except Exception as exc:
+            print(f"-> Failed to initialize LangGraph orchestrator: {exc}")
+            logger.exception("Failed to initialize LangGraph orchestrator")
+            orchestrator = None
+            use_orchestrator = False
 
     if args.test_wav:
         import wave
@@ -621,6 +738,8 @@ def main():
                 animator.update_amplitude(0.0)
                 return
 
+        nonlocal use_orchestrator
+
         capture_result: Optional[vision.VisionCapture] = None
         augmented_text = cleaned
         capture_request = capture_override
@@ -642,7 +761,7 @@ def main():
 
         if capture_request:
             storage_dir: Optional[Path] = None
-            if profile.memory_path:
+            if profile.memory_path and store_screenshots:
                 storage_dir = profile.memory_path / "screenshots"
 
             if capture_request == "screen":
@@ -677,44 +796,70 @@ def main():
             vision_path = capture_result.saved_path
             vision_source = capture_result.source
 
-        history = load_history(profile.memory_path)
-        try:
-            user_content: Optional[List[dict]] = None
-            if vision_b64:
-                user_content = [
-                    {"type": "text", "text": augmented_text},
-                    {"type": "image", "image": vision_b64},
-                ]
-            llm_response = ollama_client.query(
-                augmented_text,
-                history=history,
-                content=user_content,
-            )
-        except OllamaUnavailableError as exc:
-            failure_message = str(exc)
-            print(f"-> Ollama error: {failure_message}")
-            animator.update_amplitude(0.0)
-            return
-        if not llm_response.strip():
-            animator.update_amplitude(0.0)
-            return
+        user_content: Optional[List[dict]] = None
+        if vision_b64:
+            user_content = [
+                {"type": "text", "text": augmented_text},
+                {"type": "image", "image": vision_b64},
+            ]
 
-        history_entry: dict
-        if user_content is not None:
-            history_entry = {"role": "user", "content": user_content}
-            metadata: dict[str, str] = {}
+        vision_metadata: Optional[dict[str, str]] = None
+        if vision_source or vision_path:
+            vision_metadata = {}
             if vision_source:
-                metadata["vision_source"] = vision_source
+                vision_metadata["vision_source"] = vision_source
             if vision_path:
-                metadata["vision_file"] = str(vision_path)
-            if metadata:
-                history_entry["metadata"] = metadata
-        else:
-            history_entry = {"role": "user", "content": transcript}
+                vision_metadata["vision_file"] = str(vision_path)
+            if not vision_metadata:
+                vision_metadata = None
 
-        history.append(history_entry)
-        history.append({"role": "assistant", "content": llm_response})
-        save_history(profile.memory_path, history)
+        llm_response = ""
+        used_orchestrator = False
+        if use_orchestrator and orchestrator is not None:
+            try:
+                turn_result = orchestrator.run_turn(
+                    transcript,
+                    augmented_text=augmented_text,
+                    content_blocks=user_content,
+                    vision_metadata=vision_metadata,
+                )
+                llm_response = turn_result.response_text
+                used_orchestrator = True
+            except Exception as exc:
+                print("-> LangGraph orchestrator failure; falling back to legacy conversation.")
+                logger.exception("LangGraph orchestrator failure", exc_info=exc)
+                use_orchestrator = False
+                _shutdown_orchestrator()
+
+        if not used_orchestrator:
+            history = load_history(profile.memory_path)
+            history_baseline = len(history)
+            try:
+                llm_response = ollama_client.query(
+                    augmented_text,
+                    history=history,
+                    content=user_content,
+                )
+            except OllamaUnavailableError as exc:
+                failure_message = str(exc)
+                print(f"-> Ollama error: {failure_message}")
+                animator.update_amplitude(0.0)
+                return
+            if not llm_response.strip():
+                animator.update_amplitude(0.0)
+                return
+
+            history_entry: dict
+            if user_content is not None:
+                history_entry = {"role": "user", "content": user_content}
+                if vision_metadata:
+                    history_entry["metadata"] = vision_metadata
+            else:
+                history_entry = {"role": "user", "content": transcript}
+
+            history.append(history_entry)
+            history.append({"role": "assistant", "content": llm_response})
+            save_history(profile.memory_path, history[history_baseline:])
 
         processed_response = llm_response
         if preprocessing_agent is not None:

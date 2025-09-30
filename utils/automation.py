@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 
 from huggingface_hub import snapshot_download
 
-from utils.config_paths import asset_path, get_config_dir, get_logger
+from utils.config_paths import asset_path, get_data_dir, get_logger
 from utils.system import (
     acquire_single_instance_lock,
     load_settings,
@@ -40,7 +40,7 @@ from utils.models import (
 logger = get_logger(__name__)
 
 def _automation_root() -> Path:
-    root = get_config_dir() / "automation"
+    root = get_data_dir() / "automation"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -113,11 +113,7 @@ def _clear_state() -> None:
 
 
 def _config_dir_path() -> Path:
-    if sys.platform.startswith("win"):
-        base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
-    else:
-        base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return base / "CtrlSpeak"
+    return get_data_dir()
 
 
 # ---------------------------------------------------------------------------

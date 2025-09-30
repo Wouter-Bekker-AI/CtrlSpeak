@@ -7,13 +7,13 @@ CtrlSpeak ships with several test suites that cover different parts of the produ
 The automation flow is an end-to-end regression harness implemented in `utils/automation.py`. Running it performs the same staged checks that a fresh install would execute when provisioning a GPU-ready workstation. It is ideal for verifying that a machine can host the full CtrlSpeak stack without touching the GUI.
 
 ### What it does
-1. **Model staging** - Ensures the default Whisper `small` model is present under `%APPDATA%\CtrlSpeak\models`, downloading it when missing.
-2. **CUDA reuse/installation** - Copies any existing CUDA wheel assets from the active Python environment into `%APPDATA%\CtrlSpeak\cuda\12.3`. If the runtime is still not ready it installs the NVIDIA wheels (`nvidia-cuda-runtime-cu12`, `nvidia-cublas-cu12`, `nvidia-cudnn-cu12`) and re-validates them.
+1. **Model staging** - Ensures the default Whisper `small` model is present under `${data_root}/models`, downloading it when missing.
+2. **CUDA reuse/installation** - Copies any existing CUDA wheel assets from the active Python environment into `${data_root}/cuda/12.3`. If the runtime is still not ready it installs the NVIDIA wheels (`nvidia-cuda-runtime-cu12`, `nvidia-cublas-cu12`, `nvidia-cudnn-cu12`) and re-validates them.
 3. **CPU transcription check** - Forces the device preference to CPU and transcribes the bundled `assets/test.wav` clip, logging the recognized text.
 4. **GPU transcription check** - Switches to CUDA (if available) and repeats the transcription to confirm GPU inference works end-to-end.
-5. **Artifact export** - Writes a consolidated transcript report to `%APPDATA%\CtrlSpeak\automation\artifacts\automation_run_YYYYMMDD-HHMMSS.txt` including the canonical transcript and simulated text-injection outputs.
+5. **Artifact export** - Writes a consolidated transcript report to `${data_root}/automation/artifacts/automation_run_YYYYMMDD-HHMMSS.txt` including the canonical transcript and simulated text-injection outputs.
 
-Progress and failure diagnostics are recorded in `%APPDATA%\CtrlSpeak\logs\ctrlspeak.log`. If a stage fails the flow halts immediately, leaving `automation_state.json` in `%APPDATA%\CtrlSpeak\automation` so a rerun can resume from the failed step after the underlying issue is resolved.
+Progress and failure diagnostics are recorded in `${data_root}/logs/ctrlspeak.log` (for example, %APPDATA%\CtrlSpeak\logs\ctrlspeak.log on Windows). If a stage fails the flow halts immediately, leaving `automation_state.json` in `${data_root}/automation` so a rerun can resume from the failed step after the underlying issue is resolved.
 
 ### How to run
 ```powershell
@@ -28,7 +28,7 @@ Progress and failure diagnostics are recorded in `%APPDATA%\CtrlSpeak\logs\ctrls
 
 ## 2. Core Headless Pytest Suite (`-m core_headless`)
 
-**Coverage:** Configuration helpers, CLI parsing, discovery utilities, and other logic that requires no GUI, audio, or large downloads.
+**Coverage:** Configuration helpers, CLI parsing, discovery utilities, AppData path resolution, atomic IO, per-identity memory settings, vector store retention/TTL enforcement, LangGraph orchestrator retrieval gating, and other logic that requires no GUI, audio, or large downloads.
 
 **Invocation:**
 ```bash

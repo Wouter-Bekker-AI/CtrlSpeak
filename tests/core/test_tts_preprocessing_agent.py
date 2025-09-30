@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 import types
 
+import requests  # Ensure the real package is loaded before optional stubbing
+
 import pytest
 
 SOCIAL_ROBOT_DIR = Path(__file__).resolve().parents[2] / "third_party" / "social_robot"
@@ -13,6 +15,7 @@ if str(SOCIAL_ROBOT_DIR) not in sys.path:
 
 if "requests" not in sys.modules:
     requests_stub = types.ModuleType("requests")
+    requests_stub.__path__ = []  # type: ignore[attr-defined]
 
     class HTTPError(Exception):
         def __init__(self, *args, response=None, request=None):  # pragma: no cover - simple stub
@@ -20,13 +23,23 @@ if "requests" not in sys.modules:
             self.response = response
             self.request = request
 
+    class Response:  # pragma: no cover - simple stub
+        def __init__(self, status_code: int = 200):
+            self.status_code = status_code
+
     requests_stub.HTTPError = HTTPError
+    requests_stub.Response = Response
+    exceptions_module = types.ModuleType("requests.exceptions")
+    exceptions_module.HTTPError = HTTPError
+    exceptions_module.RequestException = HTTPError
+    requests_stub.exceptions = exceptions_module  # type: ignore[attr-defined]
 
     def _unused_post(*args, **kwargs):  # pragma: no cover - simple stub
         raise RuntimeError("requests stub invoked")
 
     requests_stub.post = _unused_post
     sys.modules["requests"] = requests_stub
+    sys.modules["requests.exceptions"] = exceptions_module
 
 from background_agents.tts_preprocessing_agent.background_agent import (
     TTSPreprocessingAgent,

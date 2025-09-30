@@ -9,8 +9,10 @@ import uuid
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, Optional
-import tempfile
 import threading
+
+from utils.io_atomic import AtomicWriteError, atomic_write_text
+APP_DIR_NAME = "CtrlSpeak"
 
 CONFIG_FILENAME = "settings.json"
 LOG_DIR_NAME = "logs"
@@ -25,32 +27,50 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "device_preference": "cpu",
     "input_device": None,
     "model_name": "small",
+    "use_langgraph_memory_orchestrator": False,
 }
 
 settings_lock = threading.RLock()
 settings: Dict[str, object] = {}
 
-def get_config_dir() -> Path:
-    """
-    All persistent data goes here:
-      %APPDATA%/CtrlSpeak (Windows)
-      $XDG_CONFIG_HOME/CtrlSpeak or ~/.config/CtrlSpeak (others)
-    Subfolders used:
-      models/  cuda/  temp/  (plus settings.json + logs)
-    """
+def _windows_appdata() -> Path:
+    return Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+
+
+def _posix_config_home() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+
+
+def _posix_data_home() -> Path:
+    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+
+
+def get_data_dir() -> Path:
+    """Return the root for runtime data across all platforms."""
     if sys.platform.startswith("win"):
-        base_dir = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+        base_dir = _windows_appdata()
     else:
-        base_dir = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    config_dir = base_dir / "CtrlSpeak"
+        base_dir = _posix_data_home()
+    data_dir = base_dir / APP_DIR_NAME
+    data_dir.mkdir(parents=True, exist_ok=True)
+    for sub in ("models", "cuda", "bot_memory", LOG_DIR_NAME, "temp"):
+        (data_dir / sub).mkdir(parents=True, exist_ok=True)
+    return data_dir
+
+
+def get_config_dir() -> Path:
+    """Return the configuration root, distinct from runtime data on POSIX."""
+    if sys.platform.startswith("win"):
+        base_dir = _windows_appdata()
+    else:
+        base_dir = _posix_config_home()
+    config_dir = base_dir / APP_DIR_NAME
     config_dir.mkdir(parents=True, exist_ok=True)
-    for sub in ("models", "cuda", "temp", LOG_DIR_NAME):
-        (config_dir / sub).mkdir(parents=True, exist_ok=True)
     return config_dir
 
 
 def get_logs_dir() -> Path:
-    logs_dir = get_config_dir() / LOG_DIR_NAME
+    logs_dir = get_data_dir() / LOG_DIR_NAME
     logs_dir.mkdir(parents=True, exist_ok=True)
     return logs_dir
 
@@ -63,7 +83,7 @@ def get_config_file_path() -> Path:
     return get_config_dir() / CONFIG_FILENAME
 
 def get_temp_dir() -> Path:
-    temp_dir = get_config_dir() / "temp"
+    temp_dir = get_data_dir() / "temp"
     temp_dir.mkdir(parents=True, exist_ok=True)
     return temp_dir
 
@@ -98,8 +118,8 @@ def save_settings() -> None:
     with settings_lock:
         snapshot = dict(settings)
     try:
-        path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
-    except Exception:
+        atomic_write_text(path, json.dumps(snapshot, indent=2))
+    except AtomicWriteError:
         get_logger().exception("Unable to save settings to %s", path)
 
 
