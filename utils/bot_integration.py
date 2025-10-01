@@ -13,14 +13,12 @@ from urllib.parse import urlparse, urlunparse
 
 import requests
 
-from utils.config_paths import get_logger
+from utils.config_paths import get_logger, settings, settings_lock
 from utils.system import (
     CLIENT_ONLY_BUILD,
     get_best_server,
     load_settings,
     save_settings,
-    settings,
-    settings_lock,
     start_server,
     ui_close_lockout_window,
     ui_show_lockout_window,
@@ -28,6 +26,9 @@ from utils.system import (
 )
 
 from utils.models import DEFAULT_MODEL_NAME, WelcomeWindow
+from utils.memory_lock import IdentityLock, IdentityLockError
+from utils.memory_paths import get_bot_memory_dir, get_bot_traces_dir
+from utils.metrics import MetricsRecorder
 
 def _ensure_server_defaults() -> None:
     """Make sure settings permit running the embedded server."""
@@ -57,6 +58,7 @@ _TTS_PREPROCESSOR_DIR = _BACKGROUND_AGENTS_ROOT / "tts_preprocessing_agent"
 _bot_proc: Optional[subprocess.Popen] = None
 _bot_stdin_lock = threading.Lock()
 _active_identity: Optional[str] = None
+_identity_lock: Optional[IdentityLock] = None
 
 _OLLAMA_HARDWARE_CHOICES = {"cpu_only", "cpu_and_gpu", "gpu_only"}
 
@@ -641,7 +643,7 @@ def _normalized_identity(identity: Optional[str]) -> str:
 
 
 def _monitor_bot_exit(proc: subprocess.Popen) -> None:
-    global _active_identity
+    global _active_identity, _identity_lock
     try:
         proc.wait()
     except Exception:
@@ -649,6 +651,16 @@ def _monitor_bot_exit(proc: subprocess.Popen) -> None:
     finally:
         if _bot_proc is not None and _bot_proc is proc:
             _active_identity = None
+            if _identity_lock is not None:
+                _identity_lock.release()
+                _identity_lock = None
+
+
+def _release_identity_lock() -> None:
+    global _identity_lock
+    if _identity_lock is not None:
+        _identity_lock.release()
+        _identity_lock = None
 
 
 def start_bot(
@@ -669,7 +681,7 @@ def start_bot(
     overriding the Kokoro voice or LLM settings, or pointing at alternate identity
     directories and prompt files.
     """
-    global _bot_proc, _active_identity
+    global _bot_proc, _active_identity, _identity_lock
     if _bot_proc and _bot_proc.poll() is None:
         logger.info("Bot already running")
         return True
@@ -714,6 +726,37 @@ def start_bot(
     if not _ensure_identity_llm_ready(identity, identities_dir, llm_model, llm_url):
         return False
 
+    memory_root: Optional[Path]
+    if memory_dir:
+        try:
+            candidate = Path(memory_dir).expanduser()
+            candidate.mkdir(parents=True, exist_ok=True)
+            memory_root = candidate.resolve()
+        except Exception:
+            logger.exception("Failed to prepare explicit memory directory %s", memory_dir)
+            return False
+    else:
+        try:
+            memory_root = get_bot_memory_dir(target_identity)
+        except Exception:
+            logger.exception("Failed to prepare memory root for identity %s", target_identity)
+            return False
+
+    metrics_path = get_bot_traces_dir(target_identity) / "metrics.csv"
+    lock_started = time.perf_counter()
+    try:
+        lock = IdentityLock(target_identity)
+        lock.acquire(timeout=0.0)
+    except IdentityLockError:
+        logger.error("Identity '%s' is already in use.", target_identity)
+        return False
+    _identity_lock = lock
+    lock_wait_ms = (time.perf_counter() - lock_started) * 1000.0
+    try:
+        MetricsRecorder(metrics_path).record("bootstrap", {"lock_wait_ms": round(lock_wait_ms, 2)})
+    except Exception:
+        logger.debug("Failed to record lock wait metric", exc_info=True)
+
     agent_llm_url: Optional[str] = None
     agent_llm_model: Optional[str] = None
     agent_options: Dict[str, Any] = {}
@@ -727,6 +770,7 @@ def start_bot(
             agent_hardware,
         ) = _load_preprocessor_identity()
         if not _ensure_preprocessor_llm_ready(agent_llm_model, agent_llm_url):
+            _release_identity_lock()
             return False
     else:
         logger.info(
@@ -794,6 +838,20 @@ def start_bot(
     if identities_dir:
         env["BOT_IDENTITIES_DIR"] = identities_dir
 
+    with settings_lock:
+        use_langgraph = bool(settings.get("use_langgraph_memory_orchestrator", False))
+    if use_langgraph:
+        env["CTRLSPK_USE_LANGGRAPH_MEMORY_ORCHESTRATOR"] = "1"
+
+    env["CTRLSPK_METRICS_PATH"] = str(metrics_path)
+
+    memory_dir_arg = str(memory_root)
+    env["CTRLSPK_BOT_MEMORY_ROOT"] = memory_dir_arg
+    env["BOT_MEMORY_DIR"] = memory_dir_arg
+    if _identity_lock is not None:
+        env["CTRLSPK_PARENT_LOCKED"] = "1"
+        env["CTRLSPK_IDENTITY_LOCK_PATH"] = str(_identity_lock.lock_path)
+
     cmd = [sys.executable, str(entry), "--stt", "remote", "--stt-url", stt_url]
     if identity:
         cmd.extend(["--identity", identity])
@@ -807,8 +865,8 @@ def start_bot(
         cmd.append("--no-read-prompt-from-file")
     if system_prompt:
         cmd.extend(["--system-prompt", system_prompt])
-    if memory_dir:
-        cmd.extend(["--memory-dir", memory_dir])
+    if memory_dir_arg:
+        cmd.extend(["--memory-dir", memory_dir_arg])
 
     logger.info("Starting SocialRobot: %s", " ".join(cmd))
     try:
@@ -830,6 +888,7 @@ def start_bot(
         logger.exception("Failed to start SocialRobot")
         _bot_proc = None
         _active_identity = None
+        _release_identity_lock()
         return False
 
 
@@ -860,6 +919,7 @@ def stop_bot() -> None:
     finally:
         _bot_proc = None
         _active_identity = None
+        _release_identity_lock()
 
 
 def request_goodbye(identity: Optional[str] = None, timeout: float = 3.0) -> bool:
@@ -1039,6 +1099,18 @@ def run_bot_test(
                 state,
             )
 
+    resolved_identity = (identity or _DEFAULT_IDENTITY_NAME).strip() or _DEFAULT_IDENTITY_NAME
+    if memory_dir:
+        try:
+            candidate = Path(memory_dir).expanduser()
+            candidate.mkdir(parents=True, exist_ok=True)
+            memory_root = candidate.resolve()
+        except Exception:
+            logger.exception("Failed to prepare explicit memory directory %s", memory_dir)
+            return "Error: Failed to prepare memory directory."
+    else:
+        memory_root = get_bot_memory_dir(resolved_identity)
+
     env = os.environ.copy()
     env["CTRLSPEAK_STT_URL"] = stt_url
     env["BOT_STT"] = "remote"
@@ -1052,6 +1124,8 @@ def run_bot_test(
         env["BOT_IDENTITY"] = identity
     if identities_dir:
         env["BOT_IDENTITIES_DIR"] = identities_dir
+    env["CTRLSPK_BOT_MEMORY_ROOT"] = str(memory_root)
+    env["BOT_MEMORY_DIR"] = str(memory_root)
 
     cmd = [sys.executable, str(entry), "--stt", "remote", "--stt-url", stt_url]
     if identity:
@@ -1066,8 +1140,7 @@ def run_bot_test(
         cmd.append("--no-read-prompt-from-file")
     if system_prompt:
         cmd.extend(["--system-prompt", system_prompt])
-    if memory_dir:
-        cmd.extend(["--memory-dir", memory_dir])
+    cmd.extend(["--memory-dir", str(memory_root)])
     cmd.extend(["--test-wav", wav_path])
 
     logger.info("Running SocialRobot test: %s", " ".join(cmd))

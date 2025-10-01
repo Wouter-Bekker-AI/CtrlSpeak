@@ -45,6 +45,13 @@ def test_handle_transcription_keyword_stops_active_identity(bot_module):
     assert calls == [("request", "assistant")]
 
 
+def test_handle_transcription_keyword_allows_punctuation(bot_module):
+    handled, text = system.handle_transcription_keyword("goodbye, assistant")
+
+    assert handled is True
+    assert text == ""
+
+
 def test_handle_transcription_keyword_falls_back_to_stop(bot_module):
     request_calls: list[tuple[str, str | None]] = []
     stop_calls: list[str] = []
@@ -135,6 +142,24 @@ def test_handle_transcription_keyword_starts_when_no_identity_active(bot_module)
     bot_module.start_bot = _start_bot
 
     handled, text = system.handle_transcription_keyword("chat with assistant")
+
+    assert handled is True
+    assert text == ""
+    assert start_calls == ["assistant"]
+
+
+def test_handle_transcription_keyword_supports_fuzzy_chat(bot_module):
+    bot_module.get_active_identity = lambda: None
+
+    start_calls: list[str | None] = []
+
+    def _start_bot(*, identity: str | None = None, **_kwargs):
+        start_calls.append(identity)
+        return True
+
+    bot_module.start_bot = _start_bot
+
+    handled, text = system.handle_transcription_keyword("could you chat was assistant now")
 
     assert handled is True
     assert text == ""

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import difflib
 import re
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Optional, Sequence
+
+
+DEFAULT_FUZZY_THRESHOLD = 0.85
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,6 +19,8 @@ class Keyword:
     pattern: re.Pattern[str]
     category: str
     payload: str
+    fuzzy_targets: tuple[str, ...] = ()
+    fuzzy_threshold: float = DEFAULT_FUZZY_THRESHOLD
 
     def search(self, text: str) -> Optional[re.Match[str]]:
         """Search ``text`` for the keyword pattern."""
@@ -27,7 +33,7 @@ class KeywordMatch:
     """A matched keyword along with the regex match details."""
 
     keyword: Keyword
-    match: re.Match[str]
+    match: Optional[re.Match[str]] = None
 
 
 _LOOK_AT_SCREEN = Keyword(
@@ -35,6 +41,7 @@ _LOOK_AT_SCREEN = Keyword(
     pattern=re.compile(r"\blook at my screen\b", re.IGNORECASE),
     category="vision",
     payload="screen",
+    fuzzy_targets=("look at my screen",),
 )
 
 _LOOK_AT_CLIPBOARD = Keyword(
@@ -42,7 +49,16 @@ _LOOK_AT_CLIPBOARD = Keyword(
     pattern=re.compile(r"\blook at my clipboard\b", re.IGNORECASE),
     category="vision",
     payload="clipboard",
+    fuzzy_targets=("look at my clipboard",),
 )
+
+_FUZZY_CLIPBOARD_PATTERN = re.compile(
+    r"\blook at my\s+(?P<target>[A-Za-z]+(?:[\s_-]+[A-Za-z]+)?)\b",
+    re.IGNORECASE,
+)
+
+_CLIPBOARD_CANONICAL = "clipboard"
+_CLIPBOARD_FUZZY_THRESHOLD = 0.88
 
 VISION_KEYWORDS: tuple[Keyword, ...] = (
     _LOOK_AT_SCREEN,
@@ -55,11 +71,8 @@ _CONVERSATION_END_KEYWORDS: tuple[Keyword, ...] = ()
 ALL_KEYWORDS: tuple[Keyword, ...] = VISION_KEYWORDS
 
 
-def _identity_pattern_tokens(name: str) -> str:
-    tokens = [token for token in re.split(r"[_\s]+", name.strip()) if token]
-    if not tokens:
-        return ""
-    return r"\s+".join(re.escape(token) for token in tokens)
+def _identity_tokens(name: str) -> list[str]:
+    return [token for token in re.split(r"[_\s]+", name.strip()) if token]
 
 
 def _build_identity_keywords(identities: Sequence[str]) -> tuple[tuple[Keyword, ...], tuple[Keyword, ...]]:
@@ -75,9 +88,11 @@ def _build_identity_keywords(identities: Sequence[str]) -> tuple[tuple[Keyword, 
             continue
         seen_payloads.add(normalized_payload)
 
-        pattern_tokens = _identity_pattern_tokens(normalized_payload)
-        if not pattern_tokens:
+        identity_tokens = _identity_tokens(normalized_payload)
+        if not identity_tokens:
             continue
+        pattern_tokens = r"\s+".join(re.escape(token) for token in identity_tokens)
+        fuzzy_identity = " ".join(token.lower() for token in identity_tokens)
 
         start_keywords.append(
             Keyword(
@@ -88,6 +103,7 @@ def _build_identity_keywords(identities: Sequence[str]) -> tuple[tuple[Keyword, 
                 ),
                 category="conversation_start",
                 payload=normalized_payload,
+                fuzzy_targets=(f"chat with {fuzzy_identity}",),
             )
         )
         end_keywords.append(
@@ -99,6 +115,7 @@ def _build_identity_keywords(identities: Sequence[str]) -> tuple[tuple[Keyword, 
                 ),
                 category="conversation_end",
                 payload=normalized_payload,
+                fuzzy_targets=(f"goodbye {fuzzy_identity}",),
             )
         )
 
@@ -136,10 +153,18 @@ def iter_keyword_matches(text: str, keywords: Iterable[Keyword] = ALL_KEYWORDS) 
     if not cleaned:
         return
 
+    fuzzy_tokens = _tokenize_for_fuzzy(cleaned)
+
     for keyword in keywords:
         match = keyword.search(cleaned)
+        if not match and keyword is _LOOK_AT_CLIPBOARD:
+            match = _match_fuzzy_clipboard(cleaned)
         if match:
             yield KeywordMatch(keyword, match)
+            continue
+
+        if _fuzzy_keyword_match(keyword, fuzzy_tokens):
+            yield KeywordMatch(keyword, None)
 
 
 def find_first_keyword(text: str, keywords: Iterable[Keyword] = ALL_KEYWORDS) -> Optional[KeywordMatch]:
@@ -193,6 +218,48 @@ def get_conversation_end_keyword(payload: str) -> Optional[Keyword]:
     for keyword in _CONVERSATION_END_KEYWORDS:
         if keyword.payload.lower() == normalized.lower():
             return keyword
+    return None
+
+
+def _tokenize_for_fuzzy(text: str) -> list[str]:
+    return [token for token in re.split(r"[^a-z0-9]+", text.lower()) if token]
+
+
+def _fuzzy_keyword_match(keyword: Keyword, tokens: Sequence[str]) -> bool:
+    if not keyword.fuzzy_targets or not tokens:
+        return False
+
+    for target in keyword.fuzzy_targets:
+        target_tokens = [token for token in target.split() if token]
+        window_size = len(target_tokens)
+        if not window_size or len(tokens) < window_size:
+            continue
+
+        for start in range(len(tokens) - window_size + 1):
+            candidate_tokens = tokens[start : start + window_size]
+            candidate = " ".join(candidate_tokens)
+            similarity = difflib.SequenceMatcher(None, candidate, target).ratio()
+            if similarity >= keyword.fuzzy_threshold:
+                return True
+
+    return False
+
+
+def _match_fuzzy_clipboard(text: str) -> Optional[re.Match[str]]:
+    """Return a regex match when ``text`` approximates the clipboard keyword."""
+
+    for match in _FUZZY_CLIPBOARD_PATTERN.finditer(text):
+        target = match.group("target")
+        normalized = re.sub(r"[\s_-]+", "", target.lower())
+        if not normalized:
+            continue
+        if normalized == _CLIPBOARD_CANONICAL:
+            return match
+        similarity = difflib.SequenceMatcher(
+            None, normalized, _CLIPBOARD_CANONICAL
+        ).ratio()
+        if similarity >= _CLIPBOARD_FUZZY_THRESHOLD:
+            return match
     return None
 
 

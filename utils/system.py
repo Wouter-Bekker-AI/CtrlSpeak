@@ -35,11 +35,15 @@ from utils.config_paths import (
     settings, settings_lock, load_settings, save_settings,
     get_config_dir, get_config_file_path, get_temp_dir,
     create_recording_file_path, cleanup_recording_file, resource_path,
-    asset_path, get_logger, get_logs_dir,
+    asset_path, get_logger, get_logs_dir, get_data_dir,
 )
 
 
 logger = get_logger(__name__)
+
+
+_CLIPBOARD_WARN_COOLDOWN_SECONDS = 5.0
+_last_clipboard_warning: float = 0.0
 
 
 def _bootstrap_runtime_environment() -> None:
@@ -49,7 +53,7 @@ def _bootstrap_runtime_environment() -> None:
     keeping all Hugging Face caches inside the CtrlSpeak config directory.
     """
     try:
-        cfg = get_config_dir()
+        cfg = get_data_dir()
         hf_root = cfg / "hf-cache"
         hf_root.mkdir(parents=True, exist_ok=True)
         (hf_root / "hub").mkdir(parents=True, exist_ok=True)
@@ -170,7 +174,7 @@ from utils.net_discovery import (
 __all__ = [
     "APP_VERSION", "SPLASH_DURATION_MS", "CLIENT_ONLY_BUILD",
     "settings", "settings_lock", "load_settings", "save_settings",
-    "get_config_dir", "get_config_file_path", "get_temp_dir",
+    "get_data_dir", "get_config_dir", "get_config_file_path", "get_temp_dir",
     "create_recording_file_path", "cleanup_recording_file", "resource_path",
     "insert_text_into_focus", "set_force_sendinput", "is_console_window",
     "ServerInfo", "format_exception_details",
@@ -266,9 +270,15 @@ def write_error_log(context: str, snippet: str) -> None:
 
 
 def copy_to_clipboard(text: str) -> None:
+    global _last_clipboard_warning
     try:
         if not set_clipboard_text(text):
-            logger.warning("Failed to stage clipboard text")
+            now = time.monotonic()
+            if now - _last_clipboard_warning >= _CLIPBOARD_WARN_COOLDOWN_SECONDS:
+                logger.warning(
+                    "Failed to stage clipboard text; the Windows clipboard is busy or unavailable."
+                )
+                _last_clipboard_warning = now
     except Exception:
         logger.exception("Failed to copy text to clipboard")
 
@@ -1242,7 +1252,7 @@ def acquire_single_instance_lock() -> bool:
     if instance_lock_handle is not None:
         logger.debug("Instance lock already held by current process")
         return False
-    lock_path = get_config_dir() / LOCK_FILENAME
+    lock_path = get_data_dir() / LOCK_FILENAME
     logger.debug("Attempting to acquire instance lock at %s", lock_path)
     if instance_lock_handle is not None:
         logger.debug("Instance lock already held by current process")
@@ -1310,7 +1320,7 @@ def release_single_instance_lock() -> None:
         except Exception:
             logger.exception("Failed to close instance lock file handle")
         try:
-            (get_config_dir() / LOCK_FILENAME).unlink(missing_ok=True)
+            (get_data_dir() / LOCK_FILENAME).unlink(missing_ok=True)
         except Exception:
             logger.exception("Failed to remove instance lock file")
         logger.info("Released instance lock")
@@ -1403,6 +1413,8 @@ def parse_cli_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--automation-flow", action="store_true", help="Run the automated end-to-end regression workflow")
     parser.add_argument("--start-server-only", action="store_true", help="Start the CtrlSpeak server and keep it running (for programmatic testing).")
+    parser.add_argument("--health", action="store_true", help="Run CtrlSpeak health diagnostics and exit")
+    parser.add_argument("--health-identity", default="default", help="Identity to probe during health diagnostics")
     args, _ = parser.parse_known_args(argv[1:])
     return args
 

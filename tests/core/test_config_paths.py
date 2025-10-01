@@ -7,38 +7,40 @@ from utils import config_paths
 pytestmark = pytest.mark.core_headless
 
 
-def test_get_config_dir_creates_expected_structure(tmp_path, monkeypatch):
+def _reload_with_appdata(tmp_path, monkeypatch):
+    data_home = tmp_path / "data"
     config_home = tmp_path / "cfg"
+    data_home.mkdir()
     config_home.mkdir()
+
     if config_paths.sys.platform.startswith("win"):
-        monkeypatch.setenv("APPDATA", str(config_home))
+        monkeypatch.setenv("APPDATA", str(data_home))
     else:
+        monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
         monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
 
-    # Reload so the helper reads the new environment variable without leaking
-    # the fixture-wide isolation performed in conftest.
     import importlib
 
     importlib.reload(config_paths)
+    return data_home, (data_home if config_paths.sys.platform.startswith("win") else config_home)
+
+
+def test_get_data_and_config_dirs(tmp_path, monkeypatch):
+    data_home, config_home = _reload_with_appdata(tmp_path, monkeypatch)
+
+    data_dir = config_paths.get_data_dir()
+    expected_data = data_home / "CtrlSpeak"
+    assert data_dir == expected_data
+    for subdir in ("models", "cuda", "bot_memory", config_paths.LOG_DIR_NAME, "temp"):
+        assert (data_dir / subdir).exists()
 
     config_dir = config_paths.get_config_dir()
-    expected = config_home / "CtrlSpeak"
-    assert config_dir == expected
-    for subdir in ("models", "cuda", "temp", config_paths.LOG_DIR_NAME):
-        assert (config_dir / subdir).exists()
+    expected_config = config_home / "CtrlSpeak"
+    assert config_dir == expected_config
 
 
 def test_settings_round_trip(tmp_path, monkeypatch):
-    config_home = tmp_path / "cfg"
-    config_home.mkdir()
-    if config_paths.sys.platform.startswith("win"):
-        monkeypatch.setenv("APPDATA", str(config_home))
-    else:
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
-
-    import importlib
-
-    importlib.reload(config_paths)
+    _, _ = _reload_with_appdata(tmp_path, monkeypatch)
 
     loaded = config_paths.load_settings()
     assert loaded["model_name"] == config_paths.DEFAULT_SETTINGS["model_name"]
@@ -56,16 +58,7 @@ def test_settings_round_trip(tmp_path, monkeypatch):
 
 
 def test_create_and_cleanup_recording_file(tmp_path, monkeypatch):
-    config_home = tmp_path / "cfg"
-    config_home.mkdir()
-    if config_paths.sys.platform.startswith("win"):
-        monkeypatch.setenv("APPDATA", str(config_home))
-    else:
-        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
-
-    import importlib
-
-    importlib.reload(config_paths)
+    _, _ = _reload_with_appdata(tmp_path, monkeypatch)
 
     file_path = config_paths.create_recording_file_path()
     assert file_path.parent == config_paths.get_temp_dir()

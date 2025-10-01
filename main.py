@@ -4,6 +4,7 @@ import sys
 import atexit
 import time
 import logging
+import json
 
 import utils.system as sysmod
 from tools import keywords
@@ -43,6 +44,13 @@ def main(argv: list[str]) -> int:
     logger.info("CtrlSpeak starting up (version %s)", APP_VERSION)
     args = parse_cli_args(argv)
     logger.debug("Parsed CLI arguments: %s", args)
+
+    if getattr(args, "health", False):
+        from utils.health import run_health_check
+
+        result = run_health_check(identity=getattr(args, "health_identity", "default"))
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("status") == "ok" else 1
 
     if args.start_server_only:
         logging.getLogger().setLevel(logging.DEBUG)

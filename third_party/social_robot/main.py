@@ -6,7 +6,9 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 import threading
+import atexit
 from pathlib import Path
 from typing import Optional, List, Dict, Pattern
 
@@ -18,15 +20,31 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from background_agents import load_tts_preprocessing_agent
+ICON_PATH = _PROJECT_ROOT / "assets" / "icon.ico"
+
 from face_animation.face import FaceAnimator, FaceSettings
 from face_animation.logo import LogoAnimator
 from llm.ollama import OllamaClient, OllamaUnavailableError
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QTimer
+
+if __package__ in (None, ""):
+    from ui.chat_window import ChatWindow
+else:
+    from .ui.chat_window import ChatWindow
 
 from tools import keywords, vision
+from tools.message_management import force_plaintext, requires_force_plaintext
 from utils.config_paths import get_logger
+from utils.image_store import (
+    IdentityImageRecord,
+    is_image_request,
+    load_identity_image,
+    write_identity_image_from_base64,
+)
+from utils.io_atomic import AtomicWriteError, atomic_append_lines
+from utils.memory_lock import IdentityLock, IdentityLockError, probe_lock_path
+from utils.memory_orchestrator import MemoryOrchestrator
+from utils.memory_settings import load_identity_settings
 
 
 logger = get_logger(__name__)
@@ -34,6 +52,56 @@ logger = get_logger(__name__)
 IDENTITIES_ROOT = Path(__file__).resolve().parent / "identities"
 DEFAULT_IDENTITY_NAME = "default"
 DEFAULT_SYSTEM_PROMPT = "You are a cheerful robotic companion speaking concisely."
+
+CONVERSATION_MAX_BYTES = 10 * 1024 * 1024
+CONVERSATION_KEEP = 5
+
+_identity_lock_handle: Optional[IdentityLock] = None
+_memory_orchestrator: Optional[MemoryOrchestrator] = None
+
+
+def _release_identity_lock_handle() -> None:
+    global _identity_lock_handle
+    if _identity_lock_handle is not None:
+        _identity_lock_handle.release()
+        _identity_lock_handle = None
+
+
+def _shutdown_orchestrator() -> None:
+    global _memory_orchestrator
+    if _memory_orchestrator is None:
+        return
+    try:
+        _memory_orchestrator.close()
+    except Exception:
+        logger.exception("Failed to close memory orchestrator")
+    finally:
+        _memory_orchestrator = None
+
+
+def _ensure_identity_lock(identity_name: str) -> None:
+    global _identity_lock_handle
+    lock_path_hint = os.getenv("CTRLSPK_IDENTITY_LOCK_PATH")
+    parent_locked = os.getenv("CTRLSPK_PARENT_LOCKED") == "1"
+
+    if parent_locked and lock_path_hint:
+        try:
+            if probe_lock_path(Path(lock_path_hint)):
+                return
+        except Exception:
+            return
+    if parent_locked:
+        return
+
+    try:
+        lock = IdentityLock(identity_name)
+        lock.acquire(timeout=0.0)
+    except IdentityLockError:
+        print("-> Identity in use. Close the running session before starting another.")
+        sys.exit(3)
+
+    _identity_lock_handle = lock
+    atexit.register(_release_identity_lock_handle)
 
 _VISION_PROMPT_SUFFIX = {
     "screen": "Please describe the attached screenshot and let me know anything important you notice.",
@@ -122,6 +190,11 @@ def _read_prompt(identity_path: Path, prompt_file: str) -> Optional[str]:
         print(f"-> Failed to read system prompt from {prompt_path}: {exc}")
         return None
 
+
+def _identity_display(name: str) -> str:
+    return name.replace("_", " ").strip().title() or name
+
+
 def resolve_identity(args) -> tuple[IdentityProfile, dict]:
     root = _resolve_identities_root(args.identities_dir)
     identity_name = args.identity or DEFAULT_IDENTITY_NAME
@@ -150,14 +223,14 @@ def resolve_identity(args) -> tuple[IdentityProfile, dict]:
     if not system_prompt:
         system_prompt = DEFAULT_SYSTEM_PROMPT
 
-    memory_dir = args.memory_dir or config.get("memory_dir")
+    memory_dir = args.memory_dir or os.getenv("CTRLSPK_BOT_MEMORY_ROOT")
     memory_path: Optional[Path] = None
     if memory_dir:
         memory_path = Path(memory_dir)
-        if not memory_path.is_absolute():
-            memory_path = (identity_path / memory_dir).resolve()
         try:
-            memory_path.mkdir(parents=True, exist_ok=True)
+            memory_path = memory_path.expanduser().resolve()
+            for sub in ("conversation", "screenshots", "chroma", "traces"):
+                (memory_path / sub).mkdir(parents=True, exist_ok=True)
         except Exception as exc:
             print(f"-> Failed to ensure memory directory {memory_path}: {exc}")
             memory_path = None
@@ -250,26 +323,49 @@ def parse_args():
     return p.parse_args()
 
 def load_history(memory_path: Optional[Path]) -> List[dict]:
-    if memory_path:
-        history_file = memory_path / "conversation.json"
-        if history_file.exists():
-            try:
-                return json.loads(history_file.read_text(encoding="utf-8"))
-            except Exception as exc:
-                print(f"-> Failed to load conversation history: {exc}")
-    return []
+    if not memory_path:
+        return []
 
-def save_history(memory_path: Optional[Path], history: List[dict]) -> None:
-    if memory_path:
-        try:
-            history_file = memory_path / "conversation.json"
-            history_file.write_text(json.dumps(history, indent=2), encoding="utf-8")
-        except Exception as exc:
-            print(f"-> Failed to save conversation history: {exc}")
+    history_file = memory_path / "conversation" / "conversation.jsonl"
+    entries: List[dict] = []
+    try:
+        with history_file.open("r", encoding="utf-8") as src:
+            for raw_line in src:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except Exception as exc:
+                    print(f"-> Ignoring malformed history line: {exc}")
+    except FileNotFoundError:
+        return []
+    except Exception as exc:
+        print(f"-> Failed to load conversation history: {exc}")
+    return entries
+
+
+def save_history(memory_path: Optional[Path], entries: List[dict]) -> None:
+    if not memory_path or not entries:
+        return
+
+    history_file = memory_path / "conversation" / "conversation.jsonl"
+    try:
+        atomic_append_lines(
+            history_file,
+            [json.dumps(entry, ensure_ascii=False) for entry in entries],
+            max_bytes=CONVERSATION_MAX_BYTES,
+            keep=CONVERSATION_KEEP,
+        )
+    except AtomicWriteError as exc:
+        print(f"-> Failed to save conversation history: {exc}")
+
 
 def main():
     args = parse_args()
     profile, config = resolve_identity(args)
+
+    _ensure_identity_lock(profile.name)
 
     identities_root = _resolve_identities_root(args.identities_dir)
     available_identities = _list_identity_names(identities_root)
@@ -295,13 +391,44 @@ def main():
     )
 
     tts_model = KokoroTTS(voice=profile.voice, speed=1.0)
-    if profile.require_text_cleaning:
-        preprocessing_agent = load_tts_preprocessing_agent()
-        if preprocessing_agent is None:
-            print("-> TTS preprocessing agent unavailable; falling back to raw replies.")
+    print("-> TTS preprocessing agent is disabled; using deterministic scrub only when needed.")
+
+    identity_settings = load_identity_settings(profile.name)
+
+    use_orchestrator = os.getenv("CTRLSPK_USE_LANGGRAPH_MEMORY_ORCHESTRATOR") == "1"
+    metrics_env = os.getenv("CTRLSPK_METRICS_PATH")
+    if metrics_env:
+        metrics_path = Path(metrics_env).expanduser()
+    elif profile.memory_path:
+        metrics_path = profile.memory_path / "traces" / "metrics.csv"
     else:
-        preprocessing_agent = None
-        print("-> Identity does not require text cleaning; skipping TTS preprocessing agent.")
+        metrics_path = Path(tempfile.gettempdir()) / "ctrlspeak_metrics.csv"
+    orchestrator: Optional[MemoryOrchestrator] = None
+    global _memory_orchestrator
+    if use_orchestrator and profile.memory_path is None:
+        print("-> LangGraph orchestrator requires an AppData memory directory; disabling.")
+        use_orchestrator = False
+    if use_orchestrator and profile.memory_path is not None:
+        try:
+            metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            orchestrator = MemoryOrchestrator(
+                profile.name,
+                ollama_client,
+                memory_dir=profile.memory_path,
+                metrics_path=metrics_path,
+                identity_settings=identity_settings,
+            )
+            _memory_orchestrator = orchestrator
+            atexit.register(_shutdown_orchestrator)
+            print("-> LangGraph memory orchestrator enabled.")
+        except Exception as exc:
+            print(f"-> Failed to initialize LangGraph orchestrator: {exc}")
+            logger.exception("Failed to initialize LangGraph orchestrator")
+            orchestrator = None
+            use_orchestrator = False
 
     if args.test_wav:
         import wave
@@ -333,19 +460,33 @@ def main():
             ollama_client.unload()
         return
 
-    animator: object = None
-    app: Optional[QApplication] = None
-    animator_thread: Optional[threading.Thread] = None
     animation_style = config.get("animation_style")
+    app = QApplication.instance() or QApplication(sys.argv)
+    identity_display = _identity_display(profile.name)
+
+    chat_window = ChatWindow(identity_display, icon_path=ICON_PATH)
+    chat_window.set_voice_mode(False)
+    chat_window.show()
+
+    animator_thread: Optional[threading.Thread] = None
+    animator: object
 
     if animation_style == "logo":
-        app = QApplication(sys.argv)
         logo_image = config.get("logo_image")
-        logo_path = profile.base_path / logo_image if logo_image else None
-        if not logo_path or not logo_path.exists():
-            raise RuntimeError(f"Logo image not found: {logo_path}")
+        logo_path: Optional[Path] = None
+        if logo_image:
+            candidate = profile.base_path / logo_image
+            if candidate.exists():
+                logo_path = candidate
+            else:
+                fallback = _PROJECT_ROOT / "assets" / Path(logo_image).name
+                if fallback.exists():
+                    logo_path = fallback
+        if logo_path is None:
+            raise RuntimeError(f"Logo image not found: {logo_image}")
         animator = LogoAnimator(logo_path=logo_path)
         animator.setup_widget()
+        animator.hide_widget()
     else:
         face_settings = FaceSettings(window_size=(1920, 1080), rotation_degrees=0)
         face_image_rotation = config.get("face_image_rotation")
@@ -365,19 +506,89 @@ def main():
             if mouth_image_path.exists():
                 face_settings.mouth_image_path = str(mouth_image_path)
         animator = FaceAnimator(settings=face_settings)
-        animator_thread = threading.Thread(target=animator.run, daemon=True)
-        animator_thread.start()
 
     vad_config = VADConfig(sample_rate=16000, frame_duration_ms=30, padding_duration_ms=360, aggressiveness=2, deactivation_ratio=0.9)
     vad_listener: Optional[VADListener] = None
+    vad_thread: Optional[threading.Thread] = None
+    voice_mode_active = threading.Event()
     last_bot_response: str = ""
     processing_lock = threading.Lock()
     shutdown_requested = threading.Event()
     shutdown_complete = threading.Event()
     failsafe_timer: Optional[threading.Timer] = None
 
-    def _identity_display(name: str) -> str:
-        return name.replace("_", " ").strip().title() or name
+    def _ensure_animator_running() -> None:
+        nonlocal animator_thread
+        if isinstance(animator, FaceAnimator):
+            if animator_thread is None or not animator_thread.is_alive():
+                animator_thread = threading.Thread(target=animator.run, daemon=True)
+                animator_thread.start()
+        elif isinstance(animator, LogoAnimator):
+            animator.show_widget()
+
+    def _suspend_animator() -> None:
+        if isinstance(animator, LogoAnimator):
+            animator.hide_widget()
+
+    def _enable_voice_mode() -> None:
+        nonlocal vad_listener, vad_thread
+        if voice_mode_active.is_set():
+            return
+        voice_mode_active.set()
+        chat_window.set_voice_mode(True)
+        _ensure_animator_running()
+        print("-> Voice mode enabled; starting the VAD listener...")
+        vad_listener = VADListener(
+            config=vad_config,
+            device_index=None,
+            on_speech_callback=on_speech_detected,
+        )
+        vad_thread = threading.Thread(target=vad_listener.start, daemon=True)
+        vad_thread.start()
+
+    def _disable_voice_mode() -> None:
+        nonlocal vad_listener, vad_thread
+        if not voice_mode_active.is_set():
+            return
+        voice_mode_active.clear()
+        print("-> Voice mode disabled; returning to text chat.")
+
+        def _ui_teardown() -> None:
+            chat_window.set_voice_mode(False)
+            _suspend_animator()
+
+        chat_window.invoke(_ui_teardown)
+        if vad_listener is not None:
+            vad_listener.stop()
+        if vad_thread is not None:
+            vad_thread.join(timeout=2.0)
+            vad_thread = None
+        vad_listener = None
+        if tts_model.is_playing:
+            tts_model.stop_playback()
+        animator.update_amplitude(0.0)
+
+    def _on_text_submitted(message: str) -> None:
+        cleaned = message.strip()
+        if not cleaned:
+            return
+        chat_window.append_user_message(cleaned)
+
+        def _worker() -> None:
+            with processing_lock:
+                _handle_user_request(cleaned, source="text")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_voice_mode_requested(enabled: bool) -> None:
+        if enabled:
+            _enable_voice_mode()
+        else:
+            _disable_voice_mode()
+
+    chat_window.send_text.connect(_on_text_submitted)
+    chat_window.voice_mode_requested.connect(_on_voice_mode_requested)
+    chat_window.closed.connect(lambda: shutdown_requested.set())
 
     def _resolve_identity_name(candidate: str) -> Optional[str]:
         if not candidate:
@@ -439,6 +650,11 @@ def main():
 
         print(f"-> Ending conversation with '{profile.name}'.")
 
+        try:
+            _disable_voice_mode()
+        except Exception:
+            logger.exception("Failed to disable voice mode during shutdown request")
+
         logger.debug("Shutdown stage: stopping VAD listener")
         try:
             if vad_listener is not None:
@@ -474,13 +690,6 @@ def main():
         except Exception:
             logger.exception("Failed while waiting for animator thread during shutdown")
 
-        qt_app = QApplication.instance()
-        if qt_app is not None:
-            logger.debug("Shutdown stage: requesting Qt application quit")
-            QTimer.singleShot(0, qt_app.quit)
-        else:
-            logger.debug("Shutdown stage: Qt application not running")
-
         logger.debug("Shutdown stage: closing stdin control pipe")
         try:
             if sys.stdin is not None and not sys.stdin.closed:
@@ -504,11 +713,12 @@ def main():
         if failsafe_timer is not None:
             failsafe_timer.cancel()
 
-        timer = threading.Timer(3.0, _force_exit)
-        timer.daemon = True
-        failsafe_timer = timer
-        timer.start()
-        logger.debug("Goodbye failsafe armed for identity '%s'", profile.name)
+        if app is None:
+            timer = threading.Timer(3.0, _force_exit)
+            timer.daemon = True
+            failsafe_timer = timer
+            timer.start()
+            logger.debug("Goodbye failsafe armed for identity '%s'", profile.name)
 
     def _handle_conversation_start(identity_name: str) -> None:
         target = _resolve_identity_name(identity_name)
@@ -577,6 +787,11 @@ def main():
         else:
             print("-> User said:", transcript)
 
+        if source == "voice":
+            chat_window.append_user_message(cleaned, via_voice=True)
+        elif source == "command":
+            chat_window.append_user_message(cleaned)
+
         if tts_model.is_playing:
             tts_model.stop_playback()
 
@@ -608,20 +823,39 @@ def main():
                 animator.update_amplitude(0.0)
                 return
 
-            end_match = None
-            if source != "voice":
+            if source == "command":
                 end_match = keywords.detect_conversation_end_keyword(cleaned)
-            if end_match:
-                logger.debug(
-                    "Detected conversation end keyword targeting '%s' via %s input",
-                    end_match.keyword.payload,
-                    source,
-                )
-                _handle_conversation_end(end_match.keyword.payload)
-                animator.update_amplitude(0.0)
-                return
+                if end_match:
+                    logger.debug(
+                        "Detected conversation end keyword targeting '%s' via %s input",
+                        end_match.keyword.payload,
+                        source,
+                    )
+                    _handle_conversation_end(end_match.keyword.payload)
+                    animator.update_amplitude(0.0)
+                    return
+            elif source != "text":
+                if not voice_mode_active.is_set():
+                    logger.debug(
+                        "Ignoring conversation end keyword via %s input because voice mode is inactive",
+                        source,
+                    )
+                else:
+                    end_match = keywords.detect_conversation_end_keyword(cleaned)
+                    if end_match:
+                        logger.debug(
+                            "Detected conversation end keyword targeting '%s' via %s input",
+                            end_match.keyword.payload,
+                            source,
+                        )
+                        _handle_conversation_end(end_match.keyword.payload)
+                        animator.update_amplitude(0.0)
+                        return
+
+        nonlocal use_orchestrator
 
         capture_result: Optional[vision.VisionCapture] = None
+        identity_image: Optional[IdentityImageRecord] = None
         augmented_text = cleaned
         capture_request = capture_override
         capture_pattern: Optional[Pattern[str]] = None
@@ -641,14 +875,10 @@ def main():
             capture_request = None
 
         if capture_request:
-            storage_dir: Optional[Path] = None
-            if profile.memory_path:
-                storage_dir = profile.memory_path / "screenshots"
-
             if capture_request == "screen":
-                capture_result = vision.capture_screenshot(storage_dir)
+                capture_result = vision.capture_screenshot()
             elif capture_request == "clipboard":
-                capture_result = vision.capture_clipboard_image(storage_dir)
+                capture_result = vision.capture_clipboard_image()
             else:
                 print(f"-> Unknown vision capture request: {capture_request}")
                 capture_result = None
@@ -664,75 +894,123 @@ def main():
                     augmented_text = prompt_suffix
                 else:
                     augmented_text = cleaned
+                identity_image = write_identity_image_from_base64(
+                    profile.name,
+                    capture_result.image_b64,
+                    source=capture_result.source,
+                )
+                if identity_image is None:
+                    identity_image = load_identity_image(profile.name)
                 print(f"-> Captured {capture_result.source} image for analysis.")
             elif capture_result:
                 reason = capture_result.error or "capture failure"
                 print(f"-> Proceeding without vision capture due to: {reason}")
 
-        vision_b64: Optional[str] = None
-        vision_path: Optional[Path] = None
-        vision_source: Optional[str] = None
-        if capture_result and capture_result.success:
-            vision_b64 = capture_result.image_b64
-            vision_path = capture_result.saved_path
-            vision_source = capture_result.source
+        if identity_image is None and is_image_request(augmented_text):
+            identity_image = load_identity_image(profile.name)
 
-        history = load_history(profile.memory_path)
-        try:
-            user_content: Optional[List[dict]] = None
-            if vision_b64:
-                user_content = [
-                    {"type": "text", "text": augmented_text},
-                    {"type": "image", "image": vision_b64},
+        vision_metadata: Optional[dict[str, str]] = None
+        if identity_image is not None:
+            vision_metadata = identity_image.as_metadata(vision_request=capture_request)
+        elif capture_request:
+            vision_metadata = {"vision_request": capture_request}
+
+        fallback_content: Optional[List[dict]] = None
+        if identity_image is not None and (
+            capture_request or is_image_request(augmented_text)
+        ):
+            fallback_content = [
+                {"type": "text", "text": augmented_text},
+                {"type": "image", "image": identity_image.image_b64},
+            ]
+
+        llm_response = ""
+        used_orchestrator = False
+        if use_orchestrator and orchestrator is not None:
+            try:
+                turn_result = orchestrator.run_turn(
+                    transcript,
+                    augmented_text=augmented_text,
+                    vision_metadata=vision_metadata,
+                )
+                llm_response = turn_result.response_text
+                used_orchestrator = True
+            except Exception as exc:
+                print("-> LangGraph orchestrator failure; falling back to legacy conversation.")
+                logger.exception("LangGraph orchestrator failure", exc_info=exc)
+                use_orchestrator = False
+                _shutdown_orchestrator()
+
+        if not used_orchestrator:
+            history = load_history(profile.memory_path)
+            history_baseline = len(history)
+            try:
+                llm_response = ollama_client.query(
+                    augmented_text,
+                    history=history,
+                    content=fallback_content,
+                )
+            except OllamaUnavailableError as exc:
+                failure_message = str(exc)
+                print(f"-> Ollama error: {failure_message}")
+                animator.update_amplitude(0.0)
+                return
+            if not llm_response.strip():
+                animator.update_amplitude(0.0)
+                return
+
+            history_entry: dict
+            if identity_image is not None and (
+                capture_request or is_image_request(augmented_text)
+            ):
+                entry_content = [
+                    {"type": "text", "text": transcript},
+                    {"type": "image_file", "path": str(identity_image.path)},
                 ]
-            llm_response = ollama_client.query(
-                augmented_text,
-                history=history,
-                content=user_content,
-            )
-        except OllamaUnavailableError as exc:
-            failure_message = str(exc)
-            print(f"-> Ollama error: {failure_message}")
-            animator.update_amplitude(0.0)
-            return
-        if not llm_response.strip():
-            animator.update_amplitude(0.0)
-            return
+                history_entry = {"role": "user", "content": entry_content}
+                if vision_metadata:
+                    sanitized_metadata = dict(vision_metadata)
+                    sanitized_metadata.pop("vision_request", None)
+                    history_entry["metadata"] = sanitized_metadata
+            else:
+                history_entry = {"role": "user", "content": transcript}
 
-        history_entry: dict
-        if user_content is not None:
-            history_entry = {"role": "user", "content": user_content}
-            metadata: dict[str, str] = {}
-            if vision_source:
-                metadata["vision_source"] = vision_source
-            if vision_path:
-                metadata["vision_file"] = str(vision_path)
-            if metadata:
-                history_entry["metadata"] = metadata
+            history.append(history_entry)
+
+        raw_response = llm_response
+        print("-> Raw LLM reply:", raw_response)
+
+        if requires_force_plaintext(raw_response):
+            print("-> Handing reply to force_plaintext().")
+            final_response = force_plaintext(raw_response)
+            print("-> Scrubbed reply:", final_response)
+            if final_response != raw_response:
+                print("-> Applied deterministic TTS scrub.")
         else:
-            history_entry = {"role": "user", "content": transcript}
+            print("-> Reply does not require deterministic scrub.")
+            final_response = raw_response
+        print("-> Final reply for chat history and TTS:", final_response)
 
-        history.append(history_entry)
-        history.append({"role": "assistant", "content": llm_response})
-        save_history(profile.memory_path, history)
+        if not used_orchestrator:
+            history.append({"role": "assistant", "content": final_response})
+            save_history(profile.memory_path, history[history_baseline:])
 
-        processed_response = llm_response
-        if preprocessing_agent is not None:
-            rewritten = preprocessing_agent.rewrite(llm_response)
-            if rewritten != llm_response:
-                print("-> Preprocessed bot reply for TTS.")
-            processed_response = rewritten
+        chat_window.append_bot_message(final_response)
+        last_bot_response = final_response
 
-        print("-> Bot replied:", processed_response)
+        if not voice_mode_active.is_set():
+            animator.update_amplitude(0.0)
+            return
 
         try:
-            audio_data = tts_model.synthesize(processed_response)
+            if not final_response:
+                animator.update_amplitude(0.0)
+                return
+            audio_data = tts_model.synthesize(final_response)
         except Exception as exc:
             print("TTS error:", exc)
             animator.update_amplitude(0.0)
             return
-
-        last_bot_response = processed_response
 
         def amplitude_callback(level: float) -> None:
             animator.update_amplitude(level)
@@ -853,15 +1131,6 @@ def main():
     command_thread = threading.Thread(target=_stdin_command_listener, daemon=True)
     command_thread.start()
 
-    vad_listener = VADListener(
-        config=vad_config,
-        device_index=None,
-        on_speech_callback=on_speech_detected,
-    )
-    print("-> Starting the VAD listener...")
-    vad_thread = threading.Thread(target=vad_listener.start, daemon=True)
-    vad_thread.start()
-
     try:
         if app:
             app.exec()
@@ -877,6 +1146,10 @@ def main():
     finally:
         logger.info("Shutdown cleanup starting for '%s'", profile.name)
         shutdown_complete.set()
+        try:
+            _disable_voice_mode()
+        except Exception:
+            logger.exception("Failed to disable voice mode during cleanup")
         try:
             if vad_listener is not None:
                 logger.debug("Cleanup stage: stopping VAD listener")

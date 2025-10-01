@@ -1,12 +1,16 @@
 {
   "name": "tts_preprocessing_agent",
-  "description": "Rewrites assistant replies for natural speech synthesis",
+  "description": "Reformats profile-style replies into natural speech before synthesis",
   "llm_model": "gemma3:1b",
   "llm_url": "http://localhost:11434/api/chat",
   "ollama_options": {
-    "temperature": 0.2
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "repeat_penalty": 1.0,
+    "mirostat": 0,
+    "seed": 0,
+    "stop": ["\n\n"]
   },
-  "header_text_file": "header_text.txt",
   "prompt_file": "system_prompt.txt",
-  "preamble": "both"
+  "preamble": "system"
 }

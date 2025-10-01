@@ -63,6 +63,13 @@ from utils.ui_theme import (
 )
 
 from utils.config_paths import asset_path, get_logger
+from utils.memory_paths import (
+    get_bot_chroma_dir,
+    get_bot_conversation_log,
+    get_bot_memory_dir,
+    get_bot_screenshots_dir,
+    get_bot_traces_dir,
+)
 
 # Shared UI thread root + instance ref (imported by utils.system.schedule_management_refresh)
 tk_root: Optional[tk.Tk] = None
@@ -1813,7 +1820,6 @@ class ManagementWindow:
 
     def _select_identity_and_start_bot(self) -> None:
         from pathlib import Path
-        import os
 
         identities_dir = Path(__file__).resolve().parent.parent / "third_party" / "social_robot" / "identities"
         identities = [d.name for d in identities_dir.iterdir() if d.is_dir()] if identities_dir.exists() else []
@@ -1875,27 +1881,38 @@ class ManagementWindow:
             dialog.destroy()
             if messagebox.askyesno("Confirm Clear Memory", f"Are you sure you want to clear the memory for the '{identity}' identity? This cannot be undone."):
                 try:
-                    memory_dir = identities_dir / identity / "memory"
-                    memory_file = memory_dir / "conversation.json"
-                    screenshots_dir = memory_dir / "screenshots"
+                    memory_root = get_bot_memory_dir(identity)
+                    conversation_log = get_bot_conversation_log(identity)
+                    screenshots_dir = get_bot_screenshots_dir(identity)
+                    chroma_dir = get_bot_chroma_dir(identity)
+                    traces_dir = get_bot_traces_dir(identity)
 
                     cleared_anything = False
 
-                    if memory_file.exists():
-                        os.remove(memory_file)
+                    if conversation_log.exists():
+                        conversation_log.unlink()
                         cleared_anything = True
 
-                    if screenshots_dir.exists():
-                        shutil.rmtree(screenshots_dir)
-                        cleared_anything = True
+                    for folder in (screenshots_dir, chroma_dir, traces_dir):
+                        if folder.exists():
+                            shutil.rmtree(folder)
+                            cleared_anything = True
 
                     if cleared_anything:
-                        messagebox.showinfo("Clear Bot Memory", f"Memory for '{identity}' has been cleared.")
+                        messagebox.showinfo(
+                            "Clear Bot Memory",
+                            f"Memory for '{identity}' has been cleared from {memory_root}.",
+                        )
                     else:
-                        messagebox.showinfo("Clear Bot Memory", f"No memory found for '{identity}'.")
-                except Exception as e:
-                    logger.exception(f"Failed to clear memory for {identity}")
-                    messagebox.showerror("Clear Bot Memory", f"Failed to clear memory for '{identity}'. Check logs.")
+                        messagebox.showinfo(
+                            "Clear Bot Memory", f"No memory found for '{identity}'."
+                        )
+                except Exception:
+                    logger.exception("Failed to clear memory for %s", identity)
+                    messagebox.showerror(
+                        "Clear Bot Memory",
+                        f"Failed to clear memory for '{identity}'. Check logs.",
+                    )
 
         for identity in identities:
             ttk.Button(container, text=identity.replace("_", " ").title(), style="Danger.TButton", command=lambda i=identity: on_select(i)).pack(fill=tk.X, pady=4)
