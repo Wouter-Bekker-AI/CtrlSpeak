@@ -20,7 +20,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from background_agents import load_tts_preprocessing_agent
+from background_agents import load_tts_preprocessing_agent, text_requires_cleaning
 from face_animation.face import FaceAnimator, FaceSettings
 from face_animation.logo import LogoAnimator
 from llm.ollama import OllamaClient, OllamaUnavailableError
@@ -871,7 +871,7 @@ def main():
             save_history(profile.memory_path, history[history_baseline:])
 
         processed_response = llm_response
-        if preprocessing_agent is not None:
+        if preprocessing_agent is not None and text_requires_cleaning(llm_response):
             rewritten = preprocessing_agent.rewrite(llm_response)
             if rewritten != llm_response:
                 print("-> Preprocessed bot reply for TTS.")

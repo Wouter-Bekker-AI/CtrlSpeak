@@ -74,3 +74,14 @@ def test_configure_identity_keywords_handles_duplicates_and_spacing():
     assert keywords.detect_conversation_end_keyword("goodbye assistant") is not None
 
     keywords.configure_identity_keywords([])
+
+
+def test_conversation_keywords_support_fuzzy_variants():
+    keywords.configure_identity_keywords(["assistant"])
+    try:
+        assert keywords.detect_conversation_end_keyword("goodbye, assistant") is not None
+        start_match = keywords.detect_conversation_start_keyword("please chat was assistant today")
+        assert start_match is not None
+        assert start_match.keyword.payload == "assistant"
+    finally:
+        keywords.configure_identity_keywords([])
