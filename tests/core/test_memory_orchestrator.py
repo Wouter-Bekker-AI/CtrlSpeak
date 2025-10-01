@@ -161,3 +161,80 @@ def test_orchestrator_attaches_identity_image(tmp_path, monkeypatch):
     conversation_log = memory_paths.get_bot_conversation_log("VisionTester")
     assert conversation_log.exists()
     assert _SAMPLE_PNG_B64 not in conversation_log.read_text(encoding="utf-8")
+
+
+def test_orchestrator_scrubs_responses_before_persistence(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+    memory_paths = modules["utils.memory_paths"]
+
+    flush_event = threading.Event()
+    original_history_flush = orchestrator_module.MemoryPersistenceWorker._flush_history
+
+    def capture_history(self, entries):  # type: ignore[override]
+        flush_event.set()
+        return original_history_flush(self, entries)
+
+    monkeypatch.setattr(
+        orchestrator_module.MemoryPersistenceWorker,
+        "_flush_history",
+        capture_history,
+    )
+
+    captured_vector_docs: list[list[str]] = []
+
+    def capture_vector(self, task):  # type: ignore[override]
+        captured_vector_docs.append(list(task.vector_documents))
+        return 0
+
+    monkeypatch.setattr(
+        orchestrator_module.MemoryPersistenceWorker,
+        "_flush_vector_store",
+        capture_vector,
+    )
+
+    class MarkdownLLM(DummyLLM):
+        def query(self, user_text: str, history=None, content=None):
+            super().query(user_text, history=history, content=content)
+            return "*   **Name:** Wouter\n# Header"
+
+    identity_settings = {
+        "store_vector_memory": True,
+        "store_screenshots": False,
+        "retrieval_top_k": 1,
+        "retrieval_threshold": 0.0,
+        "max_vector_items": 5,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+    }
+
+    llm = MarkdownLLM()
+    metrics_path = tmp_path / "metrics_scrub.csv"
+    orchestrator = orchestrator_module.MemoryOrchestrator(
+        "MarkdownTester",
+        llm,
+        memory_dir=tmp_path,
+        metrics_path=metrics_path,
+        identity_settings=identity_settings,
+    )
+
+    result = orchestrator.run_turn("tell me about myself")
+    flush_event.wait(timeout=2.0)
+    time.sleep(0.1)
+    orchestrator.close()
+
+    assistant_entries = [entry for entry in result.history_entries if entry.get("role") == "assistant"]
+    assert assistant_entries, "expected an assistant entry in the turn history"
+    assistant_text = assistant_entries[-1]["content"]
+    assert "*" not in assistant_text
+    assert "#" not in assistant_text
+
+    conversation_log = memory_paths.get_bot_conversation_log("MarkdownTester")
+    log_text = conversation_log.read_text(encoding="utf-8")
+    assert "*" not in log_text
+    assert "#" not in log_text
+
+    assert captured_vector_docs, "expected vector persistence to run"
+    scrubbed_vector = captured_vector_docs[-1][-1]
+    assert "*" not in scrubbed_vector
+    assert "#" not in scrubbed_vector

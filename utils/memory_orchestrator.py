@@ -21,6 +21,7 @@ from utils.metrics import MetricsRecorder
 from utils.memory_paths import get_bot_conversation_log, get_bot_traces_dir
 from utils.memory_settings import load_identity_settings
 from utils.vector_memory import RetrievedMemory, VectorMemoryStore
+from tools.message_management import force_plaintext, requires_force_plaintext
 
 
 CONVERSATION_MAX_BYTES = 10 * 1024 * 1024
@@ -350,17 +351,22 @@ class MemoryOrchestrator:
     def _node_persist(self, state: _TurnState) -> _TurnState:
         correlation_id = state["correlation_id"]
         response = state.get("response_text", "")
+        if requires_force_plaintext(response):
+            scrubbed_response = force_plaintext(response)
+        else:
+            scrubbed_response = response
+        state["scrubbed_response"] = scrubbed_response
         user_text = state.get("user_text", "")
         vision_metadata = state.get("vision_metadata")
         attached_image = bool(state.get("vision_attached"))
         entries = self._build_history_entries(
             user_text,
-            response,
+            scrubbed_response,
             attached_image,
             vision_metadata,
         )
         self.history.extend(entries)
-        vector_documents = [user_text, response]
+        vector_documents = [user_text, scrubbed_response]
         vector_metadata = [
             {"role": "user", "correlation_id": correlation_id},
             {"role": "assistant", "correlation_id": correlation_id},
@@ -450,9 +456,12 @@ class MemoryOrchestrator:
         ]
         result_metadata = result_state.get("vision_metadata")
         result_attached = bool(result_state.get("vision_attached"))
+        scrubbed_response = result_state.get("scrubbed_response")
+        if scrubbed_response is None:
+            scrubbed_response = force_plaintext(result_state.get("response_text", ""))
         entries = self._build_history_entries(
             user_text,
-            result_state.get("response_text", ""),
+            scrubbed_response,
             result_attached,
             result_metadata,
         )
