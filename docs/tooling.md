@@ -103,6 +103,8 @@ The application responds to the following spoken or typed keywords. Each phrase 
 | `chat with <identity>` | Conversation start | Relaunch the bot using the requested identity via the transcription server (ignored if that identity is already active). |
 | `goodbye <identity>` | Conversation end | Shut down the active conversation for the specified identity from the CtrlSpeak main process. |
 
+> **Note:** SocialRobot’s text chat window no longer treats typed “goodbye <identity>” phrases as keywords. Those messages are delivered to the bot verbatim; only spoken requests (or ones injected through the stdin control channel) trigger the shutdown helpers.
+
 ### Conversation keywords
 
 `configure_identity_keywords()` keeps the voice trigger list synchronized with the identity folders. Once configured, the helpers recognize:
