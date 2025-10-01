@@ -48,6 +48,12 @@ class TTSPreprocessingAgent:
         options = config.get("ollama_options")
         if not isinstance(options, dict):
             options = {}
+        options.setdefault("temperature", 0.0)
+        options.setdefault("top_p", 1.0)
+        options.setdefault("repeat_penalty", 1.0)
+        options.setdefault("mirostat", 0)
+        options.setdefault("seed", 0)
+        options.setdefault("stop", ["\n\n"])
         preamble_mode = resources.preamble_mode
         self._use_header = preamble_mode in {"header", "both"}
         self._use_prompt = preamble_mode in {"system", "both"}

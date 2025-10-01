@@ -5,7 +5,10 @@ from pathlib import Path
 import sys
 import types
 
-import requests  # Ensure the real package is loaded before optional stubbing
+try:
+    import requests  # type: ignore  # Ensure the real package is loaded before optional stubbing
+except ModuleNotFoundError:  # pragma: no cover - exercised only in minimal environments
+    requests = None  # type: ignore[assignment]
 
 import pytest
 
@@ -77,15 +80,20 @@ def agent_directory(tmp_path: Path) -> Path:
             {
                 "llm_model": "gemma3:1b",
                 "llm_url": "http://localhost:11434/api/chat",
-                "ollama_options": {"temperature": 0.1},
-                "header_text_file": "header_text.txt",
+                "ollama_options": {
+                    "temperature": 0.0,
+                    "top_p": 1.0,
+                    "repeat_penalty": 1.0,
+                    "mirostat": 0,
+                    "seed": 0,
+                    "stop": ["\\n\\n"],
+                },
                 "prompt_file": "system_prompt.txt",
-                "preamble": "both",
+                "preamble": "system",
             }
         ),
         encoding="utf-8",
     )
-    (agent_dir / "header_text.txt").write_text("Cleanup header", encoding="utf-8")
     (agent_dir / "system_prompt.txt").write_text("Cleanup prompt", encoding="utf-8")
     return agent_dir
 
@@ -93,20 +101,21 @@ def agent_directory(tmp_path: Path) -> Path:
 def test_load_resources(agent_directory: Path) -> None:
     resources = load_background_agent_resources(agent_directory)
     assert resources is not None
-    assert resources.header_text == "Cleanup header"
     assert resources.system_prompt == "Cleanup prompt"
+    assert resources.header_text is None
 
 
-def test_load_resources_system_mode(agent_directory: Path) -> None:
+def test_load_resources_with_header(agent_directory: Path) -> None:
     identity_path = agent_directory / "identity.json"
     config = json.loads(identity_path.read_text(encoding="utf-8"))
-    config["preamble"] = "system"
+    config["preamble"] = "both"
+    config["header_text_file"] = "header_text.txt"
     identity_path.write_text(json.dumps(config), encoding="utf-8")
-    (agent_directory / "header_text.txt").unlink()
+    (agent_directory / "header_text.txt").write_text("Cleanup header", encoding="utf-8")
 
     resources = load_background_agent_resources(agent_directory)
     assert resources is not None
-    assert resources.header_text is None
+    assert resources.header_text == "Cleanup header"
     assert resources.system_prompt == "Cleanup prompt"
 
 
@@ -120,6 +129,13 @@ def test_load_resources_invalid_preamble(agent_directory: Path) -> None:
 
 
 def test_rewrite_appends_header(agent_directory: Path) -> None:
+    identity_path = agent_directory / "identity.json"
+    config = json.loads(identity_path.read_text(encoding="utf-8"))
+    config["preamble"] = "both"
+    config["header_text_file"] = "header_text.txt"
+    identity_path.write_text(json.dumps(config), encoding="utf-8")
+    (agent_directory / "header_text.txt").write_text("Cleanup header", encoding="utf-8")
+
     resources = load_background_agent_resources(agent_directory)
     assert resources is not None
     dummy = DummyClient("rewritten")
@@ -131,12 +147,6 @@ def test_rewrite_appends_header(agent_directory: Path) -> None:
 
 
 def test_rewrite_without_header(agent_directory: Path) -> None:
-    identity_path = agent_directory / "identity.json"
-    config = json.loads(identity_path.read_text(encoding="utf-8"))
-    config["preamble"] = "system"
-    identity_path.write_text(json.dumps(config), encoding="utf-8")
-    (agent_directory / "header_text.txt").unlink()
-
     resources = load_background_agent_resources(agent_directory)
     assert resources is not None
     dummy = DummyClient("rewritten")
@@ -158,8 +168,8 @@ def test_rewrite_falls_back_to_original(agent_directory: Path, exception: Except
 
 
 def test_load_agent_handles_missing(agent_directory: Path) -> None:
-    # Remove the header to force a graceful failure
-    (agent_directory / "header_text.txt").unlink()
+    # Remove the system prompt to force a graceful failure
+    (agent_directory / "system_prompt.txt").unlink()
     assert load_tts_preprocessing_agent(agent_directory) is None
 
 

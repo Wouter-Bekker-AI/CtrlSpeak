@@ -22,7 +22,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 ICON_PATH = _PROJECT_ROOT / "assets" / "icon.ico"
 
-from background_agents import load_tts_preprocessing_agent, text_requires_cleaning
 from face_animation.face import FaceAnimator, FaceSettings
 from face_animation.logo import LogoAnimator
 from llm.ollama import OllamaClient, OllamaUnavailableError
@@ -34,6 +33,7 @@ else:
     from .ui.chat_window import ChatWindow
 
 from tools import keywords, vision
+from tools.message_management import force_plaintext, requires_force_plaintext
 from utils.config_paths import get_logger
 from utils.image_store import (
     IdentityImageRecord,
@@ -391,13 +391,7 @@ def main():
     )
 
     tts_model = KokoroTTS(voice=profile.voice, speed=1.0)
-    if profile.require_text_cleaning:
-        preprocessing_agent = load_tts_preprocessing_agent()
-        if preprocessing_agent is None:
-            print("-> TTS preprocessing agent unavailable; falling back to raw replies.")
-    else:
-        preprocessing_agent = None
-        print("-> Identity does not require text cleaning; skipping TTS preprocessing agent.")
+    print("-> TTS preprocessing agent is disabled; using deterministic scrub only when needed.")
 
     identity_settings = load_identity_settings(profile.name)
 
@@ -982,27 +976,37 @@ def main():
                 history_entry = {"role": "user", "content": transcript}
 
             history.append(history_entry)
-            history.append({"role": "assistant", "content": llm_response})
+
+        raw_response = llm_response
+        print("-> Raw LLM reply:", raw_response)
+
+        if requires_force_plaintext(raw_response):
+            print("-> Handing reply to force_plaintext().")
+            final_response = force_plaintext(raw_response)
+            print("-> Scrubbed reply:", final_response)
+            if final_response != raw_response:
+                print("-> Applied deterministic TTS scrub.")
+        else:
+            print("-> Reply does not require deterministic scrub.")
+            final_response = raw_response
+        print("-> Final reply for chat history and TTS:", final_response)
+
+        if not used_orchestrator:
+            history.append({"role": "assistant", "content": final_response})
             save_history(profile.memory_path, history[history_baseline:])
 
-        processed_response = llm_response
-        if preprocessing_agent is not None and text_requires_cleaning(llm_response):
-            rewritten = preprocessing_agent.rewrite(llm_response)
-            if rewritten != llm_response:
-                print("-> Preprocessed bot reply for TTS.")
-            processed_response = rewritten
-
-        print("-> Bot replied:", processed_response)
-
-        chat_window.append_bot_message(processed_response)
-        last_bot_response = processed_response
+        chat_window.append_bot_message(final_response)
+        last_bot_response = final_response
 
         if not voice_mode_active.is_set():
             animator.update_amplitude(0.0)
             return
 
         try:
-            audio_data = tts_model.synthesize(processed_response)
+            if not final_response:
+                animator.update_amplitude(0.0)
+                return
+            audio_data = tts_model.synthesize(final_response)
         except Exception as exc:
             print("TTS error:", exc)
             animator.update_amplitude(0.0)
