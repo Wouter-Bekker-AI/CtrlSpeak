@@ -20,12 +20,18 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+ICON_PATH = _PROJECT_ROOT / "assets" / "icon.ico"
+
 from background_agents import load_tts_preprocessing_agent, text_requires_cleaning
 from face_animation.face import FaceAnimator, FaceSettings
 from face_animation.logo import LogoAnimator
 from llm.ollama import OllamaClient, OllamaUnavailableError
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QTimer
+
+if __package__ in (None, ""):
+    from ui.chat_window import ChatWindow
+else:
+    from .ui.chat_window import ChatWindow
 
 from tools import keywords, vision
 from utils.config_paths import get_logger
@@ -183,6 +189,11 @@ def _read_prompt(identity_path: Path, prompt_file: str) -> Optional[str]:
     except Exception as exc:
         print(f"-> Failed to read system prompt from {prompt_path}: {exc}")
         return None
+
+
+def _identity_display(name: str) -> str:
+    return name.replace("_", " ").strip().title() or name
+
 
 def resolve_identity(args) -> tuple[IdentityProfile, dict]:
     root = _resolve_identities_root(args.identities_dir)
@@ -455,19 +466,33 @@ def main():
             ollama_client.unload()
         return
 
-    animator: object = None
-    app: Optional[QApplication] = None
-    animator_thread: Optional[threading.Thread] = None
     animation_style = config.get("animation_style")
+    app = QApplication.instance() or QApplication(sys.argv)
+    identity_display = _identity_display(profile.name)
+
+    chat_window = ChatWindow(identity_display, icon_path=ICON_PATH)
+    chat_window.set_voice_mode(False)
+    chat_window.show()
+
+    animator_thread: Optional[threading.Thread] = None
+    animator: object
 
     if animation_style == "logo":
-        app = QApplication(sys.argv)
         logo_image = config.get("logo_image")
-        logo_path = profile.base_path / logo_image if logo_image else None
-        if not logo_path or not logo_path.exists():
-            raise RuntimeError(f"Logo image not found: {logo_path}")
+        logo_path: Optional[Path] = None
+        if logo_image:
+            candidate = profile.base_path / logo_image
+            if candidate.exists():
+                logo_path = candidate
+            else:
+                fallback = _PROJECT_ROOT / "assets" / Path(logo_image).name
+                if fallback.exists():
+                    logo_path = fallback
+        if logo_path is None:
+            raise RuntimeError(f"Logo image not found: {logo_image}")
         animator = LogoAnimator(logo_path=logo_path)
         animator.setup_widget()
+        animator.hide_widget()
     else:
         face_settings = FaceSettings(window_size=(1920, 1080), rotation_degrees=0)
         face_image_rotation = config.get("face_image_rotation")
@@ -487,19 +512,89 @@ def main():
             if mouth_image_path.exists():
                 face_settings.mouth_image_path = str(mouth_image_path)
         animator = FaceAnimator(settings=face_settings)
-        animator_thread = threading.Thread(target=animator.run, daemon=True)
-        animator_thread.start()
 
     vad_config = VADConfig(sample_rate=16000, frame_duration_ms=30, padding_duration_ms=360, aggressiveness=2, deactivation_ratio=0.9)
     vad_listener: Optional[VADListener] = None
+    vad_thread: Optional[threading.Thread] = None
+    voice_mode_active = threading.Event()
     last_bot_response: str = ""
     processing_lock = threading.Lock()
     shutdown_requested = threading.Event()
     shutdown_complete = threading.Event()
     failsafe_timer: Optional[threading.Timer] = None
 
-    def _identity_display(name: str) -> str:
-        return name.replace("_", " ").strip().title() or name
+    def _ensure_animator_running() -> None:
+        nonlocal animator_thread
+        if isinstance(animator, FaceAnimator):
+            if animator_thread is None or not animator_thread.is_alive():
+                animator_thread = threading.Thread(target=animator.run, daemon=True)
+                animator_thread.start()
+        elif isinstance(animator, LogoAnimator):
+            animator.show_widget()
+
+    def _suspend_animator() -> None:
+        if isinstance(animator, LogoAnimator):
+            animator.hide_widget()
+
+    def _enable_voice_mode() -> None:
+        nonlocal vad_listener, vad_thread
+        if voice_mode_active.is_set():
+            return
+        voice_mode_active.set()
+        chat_window.set_voice_mode(True)
+        _ensure_animator_running()
+        print("-> Voice mode enabled; starting the VAD listener...")
+        vad_listener = VADListener(
+            config=vad_config,
+            device_index=None,
+            on_speech_callback=on_speech_detected,
+        )
+        vad_thread = threading.Thread(target=vad_listener.start, daemon=True)
+        vad_thread.start()
+
+    def _disable_voice_mode() -> None:
+        nonlocal vad_listener, vad_thread
+        if not voice_mode_active.is_set():
+            return
+        voice_mode_active.clear()
+        print("-> Voice mode disabled; returning to text chat.")
+
+        def _ui_teardown() -> None:
+            chat_window.set_voice_mode(False)
+            _suspend_animator()
+
+        chat_window.invoke(_ui_teardown)
+        if vad_listener is not None:
+            vad_listener.stop()
+        if vad_thread is not None:
+            vad_thread.join(timeout=2.0)
+            vad_thread = None
+        vad_listener = None
+        if tts_model.is_playing:
+            tts_model.stop_playback()
+        animator.update_amplitude(0.0)
+
+    def _on_text_submitted(message: str) -> None:
+        cleaned = message.strip()
+        if not cleaned:
+            return
+        chat_window.append_user_message(cleaned)
+
+        def _worker() -> None:
+            with processing_lock:
+                _handle_user_request(cleaned, source="text")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_voice_mode_requested(enabled: bool) -> None:
+        if enabled:
+            _enable_voice_mode()
+        else:
+            _disable_voice_mode()
+
+    chat_window.send_text.connect(_on_text_submitted)
+    chat_window.voice_mode_requested.connect(_on_voice_mode_requested)
+    chat_window.closed.connect(lambda: shutdown_requested.set())
 
     def _resolve_identity_name(candidate: str) -> Optional[str]:
         if not candidate:
@@ -561,6 +656,11 @@ def main():
 
         print(f"-> Ending conversation with '{profile.name}'.")
 
+        try:
+            _disable_voice_mode()
+        except Exception:
+            logger.exception("Failed to disable voice mode during shutdown request")
+
         logger.debug("Shutdown stage: stopping VAD listener")
         try:
             if vad_listener is not None:
@@ -596,13 +696,6 @@ def main():
         except Exception:
             logger.exception("Failed while waiting for animator thread during shutdown")
 
-        qt_app = QApplication.instance()
-        if qt_app is not None:
-            logger.debug("Shutdown stage: requesting Qt application quit")
-            QTimer.singleShot(0, qt_app.quit)
-        else:
-            logger.debug("Shutdown stage: Qt application not running")
-
         logger.debug("Shutdown stage: closing stdin control pipe")
         try:
             if sys.stdin is not None and not sys.stdin.closed:
@@ -626,11 +719,12 @@ def main():
         if failsafe_timer is not None:
             failsafe_timer.cancel()
 
-        timer = threading.Timer(3.0, _force_exit)
-        timer.daemon = True
-        failsafe_timer = timer
-        timer.start()
-        logger.debug("Goodbye failsafe armed for identity '%s'", profile.name)
+        if app is None:
+            timer = threading.Timer(3.0, _force_exit)
+            timer.daemon = True
+            failsafe_timer = timer
+            timer.start()
+            logger.debug("Goodbye failsafe armed for identity '%s'", profile.name)
 
     def _handle_conversation_start(identity_name: str) -> None:
         target = _resolve_identity_name(identity_name)
@@ -699,6 +793,11 @@ def main():
         else:
             print("-> User said:", transcript)
 
+        if source == "voice":
+            chat_window.append_user_message(cleaned, via_voice=True)
+        elif source == "command":
+            chat_window.append_user_message(cleaned)
+
         if tts_model.is_playing:
             tts_model.stop_playback()
 
@@ -730,18 +829,34 @@ def main():
                 animator.update_amplitude(0.0)
                 return
 
-            end_match = None
-            if source != "voice":
+            if source == "command":
                 end_match = keywords.detect_conversation_end_keyword(cleaned)
-            if end_match:
-                logger.debug(
-                    "Detected conversation end keyword targeting '%s' via %s input",
-                    end_match.keyword.payload,
-                    source,
-                )
-                _handle_conversation_end(end_match.keyword.payload)
-                animator.update_amplitude(0.0)
-                return
+                if end_match:
+                    logger.debug(
+                        "Detected conversation end keyword targeting '%s' via %s input",
+                        end_match.keyword.payload,
+                        source,
+                    )
+                    _handle_conversation_end(end_match.keyword.payload)
+                    animator.update_amplitude(0.0)
+                    return
+            elif source != "text":
+                if not voice_mode_active.is_set():
+                    logger.debug(
+                        "Ignoring conversation end keyword via %s input because voice mode is inactive",
+                        source,
+                    )
+                else:
+                    end_match = keywords.detect_conversation_end_keyword(cleaned)
+                    if end_match:
+                        logger.debug(
+                            "Detected conversation end keyword targeting '%s' via %s input",
+                            end_match.keyword.payload,
+                            source,
+                        )
+                        _handle_conversation_end(end_match.keyword.payload)
+                        animator.update_amplitude(0.0)
+                        return
 
         nonlocal use_orchestrator
 
@@ -879,14 +994,19 @@ def main():
 
         print("-> Bot replied:", processed_response)
 
+        chat_window.append_bot_message(processed_response)
+        last_bot_response = processed_response
+
+        if not voice_mode_active.is_set():
+            animator.update_amplitude(0.0)
+            return
+
         try:
             audio_data = tts_model.synthesize(processed_response)
         except Exception as exc:
             print("TTS error:", exc)
             animator.update_amplitude(0.0)
             return
-
-        last_bot_response = processed_response
 
         def amplitude_callback(level: float) -> None:
             animator.update_amplitude(level)
@@ -1007,15 +1127,6 @@ def main():
     command_thread = threading.Thread(target=_stdin_command_listener, daemon=True)
     command_thread.start()
 
-    vad_listener = VADListener(
-        config=vad_config,
-        device_index=None,
-        on_speech_callback=on_speech_detected,
-    )
-    print("-> Starting the VAD listener...")
-    vad_thread = threading.Thread(target=vad_listener.start, daemon=True)
-    vad_thread.start()
-
     try:
         if app:
             app.exec()
@@ -1031,6 +1142,10 @@ def main():
     finally:
         logger.info("Shutdown cleanup starting for '%s'", profile.name)
         shutdown_complete.set()
+        try:
+            _disable_voice_mode()
+        except Exception:
+            logger.exception("Failed to disable voice mode during cleanup")
         try:
             if vad_listener is not None:
                 logger.debug("Cleanup stage: stopping VAD listener")

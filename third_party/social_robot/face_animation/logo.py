@@ -222,7 +222,7 @@ class LogoAnimator(QObject):
                 screen_geo.bottom() - self.widget.height() - 20,
             )
 
-        self.widget.show()
+        self.widget.hide()
 
     def run(self) -> None:
         if not self.app:
@@ -235,8 +235,19 @@ class LogoAnimator(QObject):
         self.update_signal.emit(scale)
 
     def stop(self) -> None:
+        if self.widget is not None:
+            self.widget.hide()
         if self.app:
             self.app.quit()
+
+    def show_widget(self) -> None:
+        if self.widget is not None:
+            self.widget.show()
+            self.widget.raise_()
+
+    def hide_widget(self) -> None:
+        if self.widget is not None:
+            self.widget.hide()
 
     def set_look_at_screen_callback(
         self, callback: Optional[Callable[[], None]]
