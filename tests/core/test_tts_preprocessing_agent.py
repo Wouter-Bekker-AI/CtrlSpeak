@@ -45,6 +45,7 @@ from background_agents.tts_preprocessing_agent.background_agent import (
     TTSPreprocessingAgent,
     load_background_agent_resources,
     load_tts_preprocessing_agent,
+    text_requires_cleaning,
 )
 from third_party.social_robot.llm.ollama import OllamaUnavailableError
 
@@ -160,3 +161,17 @@ def test_load_agent_handles_missing(agent_directory: Path) -> None:
     # Remove the header to force a graceful failure
     (agent_directory / "header_text.txt").unlink()
     assert load_tts_preprocessing_agent(agent_directory) is None
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Simple sentence for playback.", False),
+        ("Hello  world!", False),
+        ("This *should* be cleaned", True),
+        ("Heading #1", True),
+        ("Normal punctuation, nothing fancy.", False),
+    ],
+)
+def test_text_requires_cleaning(text: str, expected: bool) -> None:
+    assert text_requires_cleaning(text) is expected

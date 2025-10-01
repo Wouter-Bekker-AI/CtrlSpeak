@@ -25,7 +25,7 @@ from utils.vector_memory import RetrievedMemory, VectorMemoryStore
 
 CONVERSATION_MAX_BYTES = 10 * 1024 * 1024
 CONVERSATION_KEEP = 5
-PERSIST_START_DELAY_SECONDS = 0.01
+PERSIST_START_DELAY_SECONDS = 0.05
 
 
 logger = get_logger(__name__)

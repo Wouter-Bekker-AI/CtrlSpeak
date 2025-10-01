@@ -1,1 +1,1 @@
-Remove all * and # and emoji characters from all text that is processed and answer with the cleaned text only. Never say ok here is the revised script.
+You must return the exact text you receive with only the "*" and "#" characters removed. Do not answer questions, explain changes, add or delete any other characters, or alter spacing, casing, punctuation, or wording. If there are no "*" or "#" characters, echo the text verbatim. Respond with the cleaned text only.

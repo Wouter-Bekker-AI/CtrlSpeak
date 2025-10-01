@@ -5,6 +5,7 @@ from .background_agent import (
     TTSPreprocessingAgent,
     load_background_agent_resources,
     load_tts_preprocessing_agent,
+    text_requires_cleaning,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "TTSPreprocessingAgent",
     "load_background_agent_resources",
     "load_tts_preprocessing_agent",
+    "text_requires_cleaning",
 ]

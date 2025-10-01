@@ -16,6 +16,8 @@ _DEFAULT_AGENT_DIR = Path(__file__).resolve().parent
 
 logger = get_logger(__name__)
 
+_TRIGGER_CHARACTERS = frozenset({"*", "#"})
+
 
 @dataclass(frozen=True)
 class BackgroundAgentResources:
@@ -90,6 +92,15 @@ class TTSPreprocessingAgent:
         if not rewritten:
             return text
         return rewritten
+
+
+def text_requires_cleaning(text: str) -> bool:
+    """Return ``True`` only when *text* includes the characters we strip (``*``/``#``)."""
+
+    if not text:
+        return False
+
+    return any(char in _TRIGGER_CHARACTERS for char in text)
 
 
 def _read_optional_text(path: Path) -> Optional[str]:

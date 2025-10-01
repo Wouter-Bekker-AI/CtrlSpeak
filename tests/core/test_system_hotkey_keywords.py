@@ -101,6 +101,18 @@ def test_hotkey_goodbye_stops_active_identity(bot_module):
     assert start_calls == []
 
 
+def test_hotkey_goodbye_handles_punctuation(bot_module):
+    stop_calls: list[str] = []
+
+    bot_module.get_active_identity = lambda: "assistant"
+    bot_module.stop_bot = lambda: stop_calls.append("stop")
+
+    handled = system.handle_transcribed_text_from_hotkey("goodbye, assistant!")
+
+    assert handled is True
+    assert stop_calls == ["stop"]
+
+
 def test_hotkey_goodbye_for_other_identity_is_ignored(bot_module):
     stop_calls: list[str] = []
     start_calls: list[str] = []
@@ -129,3 +141,20 @@ def test_hotkey_non_keyword_returns_false(bot_module):
     assert handled is False
     assert stop_calls == []
     assert start_calls == []
+
+
+def test_hotkey_supports_fuzzy_chat(bot_module):
+    start_calls: list[str] = []
+
+    bot_module.get_active_identity = lambda: None
+
+    def _start_bot(*, identity: str | None = None, **_kwargs) -> bool:
+        start_calls.append(identity)
+        return True
+
+    bot_module.start_bot = _start_bot
+
+    handled = system.handle_transcribed_text_from_hotkey("please chat was assistant right now")
+
+    assert handled is True
+    assert start_calls == ["assistant"]

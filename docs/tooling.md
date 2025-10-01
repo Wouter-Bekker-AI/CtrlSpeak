@@ -94,7 +94,7 @@ SocialRobot consumes this module to decide whether the user asked for a screensh
 
 ### Keyword reference
 
-The application responds to the following spoken or typed keywords. Each phrase is matched case-insensitively, and the clipboard trigger also accepts near-miss variations such as “look at my slipboard” or “look at my clupboard.”
+The application responds to the following spoken or typed keywords. Each phrase is matched case-insensitively and with a fuzzy tolerance for punctuation or common speech-to-text substitutions. The clipboard trigger continues to accept near-miss variations such as “look at my slipboard” or “look at my clupboard,” and the same tolerance now applies to the conversation controls.
 
 | Keyword | Category | Action |
 | --- | --- | --- |
@@ -107,8 +107,8 @@ The application responds to the following spoken or typed keywords. Each phrase 
 
 `configure_identity_keywords()` keeps the voice trigger list synchronized with the identity folders. Once configured, the helpers recognize:
 
-- `chat with <identity>` – immediately relaunches SocialRobot with the requested identity via the transcription server (no action is taken when the user asks for the already-active persona).
-- `goodbye <identity>` – immediately ends the current conversation and shuts the bot down from the CtrlSpeak main process before SocialRobot processes the utterance.
+- `chat with <identity>` – immediately relaunches SocialRobot with the requested identity via the transcription server (no action is taken when the user asks for the already-active persona). Close variants like “chat was assistant” are recognised automatically.
+- `goodbye <identity>` – immediately ends the current conversation and shuts the bot down from the CtrlSpeak main process before SocialRobot processes the utterance. Light punctuation (for example, “goodbye, assistant”) remains valid.
 
 The `<identity>` placeholder uses the directory names under `third_party/social_robot/identities/`. Call `configure_identity_keywords()` whenever you add or remove identities (for example, during application startup) to keep the registry current.
 
