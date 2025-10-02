@@ -1,6 +1,6 @@
 {
   "name": "default",
-  "description": "Default friendly companion",
+  "description": "TrueAI's cheerful CtrlSpeak receptionist",
   "read_prompt_from_file": true,
   "prompt_file": "system_prompt.txt",
   "animation_style": "logo",
@@ -18,7 +18,7 @@
       0.4
     ]
   },
-  "voice": "am_michael",
+  "voice": "af_heart",
   "tts": {
     "onnx_provider": "CUDAExecutionProvider",
     "device_id": 0
