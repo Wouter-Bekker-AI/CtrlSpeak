@@ -7,7 +7,7 @@ Both flavours support Windows 10/11, enforce a single running instance, expose a
 ## Repository Layout
 
 - `main.py` – application entry point.
-- `background_agents/` – self-contained helpers that run alongside Chat with Bot. The bundled `manage_think` helper suppresses `<think>` plans for personas that set `"hide_think": true`, and the `tts_preprocessing_agent` paragraphizes profile-style replies for identities that opt into text cleaning.
+- `background_agents/` – self-contained helpers that run alongside Chat with Bot. The bundled `manage_think` helper suppresses `<think>` plans for personas that set `"hide_think": true`.
 - `assets/` – static resources such as the tray icon (`icon.ico`), the welcome video (`TrueAI_Intro_Video.mp4`), the fun-fact rotation list (`fun_facts.txt`), and the processing chime (`loading.wav`).
 - `utils/` – implementation modules (GUI, models, networking, configuration helpers, etc.).
 - `utils/build_exe.py` – helper script that runs PyInstaller with the correct data files.
@@ -66,7 +66,7 @@ Run `python main.py --help` for the full list.
 
 ### Chat with Bot speech pipeline
 
-When you launch **Chat with Bot**, SocialRobot inspects each assistant reply and only invokes `tools.message_management.force_plaintext` when markdown bullets, control characters, or similar formatting artefacts are present. The deterministic scrub runs before persistence and Kokoro playback so the spoken reply, chat history, and vector store all receive the safe version; otherwise the untouched reply flows straight through. The Profile Paragraphizer assets remain in the repository for future use, but the TTS preprocessing agent is currently out of the runtime loop.
+When you launch **Chat with Bot**, SocialRobot inspects each assistant reply and only invokes `tools.message_management.force_plaintext` when markdown bullets, control characters, or similar formatting artefacts are present. The deterministic scrub runs before persistence and Kokoro playback so the spoken reply, chat history, and vector store all receive the safe version; otherwise the untouched reply flows straight through.
 
 Kokoro includes GPU acceleration because `requirements.txt` ships with `onnxruntime-gpu==1.23.0`, and the bundled identities now request the CUDA provider by default. CtrlSpeak automatically falls back to CPU when no GPU backend is available and prints a warning so operators know Kokoro could not stay on the GPU. You can override the provider or device by adding a `tts` block (or exporting `BOT_TTS_PROVIDER`/`BOT_TTS_DEVICE_ID`).
 

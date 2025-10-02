@@ -29,11 +29,6 @@
 - Document any new keywords alongside these helpers to keep future contributors from bypassing the main-thread enforcement. Regressions that reintroduce keyword handling inside the child process are blocked because they revive the historical bug where “goodbye” phrases left SocialRobot running.
 - Keyword detectors must remain **fuzzy**. Match punctuation-insensitive and near-miss transcriptions (for example, “goodbye, assistant” or “chat was assistant”) unless a specification explicitly demands exact phrasing. Hard matching regressions risk stranding conversations when STT introduces minor substitutions.
 
-## TTS preprocessing guardrails
-- The background cleaning agent exists solely to delete `*` and `#` characters from LLM replies before TTS playback. Do not expand its responsibilities to rephrase, summarise, or otherwise alter the wording.
-- Only invoke the agent when the reply actually contains those characters. Clean passages must go straight to Kokoro without touching the helper.
-- Keep the prompt assets and Ollama options (Gemma 3 1B at temperature 0) locked down so the model echoes the input verbatim aside from the removed characters. Never let the helper answer questions, change pronouns, or inject extra narration.
-
 ## Tkinter and UI threading
 - The hidden Tk root and all GUI windows are created on the **main thread** by `_initialize_management_ui_on_main_thread`. Do not create additional Tk roots or run `mainloop` outside the main thread.【F:utils/gui.py†L807-L870】
 - Background threads may request UI work only through the management queue helpers (for example `_call_on_management_ui`). Direct Tk calls from worker threads are forbidden, and `pump_management_events_once` enforces that by raising if called off-thread.【F:utils/gui.py†L780-L899】

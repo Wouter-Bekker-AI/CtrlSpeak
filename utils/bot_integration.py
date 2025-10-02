@@ -793,21 +793,18 @@ def start_bot(
             _release_identity_lock()
             return False
 
-    agent_llm_url: Optional[str] = None
-    agent_llm_model: Optional[str] = None
-    agent_options: Dict[str, Any] = {}
-    agent_hardware: Optional[str] = None
     if _identity_requires_text_cleaning(target_identity, identities_dir):
-        (
-            _agent_dir,
-            agent_llm_url,
-            agent_llm_model,
-            agent_options,
-            agent_hardware,
-        ) = _load_preprocessor_identity()
-        if not _ensure_preprocessor_llm_ready(agent_llm_model, agent_llm_url):
-            _release_identity_lock()
-            return False
+        if _TTS_PREPROCESSOR_DIR.exists():
+            logger.info(
+                "Identity %s requires text cleaning; skipping TTS preprocessing agent warm-up",
+                target_identity,
+            )
+        else:
+            logger.info(
+                "Identity %s requires text cleaning but no preprocessing agent assets were found at %s",
+                target_identity,
+                _TTS_PREPROCESSOR_DIR,
+            )
     else:
         logger.info(
             "Identity %s does not require TTS preprocessing; skipping agent preparation",
@@ -835,29 +832,6 @@ def start_bot(
                 "Skipping Ollama warm-up for model %s (state=%s)",
                 resolved_model_name,
                 state,
-            )
-
-    agent_base_url: Optional[str] = None
-    agent_model_name: Optional[str] = None
-    if agent_llm_model:
-        agent_model_name = agent_llm_model.strip() or None
-    if agent_llm_url:
-        agent_base_url = _normalize_ollama_base_url(agent_llm_url)
-
-    if agent_base_url and agent_model_name:
-        agent_state = _ollama_model_state(agent_base_url, agent_model_name)
-        if agent_state is True:
-            _warm_ollama_model(
-                agent_llm_url,
-                agent_model_name,
-                agent_options,
-                agent_hardware,
-            )
-        else:
-            logger.debug(
-                "Skipping Ollama warm-up for preprocessing model %s (state=%s)",
-                agent_model_name,
-                agent_state,
             )
 
     env = os.environ.copy()
