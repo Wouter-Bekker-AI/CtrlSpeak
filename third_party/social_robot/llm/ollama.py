@@ -63,15 +63,59 @@ class OllamaClient:
 
     def _compose_options(self) -> Dict[str, Any]:
         options: Dict[str, Any] = {k: v for k, v in self._base_options.items() if v is not None}
-        mode = self._hardware_mode
+        mode = (self._hardware_mode or "").lower()
+
         if mode == "cpu_only":
-            options["gpu_only"] = False
             options["num_gpu"] = 0
         elif mode == "gpu_only":
-            options["gpu_only"] = True
-        elif mode == "cpu_and_gpu":
-            options.setdefault("gpu_only", False)
-        return options
+            options["num_gpu"] = options.get("num_gpu", 999)
+            options.setdefault("main_gpu", 0)
+            options.setdefault("gpu_split", [0.6, 0.4])
+            options.setdefault("low_vram", False)
+        else:
+            if "num_gpu" not in options:
+                options["num_gpu"] = None
+
+        return {k: v for k, v in options.items() if v is not None}
+
+    def _ps(self) -> dict:
+        endpoint = self.url
+        if endpoint.endswith("/chat"):
+            endpoint = f"{endpoint[:-5]}/ps"
+        else:
+            endpoint = endpoint.replace("/chat", "/ps")
+        try:
+            response = requests.get(endpoint, timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _ensure_gpu_only(self) -> None:
+        info = self._ps()
+        models = info.get("models") if isinstance(info, dict) else []
+        target = self.model.split(":", 1)[0]
+
+        for model_info in models:
+            name = str(model_info.get("model") or model_info.get("name") or "")
+            if name and target not in name:
+                continue
+
+            if model_info.get("gpu") is False:
+                raise OllamaUnavailableError(
+                    "Strict GPU mode requires the model to reside entirely on the GPU (CPU offload detected)."
+                )
+
+            vram = model_info.get("size_vram") or model_info.get("vram")
+            size = model_info.get("size") or model_info.get("size_model")
+            if size and not vram:
+                raise OllamaUnavailableError(
+                    "Strict GPU mode requires the model to reside entirely on the GPU (missing VRAM allocation)."
+                )
+
+        # If the model list is empty or the model isn't present, assume Ollama hasn't loaded it yet.
+        # The subsequent query will surface availability errors if the preload failed.
 
     def _normalize_history_entry(self, entry: dict) -> dict:
         role = entry.get("role", "user")
@@ -141,6 +185,25 @@ class OllamaClient:
         options = self._compose_options()
         if options:
             payload["options"] = options
+
+        if self._hardware_mode == "gpu_only":
+            preload_payload = {"model": self.model, "messages": [], "stream": False}
+            if options:
+                preload_payload["options"] = options
+            try:
+                preload_response = requests.post(self.url, json=preload_payload, timeout=60)
+                preload_response.raise_for_status()
+            except Exception as exc:
+                return self._fallback_response(user_text, use_stream, exc)
+            try:
+                self._ensure_gpu_only()
+            except OllamaUnavailableError:
+                self.unload()
+                raise
+            except Exception as exc:
+                self.unload()
+                return self._fallback_response(user_text, use_stream, exc)
+
         print("-> Sending user text to Ollama:\n", user_text)
 
         try:

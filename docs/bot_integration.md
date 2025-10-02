@@ -29,10 +29,17 @@ The loader understands the following `identity.json` keys:
   "prompt_file": "system_prompt.txt",
   "llm_model": "gemma3:1b",
   "llm_url": "http://localhost:11434/api/chat",
-  "ollama_hardware": "cpu_and_gpu",
+  "ollama_hardware": "gpu_only",
   "ollama_options": {
     "temperature": 0.9,
-    "num_ctx": 4000
+    "num_ctx": 4000,
+    "num_gpu": 999,
+    "main_gpu": 0,
+    "gpu_split": [0.6, 0.4]
+  },
+  "tts": {
+    "onnx_provider": "CUDAExecutionProvider",
+    "device_id": 0
   },
   "voice": "am_michael",
   "require_text_cleaning": false,
@@ -42,15 +49,26 @@ The loader understands the following `identity.json` keys:
 }
 ```
 
+The `tts` block is optional, but the bundled identities include it so Kokoro explicitly requests the CUDA provider. Removing the block lets Kokoro fall back to its auto-detection logic (still preferring GPU providers whenever ONNX Runtime exposes them).
+
 If `read_prompt_from_file` is `true`, the prompt file is read relative to the identity directory (unless an absolute path is provided). Omitting it falls back to the built-in default prompt.
 
 When present, `ollama_options` is merged into the payload that SocialRobot sends to Ollama so you can tune generation parameters per identity. The optional `ollama_hardware` key controls how Ollama stages the weights:
 
 - `cpu_only` – force the model to reside entirely in system RAM (`num_gpu` is set to zero).
-- `cpu_and_gpu` – allow Ollama to combine VRAM and RAM (the default when unspecified).
-- `gpu_only` – require the checkpoint to stay fully on the GPU (`gpu_only: true`).
+- `cpu_and_gpu` – allow Ollama to combine VRAM and RAM (the Ollama default when no hardware preference is supplied).
+- `gpu_only` – request that all available layers stay on the GPU (`num_gpu` is set to a high value, `main_gpu` defaults to `0`, and a `[0.6, 0.4]` `gpu_split` tells Ollama to place roughly 60% of the layers on GPU ID 0 and 40% on GPU ID 1 unless you override it).
 
-CtrlSpeak applies the same options and hardware preference when it pre-warms the checkpoint via `/generate`, ensuring the residency chosen during warm-up matches the settings SocialRobot will use at runtime.
+CtrlSpeak applies the same options and hardware preference when it pre-warms the checkpoint via `/generate`, ensuring the residency chosen during warm-up matches the settings SocialRobot will use at runtime. When `gpu_only` is requested, the client refuses to continue if `/api/ps` reports CPU spillover so misconfigured VRAM budgets fail fast instead of silently degrading.
+
+The optional `tts` object lets you steer Kokoro’s ONNX Runtime session:
+
+- `onnx_provider` – Preferred provider name (for example `CUDAExecutionProvider`, `CPUExecutionProvider`, `DmlExecutionProvider`). Aliases such as `cuda` or `gpu` are normalized automatically. When omitted, Kokoro still attempts to use GPU providers first whenever ONNX Runtime reports them as available.
+- `device_id` – Integer device index passed to GPU-capable providers. Use it to pin Kokoro to GPU 1 while Ollama consumes GPU 0, for example. Invalid or missing values are ignored.
+- `providers` – Advanced escape hatch that accepts a JSON list mirroring the structure expected by `onnxruntime.InferenceSession` (for example `["CUDAExecutionProvider", {"name": "CPUExecutionProvider"}]` or `[{"name": "CUDAExecutionProvider", "options": {"device_id": 1}}]`).
+- `provider_options` – Additional key/value pairs to merge into the provider options when you only need to override a handful of settings (for example `{ "cudnn_conv_algo_search": "DEFAULT" }`).
+
+If you omit the block entirely, Kokoro continues to probe GPU providers automatically. When a requested provider is missing (for example because CUDA DLLs are not installed), the runtime logs which providers were skipped or why GPU initialisation failed before falling back to the default CPU session.
 
 > **Note**
 > The `memory_dir` field remains in legacy identity configs for compatibility, but CtrlSpeak always resolves runtime storage through the AppData helpers described above. Repository-relative memory paths are ignored so packaged builds stay read-only.
@@ -167,6 +185,16 @@ run_bot_test("assets/test_16k_mono.wav", identity="default")
 
 The helper reuses an existing server when you pass `stt_url=...`, and you can forward identity-specific overrides such as `prompt_file`, `system_prompt`, or `voice`.
 
+## Configuring Kokoro TTS for GPU-first inference
+
+Kokoro relies on ONNX Runtime. Because the root `requirements.txt` installs `onnxruntime-gpu==1.23.0`, the bundled identities request the CUDA provider by default and Kokoro automatically attempts to run on the GPU. When ONNX Runtime cannot honor that request—whether because the host has no GPU or the CUDA DLLs are missing—the engine falls back to the CPU and prints a warning so operators know TTS is no longer on the GPU. To customise that behaviour or pin Kokoro to a different device:
+
+1. Set the identity’s `tts` block to request the provider you want (`"onnx_provider": "CUDAExecutionProvider"` and an optional `"device_id"`). The default personas already do this with `device_id: 0`.
+2. Alternatively, export `BOT_TTS_PROVIDER`, `BOT_TTS_DEVICE_ID`, or `BOT_TTS_PROVIDERS` before launching Chat with Bot to override the identity defaults without touching JSON.
+3. Launch the assistant and watch `nvidia-smi`—you should see a small memory bump on the specified GPU when TTS audio is generated. Successful GPU initialisation prints `-> Kokoro TTS using GPU providers: [...]` so you can confirm it at a glance.
+
+If the chosen provider is unavailable (for example because the machine lacks `cufft64_11.dll` or cuDNN), CtrlSpeak logs which providers were skipped and emits a `Falling back to CPU` warning before proceeding. You can continue to control visibility with `CUDA_VISIBLE_DEVICES` or similar environment variables when you need to hide GPUs from ONNX Runtime entirely.
+
 ## Environment Overrides
 
 | Variable | Purpose |
@@ -180,8 +208,35 @@ The helper reuses an existing server when you pass `stt_url=...`, and you can fo
 | `BOT_LLM_MODEL` | Ollama model name (default `gemma3:1b`). |
 | `BOT_VOICE` | Kokoro voice (default `hm_omega`). |
 | `CTRLSPEAK_STT_URL` | Force SocialRobot to target a specific CtrlSpeak server. |
+| `BOT_TTS_PROVIDER` | Override the Kokoro ONNX Runtime provider (e.g. `CUDAExecutionProvider`). |
+| `BOT_TTS_DEVICE_ID` | GPU device index for providers that support it. |
+| `BOT_TTS_PROVIDERS` | JSON list passed directly to `onnxruntime.InferenceSession` for Kokoro. |
+| `BOT_TTS_PROVIDER_OPTIONS` | JSON object merged into the provider options when Kokoro is created. |
 
 Each option also has a matching CLI flag in `third_party/social_robot/main.py` (for example `--identity`, `--prompt-file`, `--system-prompt`, `--memory-dir`).
+
+## Provisioning Ollama for a new multi-GPU workstation
+
+When you move to a fresh Windows machine and need Ollama to split work across multiple GPUs, perform the following host setup before launching CtrlSpeak or issuing API calls:
+
+1. **Confirm the Ollama port and stop previous processes.** Check `%LOCALAPPDATA%\Ollama\server.log` (or run `netstat -ano | find "11434"`) to verify the daemon is bound to `0.0.0.0:11434`. End any lingering `ollama.exe`, `ollama_runners.exe`, or `wslrelay.exe` processes that might still own the port so the restart is clean.
+2. **Set persistent GPU environment variables.** From an elevated PowerShell session, run:
+   ```powershell
+   setx /M CUDA_VISIBLE_DEVICES "0,1"
+   setx /M OLLAMA_SCHED_SPREAD "1"
+   ```
+   These values survive reboots; log off (or reboot) so the Ollama service inherits them. Listing both device IDs keeps CUDA discovery deterministic, and `OLLAMA_SCHED_SPREAD=1` tells Ollama to balance layers instead of piling everything onto the first GPU.
+3. **(Optional) Pre-stage a default split.** If you want Ollama to remember a custom fraction even without client overrides, create `%LOCALAPPDATA%\Ollama\server.json` with:
+   ```json
+   {
+     "gpu_split": [0.6, 0.4]
+   }
+   ```
+   Skip this file when you prefer to manage splits entirely from the API payload.
+4. **Restart the Ollama service.** Run `ollama serve` (or launch the desktop UI) after the environment variables are in place. Watch `server.log` for fresh `inference compute` entries that enumerate both GPUs and confirm no port-in-use warnings appear.
+5. **Validate GPU usage.** Issue a short test prompt (CLI or API) while monitoring `nvidia-smi`. You should see both cards pick up load, and the log’s `GPULayers` breakdown should mention GPU `0` and `1`. Adjust the per-request `gpu_split` array or `main_gpu` index if the distribution needs fine-tuning.
+
+Once the host honors these defaults, CtrlSpeak’s `gpu_only` hardware mode—combined with the `[0.6, 0.4]` request-level `gpu_split`—keeps the model resident on both GPUs without additional machine-specific tweaks.
 
 ## Assistant Model Downloads
 

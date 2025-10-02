@@ -17,6 +17,7 @@ pyright
 requests==2.32.3
 pygame==2.6.1
 kokoro-onnx==0.4.9
+onnxruntime-gpu==1.23.0
 webrtcvad-wheels
 PySide6
 portalocker>=2.10.0
