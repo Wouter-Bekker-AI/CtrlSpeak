@@ -100,6 +100,8 @@ The application responds to the following spoken or typed keywords. Each phrase 
 | --- | --- | --- |
 | `look at my screen` | Vision | Capture the user’s current desktop, store it as the identity’s latest image, and play the camera shutter sound. |
 | `look at my clipboard` (including close variants like “look at my slipboard”) | Vision | Read the latest image from the system clipboard, replace the identity’s stored image, and play the camera shutter sound. |
+| `update documentation` (also accepts “refresh documentation”) | Memory maintenance | Force a documentation-ingestion pass for the active identity (assistant or default), bypassing the 24-hour cooldown. |
+| `update datetime` (accepts “update date time” or “refresh date time”) | Memory maintenance | Force the active identity to store the latest local date, timezone, and locale snapshot in vector memory, bypassing the 24-hour cooldown. |
 | `chat with <identity>` | Conversation start | Relaunch the bot using the requested identity via the transcription server (ignored if that identity is already active). |
 | `goodbye <identity>` | Conversation end | Shut down the active conversation for the specified identity from the CtrlSpeak main process. |
 
@@ -129,3 +131,32 @@ The same registry now powers the push-to-talk workflow: when the user holds the 
 5. Ensure packaging scripts pick up the new module if they rely on explicit include lists.
 
 Maintaining `docs/tooling.md` keeps CtrlSpeak’s tooling surface discoverable and prevents future refactors from duplicating functionality. Treat this file as the single source of truth for agent-facing helpers.
+
+## Documentation ingestion helper (`background_agents/document_memory_agent.py`)
+
+CtrlSpeak preloads Markdown documentation into vector memory so the assistant and default identities always have the latest reference material before a conversation starts. The `refresh_document_memory(identity, *, force=False, reason=None)` helper orchestrates the workflow:
+
+- Gathers `README.md` plus the curated user-facing documents `docs/bot_integration.md`, `docs/tooling.md`, and `docs/user_flow.md`, hashing the combined content to detect changes between runs.
+- Chunks each source into ~1.2 kB segments, tagging metadata with `category="documentation"`, the relative `source` path, a `chunk` counter, and the shared `doc_hash`.
+- Clears any existing documentation entries in the identity’s Chroma store before inserting the freshly generated chunks so stale copies never accumulate.
+- Honors each identity’s memory settings (`max_vector_items`, `vector_ttl_days`, and `pii_redaction`) and skips work entirely when vector storage is disabled.
+- Records the latest refresh timestamp and `doc_hash` in `${data_root}/doc_memory/<identity>.json`, enforcing a 24-hour cooldown unless the hash changes or a forced refresh is requested.
+- Emits status messages only to the terminal (never the chat UI) so operators know when the background pass runs and how many chunks landed in the store.
+
+Use this helper when gating assistant or default start-up or responding to the `update documentation` keyword. The tracker file under AppData keeps repeated launches quick when the docs have not changed.
+
+When a user asks for help, CtrlSpeak biases retrieval toward documentation entries. The LangGraph orchestrator lowers the similarity threshold for `category="documentation"` memories whenever the utterance resembles a “how do I…” or “help me use the app” style question (and whenever regular retrieval returns no matches). Retrieved snippets are surfaced to the model inside a system message headed `Documentation excerpts`, so the bundled personas know those passages come from the official docs and should quote them verbatim when guiding users. Each turn also prints a `[Memory]` line summarizing whether the vector store was queried and how many documentation and temporal-context chunks contributed, giving operators immediate feedback that the ingest pipeline is feeding the conversation.
+
+The documentation embeddings (and all other vector memories) use the deterministic `ctrlspeak-minhash` embedder implemented in `utils.vector_memory.VectorMemoryStore`. The helper hashes each chunk into a 32-dimensional vector and compares them with cosine similarity against every stored entry, returning up to the configured `retrieval_top_k` items (default **5**) for each turn. This hand-rolled similarity search keeps the runtime self-contained—no external embedding model downloads are required—while still enabling LangGraph to rank results and apply category-specific fallbacks.
+
+## Date/time context helper (`background_agents/datetime_memory_agent.py`)
+
+Alongside documentation, CtrlSpeak primes each identity with a snapshot of the host’s current date, timezone, and locale data so the assistant can answer questions like “what day is it?” without re-querying the operating system. `refresh_datetime_memory(identity, *, force=False, reason=None)` orchestrates the workflow:
+
+- Collects the local date (`YYYY-MM-DD` plus weekday and month names), the timezone abbreviation and UTC offset, and any locale or country code detectable from the OS environment.
+- Serialises the snapshot into a single vector-memory chunk tagged with `category="temporal_context"`, `kind="current_date"`, and a `snapshot_hash` so duplicates can be detected.
+- Deletes any prior temporal-context entries before inserting the new chunk, reusing the identity’s vector settings (`max_vector_items`, TTL, PII redaction) just like the documentation helper.
+- Records the refresh timestamp and `snapshot_hash` under `${data_root}/datetime_memory/<identity>.json`, enforcing a 24-hour cooldown unless the data changes or a forced refresh is requested.
+- Emits terminal-only status updates such as “Date/time injection complete…” while keeping the GUI silent.
+
+The helper runs automatically for the assistant and default personas during startup, meaning a session never opens before both documentation and temporal context are current. Operators can force the refresh at any time via the `update datetime` keyword (including the fuzzy variant “update date time”) from the hotkey workflow or within an active SocialRobot session. Any user question that references the current date, time, day, or timezone automatically lowers the retrieval threshold for the temporal chunk, prompting the orchestrator to attach a `Temporal context` system message that contains the stored snapshot so the assistant can answer directly.

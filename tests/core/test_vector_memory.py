@@ -70,3 +70,33 @@ def test_vector_memory_retrieval_threshold(tmp_path, monkeypatch):
 
     hits = store.retrieve("hello world", top_k=5, threshold=0.1)
     assert hits
+
+
+def test_vector_memory_documentation_fallback(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    vector_memory = modules["utils.vector_memory"]
+
+    store = vector_memory.VectorMemoryStore("Assistant")
+    store.add_memories(
+        ["Press Chat with Bot in the management window to launch the assistant."],
+        metadata=[
+            {
+                "category": "documentation",
+                "source": "docs/usage.md",
+                "chunk": 1,
+                "chunks": 1,
+                "doc_hash": "abc123",
+            }
+        ],
+    )
+
+    results = store.retrieve(
+        "how do i use this program?",
+        top_k=3,
+        threshold=0.95,
+        category_thresholds={"documentation": 0.2},
+        fallback_categories={"documentation": 1},
+    )
+
+    assert results, "expected documentation fallback to produce a match"
+    assert results[0].metadata.get("category") == "documentation"

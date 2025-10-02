@@ -92,7 +92,7 @@ Vector memory lives in `chroma/`, which is backed by a single-writer Chroma coll
 
 Each Chat with Bot turn flows through a LangGraph orchestrator (`use_langgraph_memory_orchestrator` setting) that sequences retrieval → planning → tool execution → LLM → persistence. Retrieval no-ops when the store is empty or below the similarity threshold, and asynchronous embedding/upsert keeps TTS playback responsive. Per-turn traces and a CSV metrics feed (`retrieval_hits`, `avg_similarity`, `persist_latency_ms`, `evictions`, `lock_wait_ms`) accumulate under `traces/` for observability.
 
-To avoid corruption, CtrlSpeak acquires `${data_root}/.locks/<identity>.lock` before launching SocialRobot. If another process already owns the identity, the launcher prints “Identity in use. Close the running session before starting another.” and aborts. The management window’s **Clear Bot Memory** action targets the AppData-backed directories, deleting the JSONL log (and rotated archives) plus the `screenshots/`, `chroma/`, and `traces/` folders so packaged builds stay read-only. See [`docs/memory_overhaul_plan.md`](docs/memory_overhaul_plan.md) for the implementation roadmap and acceptance tests that keep the architecture honest.
+To avoid corruption, CtrlSpeak acquires `${data_root}/.locks/<identity>.lock` before launching SocialRobot. If another process already owns the identity, the launcher prints “Identity in use. Close the running session before starting another.” and aborts. The management window’s **Clear Bot Memory** action targets the AppData-backed directories, deleting the JSONL log (and rotated archives) plus the `screenshots/`, `chroma/`, and `traces/` folders so packaged builds stay read-only.
 
 ## Packaging with PyInstaller
 
