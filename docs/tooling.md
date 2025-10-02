@@ -11,6 +11,7 @@ ctrlspeak/
 ├── tools/
 │   ├── __init__.py
 │   ├── keywords.py
+│   ├── message_management.py
 │   └── vision.py
 ```
 
@@ -121,6 +122,27 @@ The same registry now powers the push-to-talk workflow: when the user holds the 
 ### Testing guidance
 
 - Unit tests live in `tests/core/test_tools_keywords.py` and validate phrase detection along with payload lookups.
+
+## Message management (`tools/message_management.py`)
+
+The message management helpers keep assistant replies safe for text-to-speech playback and storage by deterministically stripping Markdown artefacts.
+
+### Public API
+
+| Function | Purpose |
+| --- | --- |
+| `requires_force_plaintext(text: str, drop_chars: Iterable[str] = DEFAULT_DROP_CHARS, bullet_prefixes: Iterable[str] = DEFAULT_BULLET_PREFIXES) -> bool` | Returns `True` when `force_plaintext` would mutate the text. Checks for drop characters anywhere in the reply and for leading bullet markers on each line. |
+| `force_plaintext(text: str, drop_chars: Iterable[str] = DEFAULT_DROP_CHARS, bullet_prefixes: Iterable[str] = DEFAULT_BULLET_PREFIXES) -> str` | Removes the configured drop characters, strips recognised bullet prefixes, collapses internal whitespace runs, and trims the result so TTS and persistence layers receive clean plaintext. |
+
+### Default behaviour
+
+- `DEFAULT_DROP_CHARS` removes `*`, `#`, `_`, `` ` ``, `>`, and `|` characters.
+- `DEFAULT_BULLET_PREFIXES` normalise leading `-`, `+`, `•`, and `*` markers.
+- Passing custom iterables allows callers to extend or tighten scrubbing rules when different formatting must be preserved.
+
+### Testing guidance
+
+- Companion tests live in `tests/tools/test_message_management.py` and cover both detection and scrubbing behaviours.
 
 ## Adding new tooling modules
 
