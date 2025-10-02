@@ -11,7 +11,7 @@ Both flavours support Windows 10/11, enforce a single running instance, expose a
 - `assets/` – static resources such as the tray icon (`icon.ico`), the welcome video (`TrueAI_Intro_Video.mp4`), the fun-fact rotation list (`fun_facts.txt`), and the processing chime (`loading.wav`).
 - `utils/` – implementation modules (GUI, models, networking, configuration helpers, etc.).
 - `utils/build_exe.py` – helper script that runs PyInstaller with the correct data files.
-- `tools/` – reusable tooling (currently the shared `vision.py` capture helpers and keyword registry); see [`docs/tooling.md`](docs/tooling.md) for the authoritative API reference.
+- `tools/` – reusable tooling (currently the shared `vision.py` capture helpers, keyword registry, and `message_management.py` scrubbers that force assistant replies into safe plaintext); see [`docs/tooling.md`](docs/tooling.md) for the authoritative API reference.
 - `packaging/` – PyInstaller spec (`CtrlSpeak.spec`) and additional build documentation.
 
 Generated folders such as `dist/` and `build/` are ignored via `.gitignore`.
