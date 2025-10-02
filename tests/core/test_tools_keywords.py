@@ -76,7 +76,7 @@ def test_iter_keyword_matches_multiple():
 
 
 def test_configure_identity_keywords_registers_conversation_triggers():
-    keywords.configure_identity_keywords(["assistant", "default"])
+    keywords.configure_identity_keywords(["assistant", "default", "einstein"])
 
     start_match = keywords.detect_conversation_start_keyword("please chat with assistant right now")
     assert start_match is not None
@@ -85,6 +85,10 @@ def test_configure_identity_keywords_registers_conversation_triggers():
     end_match = keywords.detect_conversation_end_keyword("goodbye default")
     assert end_match is not None
     assert end_match.keyword.payload == "default"
+
+    einstein_match = keywords.detect_conversation_start_keyword("chat with einstein for me")
+    assert einstein_match is not None
+    assert einstein_match.keyword.payload == "einstein"
 
     keywords.configure_identity_keywords([])
 

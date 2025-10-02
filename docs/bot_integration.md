@@ -8,7 +8,7 @@ CtrlSpeak includes an optional "Chat with Bot" experience accessible from the ma
 - **Text to Speech (TTS)** - The LLM response is converted to audio via Kokoro-ONNX. CtrlSpeak defaults to the formal male `am_michael` voice; override it with `BOT_VOICE` or the `--voice` flag.
 - **Animated Face / Logo** - SocialRobot renders the default TrueAI transparent logo with amplitude-based scaling for visual feedback. Identity folders can still supply alternate assets under `third_party/social_robot/identities/<name>` when a different look is desired.
 - **Text chat window** - Sessions now start in text mode. A PySide chat window shows the running transcript, accepts typed input, and exposes a microphone toggle. The window anchors itself to the bottom-right corner where the floating logo normally lives and applies `assets/icon.ico` to both the window chrome and the microphone button for consistent branding. When you click the microphone to enter voice mode the chat window slides to the top-right corner, hides the input, shows the floating logo again, and hands control back to the VAD/TTS pipeline. Clicking the button again (or ending the session) returns to text chat, restores the bottom-right placement, and leaves the conversation in on-screen text.
-- **Documentation preload** - Before the assistant or default personas become interactive, CtrlSpeak runs `refresh_document_memory` for the selected identity to hash bundled Markdown docs, evict any stale `category="documentation"` entries from the vector store, and insert fresh chunks when the content changed or the 24-hour cooldown expired. Progress is reported only in the terminal while the chat window stays hidden.
+- **Documentation preload** - Before the assistant, Einstein, or default personas become interactive, CtrlSpeak runs `refresh_document_memory` for the selected identity to hash bundled Markdown docs, evict any stale `category="documentation"` entries from the vector store, and insert fresh chunks when the content changed or the 24-hour cooldown expired. Progress is reported only in the terminal while the chat window stays hidden.
 
 ## Identity Profiles
 
@@ -76,13 +76,36 @@ If you omit the block entirely, Kokoro continues to probe GPU providers automati
 > **Tip**
 > Update `${config_root}/identities/<identity>/memory.json` when you need to disable screenshot storage, change retrieval thresholds, adjust the vector-cap limit, apply a TTL, or enable the PII redactor for a specific persona.
 
+### Bundled personas
+
+CtrlSpeak ships with three ready-to-use personas:
+
+- **assistant** – A Jarvis-inspired general helper backed by `gemma3:12b` with deterministic paragraph cleaning enabled.
+- **default** – A lighter companion persona that uses `gemma3:1b` and keeps vision disabled by default.
+- **einstein** – The deep-thinking and tool-planning specialist powered by `qwen3:14b`. CtrlSpeak appends `/think` to every Einstein turn (unless the user says `/no_think`) so Qwen3’s reasoning mode emits `<think>…</think>` plans before the final answer. The identity’s `identity.json` requests GPU-only execution, an 8 192 token context window, and the recommended sampling settings (`temperature` 0.6, `top_p` 0.95, `top_k` 20, `repeat_penalty` 1.1). Stage the model in Ollama with a Modelfile equivalent to:
+
+```
+FROM hf.co/Qwen/Qwen3-14B-GGUF:Q4_K_M
+PARAMETER temperature 0.6
+PARAMETER top_p 0.95
+PARAMETER top_k 20
+PARAMETER repeat_penalty 1.1
+PARAMETER num_ctx 8192
+PARAMETER num_gpu 999
+SYSTEM You are Einstein, the deep-thinking tools agent for TrueAI. Thinking is always enabled unless a user explicitly includes /no_think.
+TEMPLATE {{ .Prompt }}
+```
+
+Launch Ollama with `CUDA_VISIBLE_DEVICES=0,1` so both GPUs can host the checkpoint, then run `ollama create qwen3:14b -f ./Modelfile` followed by `ollama run qwen3:14b` to validate loading (or simply `ollama pull qwen3:14b` if you prefer the upstream defaults). SocialRobot automatically warms the model the first time you start Einstein and refuses to continue if Ollama reports CPU spillover while `ollama_hardware` is set to `gpu_only`.
+
+
 The additional boolean keys control multimodal, cleaning, and future extensibility features:
 
 - `require_text_cleaning` – Reserved for the paragraphizer workflow. The assets remain in place, but the helper is currently disabled so every identity relies on the deterministic plaintext scrub alone.
 - `vision` – Enables image capture tooling documented in [`docs/tooling.md`](tooling.md). When `true`, SocialRobot listens for the spoken “look at my screen” and “look at my clipboard” commands, exposes matching context-menu actions on the floating logo, and routes captured images to the LLM. When `false`, the commands are ignored, the context-menu items are hidden, and no images are taken.
 - `tool` – Reserved flag for forthcoming external tool integrations. It defaults to `false` today but can be toggled once tool calling is implemented.
 
-CtrlSpeak ships with two bundled identities: `assistant` (vision enabled, text cleaning enabled) and `default` (vision disabled, text cleaning disabled). Both currently set `tool` to `false` and can be expanded as the tool feature matures.
+CtrlSpeak now includes three bundled identities: `assistant` (vision enabled, text cleaning enabled), `default` (vision disabled, text cleaning disabled), and `einstein` (vision enabled, text cleaning enabled with Qwen3 reasoning defaults). All currently set `tool` to `false` until external tool integrations are wired up.
 
 All face, mouth, and logo assets now live inside the identity directories; the legacy `third_party/social_robot/images/` placeholders have been removed so new personas should bundle their own art alongside `identity.json`. Likewise, shared prompt templates are deprecated—store any reusable system prompts with the identity that consumes them so packaging stays self-contained.
 
@@ -95,7 +118,7 @@ The bundled personas keep their reference material up to date without overflowin
 3. Terminal-only messages confirm the trigger (startup, keyword, hash change), report how many chunks were written, and indicate whether any older memories were evicted to honour the cap. The GUI and TTS layers remain silent.
 4. Operators can say or type “update documentation” or “update datetime” (including via the Ctrl hotkey workflow) to force a refresh immediately. Forced runs bypass the cooldown so emergency edits or timezone changes land before the next user turn. The hotkey path refreshes the active identity, while in-session requests refresh whichever persona is currently running inside SocialRobot. Questions that mention the current date, time, or timezone automatically lower the retrieval threshold for the temporal-context chunk so the assistant responds with the stored snapshot instead of only referencing the tracker file.
 
-Other identities can invoke the helper manually if they enable vector memory for documentation, but only the assistant and default personas do so automatically. Launching either persona also forces the LangGraph memory orchestrator on—even when `settings.json` never toggled the feature—so documentation retrieval always flows through the structured `retrieve → plan → call_tools → llm → persist` graph before the chat window becomes interactive.
+Other identities can invoke the helper manually if they enable vector memory for documentation, but only the assistant, Einstein, and default personas do so automatically. Launching either persona also forces the LangGraph memory orchestrator on—even when `settings.json` never toggled the feature—so documentation retrieval always flows through the structured `retrieve → plan → call_tools → llm → persist` graph before the chat window becomes interactive.
 
 When the assistant or default persona receives an utterance that sounds like a “how do I use CtrlSpeak?” request (or when retrieval would otherwise return nothing), the LangGraph orchestrator relaxes the similarity check for `category="documentation"` memories and guarantees at least one documentation chunk appears in the retrieved context. Those passages are forwarded to the LLM inside a dedicated `Documentation excerpts` system message so the persona understands the text is canonical guidance and can quote it directly.
 
@@ -130,7 +153,7 @@ When you add new keywords, update `tools/keywords.py`, refresh [`docs/tooling.md
 
 Setting `use_langgraph_memory_orchestrator: true` in `settings.json` (or exporting `CTRLSPK_USE_LANGGRAPH_MEMORY_ORCHESTRATOR=1`) routes every conversation turn through `utils.memory_orchestrator`:
 
-> **Bundled personas:** When you start either the assistant or default persona, CtrlSpeak automatically flips this setting on (persisting it back to `settings.json`) so documentation ingestion and retrieval always use the LangGraph path even on pristine installs.
+> **Bundled personas:** When you start the assistant, Einstein, or default personas, CtrlSpeak automatically flips this setting on (persisting it back to `settings.json`) so documentation ingestion and retrieval always use the LangGraph path even on pristine installs.
 
 1. **retrieve** – query Chroma for up to `retrieval_top_k` memories above `retrieval_threshold`; empty stores or low scores short-circuit.
 2. **plan_tools** – reserved for future branching/tooling (currently a pass-through node).

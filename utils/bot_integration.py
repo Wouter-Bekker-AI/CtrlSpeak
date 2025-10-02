@@ -63,7 +63,7 @@ _active_identity: Optional[str] = None
 _identity_lock: Optional[IdentityLock] = None
 
 _OLLAMA_HARDWARE_CHOICES = {"cpu_only", "cpu_and_gpu", "gpu_only"}
-_DOC_REFRESH_IDENTITIES = {"assistant", "default"}
+_DOC_REFRESH_IDENTITIES = {"assistant", "default", "einstein"}
 _PRELAUNCH_REFRESHERS = (
     ("documentation memory", refresh_document_memory),
     ("date/time memory", refresh_datetime_memory),
