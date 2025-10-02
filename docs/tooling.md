@@ -2,6 +2,8 @@
 
 This document is the authoritative index for reusable tooling that ships with CtrlSpeak. Every helper that exposes capabilities to AI agents, automation flows, or user-triggered actions must be documented here so contributors know what exists, how it works, and how to extend it safely.
 
+CtrlSpeak distinguishes between interactive tooling and the system-managed services that keep the LangGraph workflow healthy. Modules under `tools/` are invoked directly by personas or users, while the background agents in `background_agents/` are orchestrator-managed services that refresh documentation, maintain temporal context, and clean up `<think>` output as described in the [Chat with Bot speech pipeline](../README.md#chat-with-bot-speech-pipeline) and [LangGraph orchestration and persistence](bot_integration.md#langgraph-orchestration-and-persistence) guides.
+
 The guidance below applies to the `tools/` package and any future modules that belong to it. When you add, modify, or remove a tool you **must** update this document in the same pull request.
 
 ## Directory layout

@@ -7,7 +7,7 @@ Both flavours support Windows 10/11, enforce a single running instance, expose a
 ## Repository Layout
 
 - `main.py` – application entry point.
-- `background_agents/` – self-contained helpers that run alongside Chat with Bot. The bundled `manage_think` helper suppresses `<think>` plans for personas that set `"hide_think": true`.
+- `background_agents/` – orchestrator-managed services that run alongside Chat with Bot. These agents refresh ingested documentation, stage current date/time snapshots, filter `<think>` plans, and perform other maintenance tasks automatically whenever the LangGraph workflow requires them.
 - `assets/` – static resources such as the tray icon (`icon.ico`), the welcome video (`TrueAI_Intro_Video.mp4`), the fun-fact rotation list (`fun_facts.txt`), and the processing chime (`loading.wav`).
 - `utils/` – implementation modules (GUI, models, networking, configuration helpers, etc.).
 - `utils/build_exe.py` – helper script that runs PyInstaller with the correct data files.
