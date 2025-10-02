@@ -158,3 +158,50 @@ def test_hotkey_supports_fuzzy_chat(bot_module):
 
     assert handled is True
     assert start_calls == ["assistant"]
+
+
+def test_hotkey_update_documentation_uses_active_identity(monkeypatch, bot_module):
+    calls: list[tuple[str, bool, str | None]] = []
+
+    def _refresh(identity: str, *, force: bool = False, reason: str | None = None) -> bool:
+        calls.append((identity, force, reason))
+        return True
+
+    stub_module = types.SimpleNamespace(refresh_document_memory=_refresh)
+    monkeypatch.setitem(sys.modules, "background_agents.document_memory_agent", stub_module)
+    monkeypatch.setitem(
+        sys.modules,
+        "background_agents.datetime_memory_agent",
+        types.SimpleNamespace(refresh_datetime_memory=lambda *args, **kwargs: True),
+    )
+    bot_module.get_active_identity = lambda: "default"
+
+    handled = system.handle_transcribed_text_from_hotkey("update documentation")
+
+    assert handled is True
+    assert calls == [("default", True, "hotkey")]
+
+
+def test_hotkey_update_datetime_uses_active_identity(monkeypatch, bot_module):
+    calls: list[tuple[str, bool, str | None]] = []
+
+    def _refresh(identity: str, *, force: bool = False, reason: str | None = None) -> bool:
+        calls.append((identity, force, reason))
+        return True
+
+    monkeypatch.setitem(
+        sys.modules,
+        "background_agents.datetime_memory_agent",
+        types.SimpleNamespace(refresh_datetime_memory=_refresh),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "background_agents.document_memory_agent",
+        types.SimpleNamespace(refresh_document_memory=lambda *args, **kwargs: True),
+    )
+    bot_module.get_active_identity = lambda: "assistant"
+
+    handled = system.handle_transcribed_text_from_hotkey("please update date time now")
+
+    assert handled is True
+    assert calls == [("assistant", True, "hotkey")]

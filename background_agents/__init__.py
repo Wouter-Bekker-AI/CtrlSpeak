@@ -1,5 +1,7 @@
 """Background agent helpers exposed as a package."""
 
+from .datetime_memory_agent import refresh_datetime_memory
+from .document_memory_agent import refresh_document_memory
 from .tts_preprocessing_agent.background_agent import (
     BackgroundAgentResources,
     TTSPreprocessingAgent,
@@ -14,4 +16,6 @@ __all__ = [
     "load_background_agent_resources",
     "load_tts_preprocessing_agent",
     "text_requires_cleaning",
+    "refresh_document_memory",
+    "refresh_datetime_memory",
 ]

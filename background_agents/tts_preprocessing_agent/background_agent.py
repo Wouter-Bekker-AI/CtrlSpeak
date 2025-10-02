@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from llm.ollama import OllamaClient, OllamaUnavailableError
+from third_party.social_robot.llm.ollama import (
+    OllamaClient,
+    OllamaUnavailableError,
+)
 
 from utils.config_paths import get_logger
 

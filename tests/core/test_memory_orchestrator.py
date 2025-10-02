@@ -100,6 +100,8 @@ def test_orchestrator_persists_and_retrieves(tmp_path, monkeypatch):
 
     assert result1.response_text == "echo:hello world"
     assert result2.response_text == "echo:hello again"
+    assert result1.vector_query_attempted is True
+    assert result1.vector_query_result_count == 0
     assert len(llm.calls) >= 2
     assert any(
         entry.get("role") == "system" and "Relevant memory" in entry.get("content", "")
@@ -238,3 +240,114 @@ def test_orchestrator_scrubs_responses_before_persistence(tmp_path, monkeypatch)
     scrubbed_vector = captured_vector_docs[-1][-1]
     assert "*" not in scrubbed_vector
     assert "#" not in scrubbed_vector
+
+
+def test_orchestrator_prioritizes_documentation(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+
+    identity_settings = {
+        "store_vector_memory": True,
+        "retrieval_top_k": 5,
+        "retrieval_threshold": 0.95,
+        "max_vector_items": 10,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+    }
+
+    llm = DummyLLM()
+    metrics_path = tmp_path / "metrics_docs.csv"
+    orchestrator = orchestrator_module.MemoryOrchestrator(
+        "DocTester",
+        llm,
+        memory_dir=tmp_path,
+        metrics_path=metrics_path,
+        identity_settings=identity_settings,
+    )
+
+    orchestrator.vector_store.add_memories(
+        [
+            "Open Manage CtrlSpeak and press Chat with Bot to start the assistant session."
+        ],
+        metadata=[
+            {
+                "category": orchestrator_module.DOCUMENTATION_CATEGORY,
+                "source": "docs/user_flow.md",
+                "chunk": 1,
+                "chunks": 1,
+                "doc_hash": "deadbeef",
+            }
+        ],
+        max_items=10,
+    )
+
+    result = orchestrator.run_turn("how do i use this program?")
+    orchestrator.close()
+
+    assert any(
+        item.metadata.get("category") == orchestrator_module.DOCUMENTATION_CATEGORY
+        for item in result.retrieved
+    ), "expected documentation memory to be returned"
+    assert result.vector_query_attempted is True
+    assert result.vector_query_documentation_count >= 1
+
+    assert llm.calls, "expected the LLM to be invoked"
+    history_entry = next(
+        (entry for entry in llm.calls[0]["history"] if entry.get("role") == "system"),
+        {},
+    )
+    assert "Documentation excerpts" in history_entry.get("content", "")
+
+
+def test_orchestrator_returns_temporal_context(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+
+    identity_settings = {
+        "store_vector_memory": True,
+        "retrieval_top_k": 5,
+        "retrieval_threshold": 0.95,
+        "max_vector_items": 10,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+    }
+
+    llm = DummyLLM()
+    metrics_path = tmp_path / "metrics_time.csv"
+    orchestrator = orchestrator_module.MemoryOrchestrator(
+        "TimeTester",
+        llm,
+        memory_dir=tmp_path,
+        metrics_path=metrics_path,
+        identity_settings=identity_settings,
+    )
+
+    orchestrator.vector_store.add_memories(
+        ["Today is Thursday, 2 October 2025. Local calendar date: 2025-10-02."],
+        metadata=[
+            {
+                "category": orchestrator_module.TEMPORAL_CATEGORY,
+                "kind": "current_date",
+                "snapshot_hash": "hash123",
+            }
+        ],
+        max_items=10,
+    )
+
+    result = orchestrator.run_turn("what is the current date?")
+    orchestrator.close()
+
+    assert any(
+        item.metadata.get("category") == orchestrator_module.TEMPORAL_CATEGORY
+        for item in result.retrieved
+    ), "expected temporal context to be returned"
+    assert result.vector_query_attempted is True
+    assert result.vector_query_temporal_count >= 1
+
+    assert llm.calls, "expected the LLM to be invoked"
+    history_entry = next(
+        (entry for entry in llm.calls[0]["history"] if entry.get("role") == "system"),
+        {},
+    )
+    assert "Temporal context" in history_entry.get("content", "")
+    assert "Today is" in history_entry.get("content", "")
