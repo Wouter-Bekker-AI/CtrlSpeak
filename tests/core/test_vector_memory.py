@@ -1,4 +1,5 @@
 import importlib
+import types
 from pathlib import Path
 
 import pytest
@@ -100,3 +101,67 @@ def test_vector_memory_documentation_fallback(tmp_path, monkeypatch):
 
     assert results, "expected documentation fallback to produce a match"
     assert results[0].metadata.get("category") == "documentation"
+
+
+def test_vector_memory_retrieve_scoped_queries(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    vector_memory = modules["utils.vector_memory"]
+
+    store = vector_memory.VectorMemoryStore("Assistant")
+
+    monkeypatch.setattr(store, "count", lambda: 5)
+
+    calls = []
+
+    def fake_query(self, *, query_embeddings, n_results, include, where=None):
+        calls.append({"n_results": n_results, "include": list(include), "where": where})
+        if where is None:
+            return {
+                "documents": [[
+                    "Launch the assistant from the management window.",
+                    "Documentation filler entry.",
+                ]],
+                "metadatas": [[
+                    {
+                        "category": "documentation",
+                        "sequence": 1,
+                        "created_at": "2024-01-01T00:00:00Z",
+                    },
+                    {
+                        "category": "documentation",
+                        "sequence": 2,
+                        "created_at": "2024-01-01T00:00:01Z",
+                    },
+                ]],
+                "distances": [[0.1, 0.95]],
+            }
+        if where == {"category": "chat_history"}:
+            return {
+                "documents": [["Remember to check yesterday's notes."]],
+                "metadatas": [[
+                    {
+                        "category": "chat_history",
+                        "sequence": 3,
+                        "created_at": "2024-01-01T00:00:02Z",
+                    }
+                ]],
+                "distances": [[0.8]],
+            }
+        return {"documents": [[]], "metadatas": [[]], "distances": [[]]}
+
+    monkeypatch.setattr(store.collection, "query", types.MethodType(fake_query, store.collection))
+
+    results = store.retrieve(
+        "assistant launch help",
+        top_k=2,
+        threshold=0.9,
+        category_thresholds={"documentation": 0.2, "chat_history": 0.7},
+        fallback_categories={"documentation": 1, "chat_history": 1},
+    )
+
+    assert results
+    assert [item.metadata.get("category") for item in results] == ["documentation", "chat_history"]
+
+    assert calls[0]["n_results"] == 4
+    assert "embeddings" not in calls[0]["include"]
+    assert any(call["where"] == {"category": "chat_history"} for call in calls)

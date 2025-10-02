@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+import math
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 class Collection:
@@ -56,6 +57,50 @@ class Collection:
             payload["metadatas"] = [dict(entry["metadata"]) for _, entry in items]
         if "embeddings" in include:
             payload["embeddings"] = [list(entry["embedding"]) for _, entry in items]
+        return payload
+
+    def query(
+        self,
+        *,
+        query_embeddings: Iterable[Iterable[float]],
+        n_results: int = 10,
+        include: Optional[List[str]] = None,
+        where: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        include = include or []
+        query_vectors = [list(vector) for vector in query_embeddings]
+        limit = max(0, int(n_results))
+        payload: Dict[str, Any] = {"ids": []}
+        if "documents" in include:
+            payload["documents"] = []
+        if "metadatas" in include:
+            payload["metadatas"] = []
+        if "distances" in include:
+            payload["distances"] = []
+
+        for vector in query_vectors:
+            scored: List[Tuple[float, str, Dict[str, Any]]] = []
+            for entry_id, entry in self._entries.items():
+                metadata = entry.get("metadata") or {}
+                if where and not self._matches_where(metadata, where):
+                    continue
+                embedding = entry.get("embedding") or []
+                if not embedding:
+                    continue
+                similarity = self._cosine_similarity(vector, embedding)
+                distance = 1.0 - similarity
+                scored.append((distance, entry_id, entry))
+            scored.sort(key=lambda item: item[0])
+            top = scored[:limit] if limit else []
+
+            payload["ids"].append([entry_id for _, entry_id, _ in top])
+            if "documents" in include:
+                payload["documents"].append([entry["document"] for _, _, entry in top])
+            if "metadatas" in include:
+                payload["metadatas"].append([dict(entry["metadata"]) for _, _, entry in top])
+            if "distances" in include:
+                payload["distances"].append([distance for distance, _, _ in top])
+
         return payload
 
     def delete(self, *, ids: Iterable[str]) -> None:
@@ -112,3 +157,23 @@ class Collection:
                 "embedding": list(content.get("embedding") or []),
             }
         self._entries = restored
+
+    @staticmethod
+    def _cosine_similarity(vec_a: Iterable[float], vec_b: Iterable[float]) -> float:
+        a = list(vec_a)
+        b = list(vec_b)
+        if len(a) != len(b) or not a:
+            return 0.0
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = math.sqrt(sum(x * x for x in a))
+        norm_b = math.sqrt(sum(y * y for y in b))
+        if not norm_a or not norm_b:
+            return 0.0
+        return dot / (norm_a * norm_b)
+
+    @staticmethod
+    def _matches_where(metadata: Dict[str, Any], where: Dict[str, Any]) -> bool:
+        for key, value in where.items():
+            if metadata.get(key) != value:
+                return False
+        return True

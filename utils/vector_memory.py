@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import threading
+from collections.abc import Iterable as IterableABC
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional
@@ -217,31 +218,104 @@ class VectorMemoryStore:
             for key, value in (fallback_categories or {}).items()
         }
 
+        threshold = float(threshold)
         query_vector = self.embedding_function([query_text])[0]
-        payload = self.collection.get(include=["documents", "metadatas", "embeddings"])
-        documents = payload.get("documents") or []
-        metadatas = payload.get("metadatas") or []
-        embeddings = payload.get("embeddings") or []
+
+        effective_top_k = max(0, int(top_k))
+        fallback_total = sum(fallback_limits.values()) if fallback_limits else 0
+        initial_limit = effective_top_k + fallback_total
+        if initial_limit <= 0:
+            return []
+
+        include_fields = ["documents", "metadatas", "distances"]
+
+        def similarity_from_distance(distance: Any) -> float:
+            try:
+                value = 1.0 - float(distance)
+            except Exception:
+                return 0.0
+            return max(min(value, 1.0), -1.0)
+
+        def make_key(metadata: Dict[str, Any], document: str) -> Any:
+            sequence = metadata.get("sequence") if isinstance(metadata, dict) else None
+            created = metadata.get("created_at") if isinstance(metadata, dict) else None
+            category = metadata.get("category") if isinstance(metadata, dict) else None
+            doc_hash = metadata.get("doc_hash") if isinstance(metadata, dict) else None
+            return (sequence, created, category, doc_hash, document)
 
         results: List[RetrievedMemory] = []
         fallback_pool: Dict[str, List[RetrievedMemory]] = {key: [] for key in fallback_limits}
+        seen_keys: set = set()
 
-        for doc, metadata, embedding in zip(documents, metadatas, embeddings):
-            if not isinstance(doc, str) or not isinstance(metadata, dict):
-                continue
-            similarity = _cosine_similarity(query_vector, embedding)
-            category = str(metadata.get("category", "")) if metadata else ""
-            category_threshold = category_thresholds.get(category, threshold)
-            if similarity >= category_threshold:
-                results.append(RetrievedMemory(doc, metadata, similarity))
-                continue
-            if category in fallback_pool:
-                fallback_pool[category].append(RetrievedMemory(doc, metadata, similarity))
+        def ingest_payload(payload: Dict[str, Any]) -> None:
+            if not payload:
+                return
+            docs_list = payload.get("documents") or []
+            metas_list = payload.get("metadatas") or []
+            dist_list = payload.get("distances") or []
+            if not docs_list or not metas_list:
+                return
+            # Chroma responses return lists per query; we only issue single queries.
+            documents_inner = docs_list[0] if isinstance(docs_list[0], list) else docs_list
+            metadatas_inner = metas_list[0] if isinstance(metas_list[0], list) else metas_list
+            distances_inner_raw = dist_list[0] if dist_list and isinstance(dist_list[0], list) else dist_list
+            distances_inner = list(distances_inner_raw) if isinstance(distances_inner_raw, IterableABC) else []
+            if len(distances_inner) < len(documents_inner):
+                distances_inner.extend([0.0] * (len(documents_inner) - len(distances_inner)))
+
+            for doc, metadata, distance in zip(documents_inner, metadatas_inner, distances_inner):
+                if not isinstance(doc, str) or not isinstance(metadata, dict):
+                    continue
+                key = make_key(metadata, doc)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                similarity = similarity_from_distance(distance)
+                category = str(metadata.get("category", "")) if metadata else ""
+                category_threshold = category_thresholds.get(category, threshold)
+                memory = RetrievedMemory(doc, metadata, similarity)
+                if similarity >= category_threshold:
+                    results.append(memory)
+                elif category in fallback_limits:
+                    fallback_pool.setdefault(category, []).append(memory)
+
+        payload = self.collection.query(
+            query_embeddings=[query_vector],
+            n_results=initial_limit,
+            include=include_fields,
+        )
+        ingest_payload(payload)
+
+        if fallback_limits:
+            for category, limit in fallback_limits.items():
+                if limit <= 0:
+                    continue
+                while True:
+                    category_results = [
+                        item for item in results if str(item.metadata.get("category", "")) == category
+                    ]
+                    pool = fallback_pool.get(category, [])
+                    needed = limit - len(category_results)
+                    if needed <= 0 or len(pool) >= needed:
+                        break
+                    additional_needed = needed - len(pool)
+                    if additional_needed <= 0:
+                        break
+                    extra_payload = self.collection.query(
+                        query_embeddings=[query_vector],
+                        n_results=additional_needed,
+                        include=include_fields,
+                        where={"category": category},
+                    )
+                    before = len(fallback_pool.get(category, []))
+                    ingest_payload(extra_payload)
+                    after = len(fallback_pool.get(category, []))
+                    if after <= before:
+                        break
 
         if fallback_pool:
             for category, pool in fallback_pool.items():
                 pool.sort(key=lambda item: item.similarity, reverse=True)
-                fallback_pool[category] = pool
 
         # Sort primary matches by similarity before enforcing fallbacks.
         results.sort(key=lambda item: item.similarity, reverse=True)
