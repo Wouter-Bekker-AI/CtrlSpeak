@@ -5,7 +5,7 @@ CtrlSpeak includes an optional "Chat with Bot" experience accessible from the ma
 - **Speech to Text (STT)** - Uses CtrlSpeak's `/transcribe` endpoint. Audio captured by the VAD listener is sent to the running CtrlSpeak server (local or remote depending on mode). The server returns the recognized text.
 - **Language Model (LLM)** - The recognized text is sent to the Ollama-compatible client inside SocialRobot. By default CtrlSpeak ships with a lightweight fallback response if no LLM endpoint is reachable, but you can supply your own by setting the `BOT_LLM_URL` and `BOT_LLM_MODEL` environment variables (or the matching CLI flags) before launching CtrlSpeak.
 - **Text cleanup (background agent)** - SocialRobot now checks each reply and only calls `tools.message_management.force_plaintext` when markdown bullets or control characters are present. The scrubbed text populates the chat transcript, memory persistence, and Kokoro playback; otherwise the untouched reply flows straight through. The Profile Paragraphizer assets remain in `background_agents/tts_preprocessing_agent/`, but the helper is currently disabled in the runtime pipeline.
-- **Text to Speech (TTS)** - The LLM response is converted to audio via Kokoro-ONNX. CtrlSpeak defaults to the formal male `am_michael` voice; override it with `BOT_VOICE` or the `--voice` flag.
+- **Text to Speech (TTS)** - The LLM response is converted to audio via Kokoro-ONNX. CtrlSpeak now ships the default receptionist persona with the cheerful `af_heart` voice; override it with `BOT_VOICE` or the `--voice` flag when you need a different Kokoro voice.
 - **Animated Face / Logo** - SocialRobot renders the default TrueAI transparent logo with amplitude-based scaling for visual feedback. Identity folders can still supply alternate assets under `third_party/social_robot/identities/<name>` when a different look is desired.
 - **Text chat window** - Sessions now start in text mode. A PySide chat window shows the running transcript, accepts typed input, and exposes a microphone toggle. The window anchors itself to the bottom-right corner where the floating logo normally lives and applies `assets/icon.ico` to both the window chrome and the microphone button for consistent branding. When you click the microphone to enter voice mode the chat window slides to the top-right corner, hides the input, shows the floating logo again, and hands control back to the VAD/TTS pipeline. Clicking the button again (or ending the session) returns to text chat, restores the bottom-right placement, and leaves the conversation in on-screen text.
 - **Documentation preload** - Before the assistant, Einstein, or default personas become interactive, CtrlSpeak runs `refresh_document_memory` for the selected identity to hash bundled Markdown docs, evict any stale `category="documentation"` entries from the vector store, and insert fresh chunks when the content changed or the 24-hour cooldown expired. Progress is reported only in the terminal while the chat window stays hidden.
@@ -24,7 +24,7 @@ The loader understands the following `identity.json` keys:
 ```json
 {
   "name": "default",
-  "description": "Friendly companion",
+  "description": "TrueAI's cheerful CtrlSpeak receptionist",
   "read_prompt_from_file": true,
   "prompt_file": "system_prompt.txt",
   "llm_model": "gemma3:1b",
@@ -41,7 +41,7 @@ The loader understands the following `identity.json` keys:
     "onnx_provider": "CUDAExecutionProvider",
     "device_id": 0
   },
-  "voice": "am_michael",
+  "voice": "af_heart",
   "require_text_cleaning": false,
   "vision": true,
   "tool": false,
@@ -81,7 +81,7 @@ If you omit the block entirely, Kokoro continues to probe GPU providers automati
 CtrlSpeak ships with three ready-to-use personas:
 
 - **assistant** – A Jarvis-inspired general helper backed by `gemma3:12b` with deterministic paragraph cleaning enabled.
-- **default** – A lighter companion persona that uses `gemma3:1b` and keeps vision disabled by default.
+- **default** – TrueAI's upbeat front-desk receptionist persona that uses `gemma3:1b`, keeps vision disabled, and focuses on guiding people to the right bot or CtrlSpeak feature.
 - **einstein** – The deep-thinking and tool-planning specialist powered by `qwen3:14b`. CtrlSpeak appends `/think` to every Einstein turn (unless the user says `/no_think`) so Qwen3’s reasoning mode emits `<think>…</think>` plans before the final answer. The identity’s `identity.json` requests GPU-only execution, an 8 192 token context window, and the recommended sampling settings (`temperature` 0.6, `top_p` 0.95, `top_k` 20, `repeat_penalty` 1.1). Einstein also opts into `"hide_think": true`, which enables the `background_agents.manage_think` helper to strip `<think>` plans from the persisted chat history and Kokoro playback, drop the leading “Answer:” label before the visible reply, and immediately print a transient `Thinking...` placeholder in the chat window as soon as the user submits a message. Vision capture is disabled for this persona (`"vision": false`), so “look at my screen/clipboard” shortcuts only work with other identities. Stage the model in Ollama with a Modelfile equivalent to:
 
 ```
