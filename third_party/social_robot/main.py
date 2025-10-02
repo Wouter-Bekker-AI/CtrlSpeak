@@ -38,6 +38,7 @@ else:
 from background_agents.datetime_memory_agent import refresh_datetime_memory
 from background_agents.document_memory_agent import refresh_document_memory
 from background_agents.manage_think import ManageThinkAgent, load_manage_think_agent
+from background_agents.transcript_cleanup_agent import normalize_transcript
 from tools import keywords, vision
 from tools.message_management import force_plaintext, requires_force_plaintext
 from utils.config_paths import get_logger
@@ -933,6 +934,23 @@ def main():
             print("-> Simulating user request:", transcript)
         else:
             print("-> User said:", transcript)
+
+        normalized = cleaned
+        try:
+            cleanup_result = normalize_transcript(cleaned)
+            normalized = cleanup_result.text.strip() or cleaned
+            if cleanup_result.corrections:
+                logger.debug(
+                    "Transcript cleanup applied for SocialRobot input: %s",
+                    cleanup_result.corrections,
+                )
+                if source != "command":
+                    print("-> Normalized transcript:", normalized)
+        except Exception:
+            logger.exception("Failed to normalize SocialRobot transcript")
+            normalized = cleaned
+
+        cleaned = normalized
 
         if tts_model.is_playing:
             tts_model.stop_playback()

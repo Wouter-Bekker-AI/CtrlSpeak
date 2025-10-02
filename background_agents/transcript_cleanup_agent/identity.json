@@ -1,0 +1,15 @@
+{
+  "description": "Normalizes Whisper transcripts before keyword routing.",
+  "variant_map": "variant_map.json",
+  "supplemental_phrases": "supplemental_phrases.txt",
+  "default_threshold": 0.84,
+  "phrase_thresholds": {
+    "look at my clipboard": 0.88,
+    "chat with assistant": 0.86,
+    "chat with default": 0.86,
+    "goodbye assistant": 0.86
+  },
+  "log_file": "transcript_cleanup.log",
+  "max_log_bytes": 262144,
+  "log_keep": 5
+}

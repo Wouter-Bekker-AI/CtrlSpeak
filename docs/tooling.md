@@ -119,6 +119,37 @@ The `<identity>` placeholder uses the directory names under `third_party/social_
 
 The same registry now powers the push-to-talk workflow: when the user holds the right Ctrl hotkey, CtrlSpeak transcribes the utterance and checks it against these keywords before typing anything. Phrases like “chat with assistant” launch the corresponding bot immediately, “chat with default” first stops any existing session before starting the default identity, and “goodbye <identity>” routes through the same shutdown helper used by the tray menu. Because the text insertion path never runs for handled keywords, make sure any new phrases you add here have matching automation hooks so the hotkey and transcription server remain in sync with voice-triggered behaviour.
 
+## Transcript cleanup background agent (`background_agents/transcript_cleanup_agent/`)
+
+CtrlSpeak normalises Whisper transcripts before keyword routing via the transcript cleanup background agent. The helper applies a configurable set of substitutions so the hotkey workflow, transcription server, and SocialRobot UI all see canonical phrases even when the speech-to-text model mishears them (for example, “clubboard” instead of “clipboard” or “chat with defunct” instead of “chat with default”).
+
+### Public API
+
+| Function | Purpose |
+| --- | --- |
+| `normalize_transcript(text: str) -> TranscriptCleanupResult` | Normalises the supplied transcript, returning the cleaned string and a tuple of `TranscriptCorrection` records describing each change. When the agent resources are unavailable the original text is returned unchanged. |
+| `load_transcript_cleanup_agent(...) -> TranscriptCleanupAgent` | Loads the agent using the on-disk configuration bundle. Most callers should rely on `normalize_transcript` so resources are cached automatically. |
+
+### Configuration bundle
+
+- `identity.json` defines the correction thresholds, audit-log parameters, and pointers to the other resource files.
+- `variant_map.json` lists canonical phrases mapped to their known misrecognitions. Add entries here when Whisper returns a consistent misspelling; the keys are treated as the desired replacement text.
+- `supplemental_phrases.txt` seeds the fuzzy matcher with project terminology (for example, documented clipboard and chat commands) so similar phrases are normalised even without an explicit variant entry.
+- `${data_root}/langgraph_agents/transcript_cleanup_agent/custom_variant_map.json` is a user-editable overlay that lives outside the packaged application. Operators can add or modify entries at runtime (even while CtrlSpeak is running) without touching the read-only resources bundled with the executable. The agent re-reads this file before each cleanup pass, merging the custom entries with the baked-in `variant_map.json` so new corrections apply immediately.
+
+The loader merges these resources with the authoritative keyword list exposed by `tools.keywords`. During normalisation the agent first applies the explicit variants, then performs a fuzzy sweep over every tracked phrase using the thresholds in `identity.json`. All corrections are recorded in `${logs_root}/transcript_cleanup.log`, capped at 256 KiB with rotation so operators can audit what changed.
+
+### Integration points
+
+- `utils.system.handle_transcribed_text_from_hotkey` cleans transcripts before testing any keywords so push-to-talk users get the corrected behaviour immediately.
+- `utils.system.handle_transcription_keyword` returns the cleaned text to HTTP clients when no keyword is triggered, ensuring downstream services receive the canonical phrases.
+- `third_party.social_robot.main._handle_user_request` normalises every utterance before it reaches SocialRobot, printing the adjusted phrase in the console when a correction occurs so operators can see what changed.
+
+### Testing
+
+- Unit tests live in `tests/core/test_transcript_cleanup_agent.py`.
+- Keyword routing tests under `tests/core/test_system_hotkey_keywords.py` and `tests/core/test_system_transcription_keywords.py` cover common misrecognitions (such as “chat with defunct”) to ensure the hotkey and transcription paths keep working as new variants are added.
+
 ### Testing guidance
 
 - Unit tests live in `tests/core/test_tools_keywords.py` and validate phrase detection along with payload lookups.

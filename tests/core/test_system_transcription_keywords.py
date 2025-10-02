@@ -166,6 +166,24 @@ def test_handle_transcription_keyword_supports_fuzzy_chat(bot_module):
     assert start_calls == ["assistant"]
 
 
+def test_handle_transcription_keyword_normalizes_defunct(bot_module):
+    bot_module.get_active_identity = lambda: None
+
+    start_calls: list[str | None] = []
+
+    def _start_bot(*, identity: str | None = None, **_kwargs):
+        start_calls.append(identity)
+        return True
+
+    bot_module.start_bot = _start_bot
+
+    handled, text = system.handle_transcription_keyword("chat with defunct")
+
+    assert handled is True
+    assert text == ""
+    assert start_calls == ["default"]
+
+
 def test_handle_transcription_keyword_ignores_start_for_active_identity(bot_module):
     bot_module.get_active_identity = lambda: "assistant"
 
@@ -198,3 +216,10 @@ def test_handle_transcription_keyword_ignores_when_no_bot_active(bot_module):
 
     assert handled is False
     assert text == "goodbye assistant"
+
+
+def test_handle_transcription_keyword_returns_normalized_text():
+    handled, text = system.handle_transcription_keyword("please look at my clubboard")
+
+    assert handled is False
+    assert text == "please look at my clipboard"

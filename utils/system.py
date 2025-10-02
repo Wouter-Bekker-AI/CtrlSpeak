@@ -703,6 +703,21 @@ def handle_transcribed_text_from_hotkey(text: str) -> bool:
     if not cleaned:
         return False
 
+    normalized = cleaned
+    try:
+        from background_agents.transcript_cleanup_agent import normalize_transcript
+
+        cleanup_result = normalize_transcript(cleaned)
+        normalized = cleanup_result.text.strip() or cleaned
+        if cleanup_result.corrections:
+            logger.debug(
+                "Transcript cleanup applied for hotkey input: %s",
+                cleanup_result.corrections,
+            )
+    except Exception:
+        logger.exception("Failed to normalize transcript before hotkey processing")
+        normalized = cleaned
+
     try:
         from background_agents.datetime_memory_agent import refresh_datetime_memory
         from background_agents.document_memory_agent import refresh_document_memory
@@ -712,7 +727,7 @@ def handle_transcribed_text_from_hotkey(text: str) -> bool:
         logger.exception("Failed to import keyword handlers for hotkey processing")
         return False
 
-    maintenance_match = keywords.detect_memory_refresh_keyword(cleaned)
+    maintenance_match = keywords.detect_memory_refresh_keyword(normalized)
     if maintenance_match:
         target_identity = bot_integration.get_active_identity() or "assistant"
         payload = maintenance_match.keyword.payload.lower()
@@ -741,7 +756,7 @@ def handle_transcribed_text_from_hotkey(text: str) -> bool:
             )
         return True
 
-    match = keywords.detect_conversation_start_keyword(cleaned)
+    match = keywords.detect_conversation_start_keyword(normalized)
     if match:
         identity = match.keyword.payload
         active_identity = bot_integration.get_active_identity()
@@ -772,7 +787,7 @@ def handle_transcribed_text_from_hotkey(text: str) -> bool:
             logger.error("Failed to start bot '%s' from hotkey command", identity)
         return True
 
-    match = keywords.detect_conversation_end_keyword(cleaned)
+    match = keywords.detect_conversation_end_keyword(normalized)
     if match:
         identity = match.keyword.payload
         active_identity = bot_integration.get_active_identity()
@@ -941,14 +956,29 @@ def handle_transcription_keyword(text: str) -> tuple[bool, str]:
     if not cleaned:
         return False, text
 
+    normalized = cleaned
+    try:
+        from background_agents.transcript_cleanup_agent import normalize_transcript
+
+        cleanup_result = normalize_transcript(cleaned)
+        normalized = cleanup_result.text.strip() or cleaned
+        if cleanup_result.corrections:
+            logger.debug(
+                "Transcript cleanup applied for transcription keyword: %s",
+                cleanup_result.corrections,
+            )
+    except Exception:
+        logger.exception("Failed to normalize transcript in transcription server")
+        normalized = cleaned
+
     try:
         from tools import keywords
         from utils import bot_integration
     except Exception:
         logger.exception("Failed to import transcription keyword dependencies")
-        return False, text
+        return False, normalized
 
-    start_match = keywords.detect_conversation_start_keyword(cleaned)
+    start_match = keywords.detect_conversation_start_keyword(normalized)
     if start_match:
         identity = start_match.keyword.payload
         active_identity = bot_integration.get_active_identity()
@@ -1009,9 +1039,9 @@ def handle_transcription_keyword(text: str) -> tuple[bool, str]:
 
         return True, ""
 
-    match = keywords.detect_conversation_end_keyword(cleaned)
+    match = keywords.detect_conversation_end_keyword(normalized)
     if not match:
-        return False, text
+        return False, normalized
 
     identity = match.keyword.payload
     active_identity = bot_integration.get_active_identity()
@@ -1020,7 +1050,7 @@ def handle_transcription_keyword(text: str) -> tuple[bool, str]:
             "Transcription keyword '%s' ignored because no identity is active",
             identity,
         )
-        return False, text
+        return False, normalized
 
     if active_identity.lower() != identity.lower():
         logger.debug(
@@ -1028,7 +1058,7 @@ def handle_transcription_keyword(text: str) -> tuple[bool, str]:
             identity,
             active_identity,
         )
-        return False, text
+        return False, normalized
 
     logger.info("Transcription server stopping bot '%s' after goodbye keyword", identity)
 
