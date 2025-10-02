@@ -196,26 +196,93 @@ class VectorMemoryStore:
     def count(self) -> int:
         return self.collection.count()
 
-    def retrieve(self, query_text: str, *, top_k: int, threshold: float) -> List[RetrievedMemory]:
+    def retrieve(
+        self,
+        query_text: str,
+        *,
+        top_k: int,
+        threshold: float,
+        category_thresholds: Optional[Dict[str, float]] = None,
+        fallback_categories: Optional[Dict[str, int]] = None,
+    ) -> List[RetrievedMemory]:
         if not query_text or self.count() == 0:
             return []
+
+        category_thresholds = {
+            str(key): float(value)
+            for key, value in (category_thresholds or {}).items()
+        }
+        fallback_limits = {
+            str(key): max(0, int(value))
+            for key, value in (fallback_categories or {}).items()
+        }
+
         query_vector = self.embedding_function([query_text])[0]
         payload = self.collection.get(include=["documents", "metadatas", "embeddings"])
         documents = payload.get("documents") or []
         metadatas = payload.get("metadatas") or []
-        embeddings = payload.get("embeddings")
-        if embeddings is None:
-            embeddings = []
+        embeddings = payload.get("embeddings") or []
+
         results: List[RetrievedMemory] = []
+        fallback_pool: Dict[str, List[RetrievedMemory]] = {key: [] for key in fallback_limits}
+
         for doc, metadata, embedding in zip(documents, metadatas, embeddings):
             if not isinstance(doc, str) or not isinstance(metadata, dict):
                 continue
             similarity = _cosine_similarity(query_vector, embedding)
-            if similarity < threshold:
+            category = str(metadata.get("category", "")) if metadata else ""
+            category_threshold = category_thresholds.get(category, threshold)
+            if similarity >= category_threshold:
+                results.append(RetrievedMemory(doc, metadata, similarity))
                 continue
-            results.append(RetrievedMemory(doc, metadata, similarity))
+            if category in fallback_pool:
+                fallback_pool[category].append(RetrievedMemory(doc, metadata, similarity))
+
+        if fallback_pool:
+            for category, pool in fallback_pool.items():
+                pool.sort(key=lambda item: item.similarity, reverse=True)
+                fallback_pool[category] = pool
+
+        # Sort primary matches by similarity before enforcing fallbacks.
         results.sort(key=lambda item: item.similarity, reverse=True)
-        return results[:top_k]
+
+        if fallback_limits:
+            selected_ids = set()
+            quota_selected: List[RetrievedMemory] = []
+            for category, limit in fallback_limits.items():
+                if limit <= 0:
+                    continue
+                category_matches = [
+                    item
+                    for item in results
+                    if str(item.metadata.get("category", "")) == category
+                ]
+                if len(category_matches) < limit:
+                    pool = fallback_pool.get(category, [])
+                    needed = limit - len(category_matches)
+                    category_matches.extend(pool[:needed])
+                for item in category_matches[:limit]:
+                    quota_selected.append(item)
+                    selected_ids.add(id(item))
+
+            remaining = [item for item in results if id(item) not in selected_ids]
+            remaining.sort(key=lambda item: item.similarity, reverse=True)
+
+            combined: List[RetrievedMemory] = []
+            for item in quota_selected:
+                if item not in combined:
+                    combined.append(item)
+            for item in remaining:
+                if len(combined) >= top_k:
+                    break
+                combined.append(item)
+
+            results = combined
+
+        results.sort(key=lambda item: item.similarity, reverse=True)
+        if len(results) > top_k:
+            results = results[:top_k]
+        return results
 
     def purge_expired(self) -> int:
         payload = self.collection.get(include=["metadatas"])

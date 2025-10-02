@@ -65,10 +65,38 @@ VISION_KEYWORDS: tuple[Keyword, ...] = (
     _LOOK_AT_CLIPBOARD,
 )
 
+_UPDATE_DOCUMENTATION = Keyword(
+    name="update_documentation",
+    pattern=re.compile(r"\bupdate documentation\b", re.IGNORECASE),
+    category="memory_maintenance",
+    payload="documentation",
+    fuzzy_targets=("update documentation", "refresh documentation"),
+    fuzzy_threshold=0.88,
+)
+
+_UPDATE_DATETIME = Keyword(
+    name="update_datetime",
+    pattern=re.compile(r"\bupdate\s+datetime\b", re.IGNORECASE),
+    category="memory_maintenance",
+    payload="datetime",
+    fuzzy_targets=(
+        "update datetime",
+        "update date time",
+        "refresh datetime",
+        "refresh date time",
+    ),
+    fuzzy_threshold=0.84,
+)
+
+MEMORY_KEYWORDS: tuple[Keyword, ...] = (
+    _UPDATE_DOCUMENTATION,
+    _UPDATE_DATETIME,
+)
+
 _CONVERSATION_START_KEYWORDS: tuple[Keyword, ...] = ()
 _CONVERSATION_END_KEYWORDS: tuple[Keyword, ...] = ()
 
-ALL_KEYWORDS: tuple[Keyword, ...] = VISION_KEYWORDS
+ALL_KEYWORDS: tuple[Keyword, ...] = VISION_KEYWORDS + MEMORY_KEYWORDS
 
 
 def _identity_tokens(name: str) -> list[str]:
@@ -140,7 +168,9 @@ def configure_identity_keywords(identities: Iterable[str]) -> None:
     _CONVERSATION_START_KEYWORDS = start_keywords
     _CONVERSATION_END_KEYWORDS = end_keywords
 
-    ALL_KEYWORDS = VISION_KEYWORDS + _CONVERSATION_START_KEYWORDS + _CONVERSATION_END_KEYWORDS
+    ALL_KEYWORDS = (
+        VISION_KEYWORDS + MEMORY_KEYWORDS + _CONVERSATION_START_KEYWORDS + _CONVERSATION_END_KEYWORDS
+    )
 
 
 def iter_keyword_matches(text: str, keywords: Iterable[Keyword] = ALL_KEYWORDS) -> Iterator[KeywordMatch]:
@@ -177,6 +207,12 @@ def detect_vision_keyword(text: str) -> Optional[KeywordMatch]:
     """Detect whether ``text`` contains a vision-related keyword."""
 
     return find_first_keyword(text, VISION_KEYWORDS)
+
+
+def detect_memory_refresh_keyword(text: str) -> Optional[KeywordMatch]:
+    """Detect whether ``text`` requests refreshing documentation memory."""
+
+    return find_first_keyword(text, MEMORY_KEYWORDS)
 
 
 def get_vision_keyword(payload: str) -> Optional[Keyword]:
@@ -267,8 +303,10 @@ __all__ = [
     "Keyword",
     "KeywordMatch",
     "VISION_KEYWORDS",
+    "MEMORY_KEYWORDS",
     "ALL_KEYWORDS",
     "detect_vision_keyword",
+    "detect_memory_refresh_keyword",
     "find_first_keyword",
     "get_vision_keyword",
     "iter_keyword_matches",

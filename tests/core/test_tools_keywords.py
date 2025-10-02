@@ -38,6 +38,31 @@ def test_detect_vision_keyword_empty():
     assert match is None
 
 
+def test_detect_memory_refresh_keyword_variants():
+    match = keywords.detect_memory_refresh_keyword("could you update documentation now?")
+    assert match is not None
+    assert match.keyword.payload == "documentation"
+
+    fuzzy = keywords.detect_memory_refresh_keyword("please refresh documentation for me")
+    assert fuzzy is not None
+    assert fuzzy.keyword.payload == "documentation"
+
+
+def test_detect_memory_refresh_keyword_datetime_variants():
+    match = keywords.detect_memory_refresh_keyword("could you update datetime now?")
+    assert match is not None
+    assert match.keyword.payload == "datetime"
+
+    fuzzy = keywords.detect_memory_refresh_keyword("please refresh date time for me")
+    assert fuzzy is not None
+    assert fuzzy.keyword.payload == "datetime"
+
+
+def test_detect_memory_refresh_keyword_ignores_other_phrases():
+    match = keywords.detect_memory_refresh_keyword("update the itinerary")
+    assert match is None
+
+
 def test_get_vision_keyword():
     keyword = keywords.get_vision_keyword("SCREEN")
     assert keyword is not None

@@ -8,6 +8,7 @@ CtrlSpeak includes an optional "Chat with Bot" experience accessible from the ma
 - **Text to Speech (TTS)** - The LLM response is converted to audio via Kokoro-ONNX. CtrlSpeak defaults to the formal male `am_michael` voice; override it with `BOT_VOICE` or the `--voice` flag.
 - **Animated Face / Logo** - SocialRobot renders the default TrueAI transparent logo with amplitude-based scaling for visual feedback. Identity folders can still supply alternate assets under `third_party/social_robot/identities/<name>` when a different look is desired.
 - **Text chat window** - Sessions now start in text mode. A PySide chat window shows the running transcript, accepts typed input, and exposes a microphone toggle. The window anchors itself to the bottom-right corner where the floating logo normally lives and applies `assets/icon.ico` to both the window chrome and the microphone button for consistent branding. When you click the microphone to enter voice mode the chat window slides to the top-right corner, hides the input, shows the floating logo again, and hands control back to the VAD/TTS pipeline. Clicking the button again (or ending the session) returns to text chat, restores the bottom-right placement, and leaves the conversation in on-screen text.
+- **Documentation preload** - Before the assistant or default personas become interactive, CtrlSpeak runs `refresh_document_memory` for the selected identity to hash bundled Markdown docs, evict any stale `category="documentation"` entries from the vector store, and insert fresh chunks when the content changed or the 24-hour cooldown expired. Progress is reported only in the terminal while the chat window stays hidden.
 
 ## Identity Profiles
 
@@ -30,8 +31,8 @@ The loader understands the following `identity.json` keys:
   "llm_url": "http://localhost:11434/api/chat",
   "ollama_hardware": "cpu_and_gpu",
   "ollama_options": {
-    "temperature": 0.5,
-    "num_ctx": 8192
+    "temperature": 0.9,
+    "num_ctx": 4000
   },
   "voice": "am_michael",
   "require_text_cleaning": false,
@@ -67,6 +68,21 @@ CtrlSpeak ships with two bundled identities: `assistant` (vision enabled, text c
 
 All face, mouth, and logo assets now live inside the identity directories; the legacy `third_party/social_robot/images/` placeholders have been removed so new personas should bundle their own art alongside `identity.json`. Likewise, shared prompt templates are deprecated—store any reusable system prompts with the identity that consumes them so packaging stays self-contained.
 
+### Documentation ingestion workflow
+
+The bundled personas keep their reference material up to date without overflowing the Chroma store:
+
+1. `utils.bot_integration.start_bot` acquires the identity lock and calls both `refresh_document_memory(<identity>)` and `refresh_datetime_memory(<identity>)` for the bundled personas before SocialRobot launches. The documentation helper compares a SHA-256 hash of `README.md` plus the user-facing guides (`docs/bot_integration.md`, `docs/tooling.md`, `docs/user_flow.md`) against the tracker stored at `${data_root}/doc_memory/<identity>.json`, while the datetime helper snapshots the current local date, timezone, and locale under `${data_root}/datetime_memory/<identity>.json`. If each helper sees a matching hash inside the 24-hour cooldown, it logs a skip and continues immediately.
+2. When the content or snapshot changed—or the cooldown elapsed—the helpers delete the relevant `category="documentation"` or `category="temporal_context"` rows, respect the identity’s `max_vector_items`, TTL, and PII-redaction preferences, and insert the fresh payloads (documentation arrives as multiple chunks, the datetime snapshot as a single chunk).
+3. Terminal-only messages confirm the trigger (startup, keyword, hash change), report how many chunks were written, and indicate whether any older memories were evicted to honour the cap. The GUI and TTS layers remain silent.
+4. Operators can say or type “update documentation” or “update datetime” (including via the Ctrl hotkey workflow) to force a refresh immediately. Forced runs bypass the cooldown so emergency edits or timezone changes land before the next user turn. The hotkey path refreshes the active identity, while in-session requests refresh whichever persona is currently running inside SocialRobot. Questions that mention the current date, time, or timezone automatically lower the retrieval threshold for the temporal-context chunk so the assistant responds with the stored snapshot instead of only referencing the tracker file.
+
+Other identities can invoke the helper manually if they enable vector memory for documentation, but only the assistant and default personas do so automatically. Launching either persona also forces the LangGraph memory orchestrator on—even when `settings.json` never toggled the feature—so documentation retrieval always flows through the structured `retrieve → plan → call_tools → llm → persist` graph before the chat window becomes interactive.
+
+When the assistant or default persona receives an utterance that sounds like a “how do I use CtrlSpeak?” request (or when retrieval would otherwise return nothing), the LangGraph orchestrator relaxes the similarity check for `category="documentation"` memories and guarantees at least one documentation chunk appears in the retrieved context. Those passages are forwarded to the LLM inside a dedicated `Documentation excerpts` system message so the persona understands the text is canonical guidance and can quote it directly.
+
+Every turn prints a terminal-only status line such as `[Memory] Vector store queried (results=2, documentation=1, temporal=1).` or `[Memory] Vector store not queried.` so operators can confirm whether the vector database contributed context for the pending reply. The GUI and TTS surfaces remain silent.
+
 You can switch identities from the command line with:
 
 ```powershell
@@ -81,6 +97,8 @@ SocialRobot loads [`tools/keywords.py`](tooling.md) at startup and registers one
 
 - **look at my screen** – Captures a screenshot via `tools/vision.py` when the active identity has `vision: true`.
 - **look at my clipboard** – Pulls the most recent image from the system clipboard and forwards it like a screenshot.
+- **update documentation** – Forces the active identity (assistant or default) to reload Markdown documentation immediately, bypassing the cooldown and logging status only to the terminal.
+- **update datetime** – Forces the active identity to refresh the temporal-context snapshot (current date, timezone, locale/country hints) immediately, bypassing the cooldown and logging status only to the terminal.
 - **chat with `<identity>`** – Immediately relaunches SocialRobot with the target persona through the transcription server so the parent process coordinates the shutdown and restart (requests that target the already-active identity are ignored).
 - **goodbye `<identity>`** – Immediately ends the current conversation when delivered through voice (including the stdin control channel) so the parent process controls the teardown. SocialRobot disables voice mode and unwinds the audio stack but leaves the chat window running so the user can close it manually; typed “goodbye …” phrases remain regular chat messages.
 
@@ -93,6 +111,8 @@ When you add new keywords, update `tools/keywords.py`, refresh [`docs/tooling.md
 ## LangGraph orchestration and persistence
 
 Setting `use_langgraph_memory_orchestrator: true` in `settings.json` (or exporting `CTRLSPK_USE_LANGGRAPH_MEMORY_ORCHESTRATOR=1`) routes every conversation turn through `utils.memory_orchestrator`:
+
+> **Bundled personas:** When you start either the assistant or default persona, CtrlSpeak automatically flips this setting on (persisting it back to `settings.json`) so documentation ingestion and retrieval always use the LangGraph path even on pristine installs.
 
 1. **retrieve** – query Chroma for up to `retrieval_top_k` memories above `retrieval_threshold`; empty stores or low scores short-circuit.
 2. **plan_tools** – reserved for future branching/tooling (currently a pass-through node).

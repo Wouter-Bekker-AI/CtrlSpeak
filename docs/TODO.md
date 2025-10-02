@@ -8,6 +8,7 @@ This living backlog tracks follow-up work the developer wants to schedule for Ct
 - Integrate a Qwen3 model with tooling support, starting with Gemini CLI interactions and web search actions.
 - Extend automated tests to cover additional LangGraph tool nodes once external integrations land (current coverage focuses on retrieval gating, async persistence, and embedder upgrades).
 - Build a parsing tool that can read local files to gather contextual information for the assistant.
+- Consolidate end-user documentation into a single "CtrlSpeak user manual" once the current guides are stable so only one file needs to be injected into vector memory.
 
 ## Suggested Work
 - Break the monolithic `main.main` startup path into smaller units to improve testability and reduce the need for integration-only coverage.

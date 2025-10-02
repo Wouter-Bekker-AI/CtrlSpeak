@@ -9,8 +9,8 @@
   "llm_url": "http://localhost:11434/api/chat",
   "ollama_hardware": "cpu_and_gpu",
   "ollama_options": {
-    "temperature": 0.5,
-    "num_ctx": 8192
+    "temperature": 0.9,
+    "num_ctx": 4000
   },
   "voice": "am_michael",
   "require_text_cleaning": false,

@@ -24,7 +24,10 @@ ICON_PATH = _PROJECT_ROOT / "assets" / "icon.ico"
 
 from face_animation.face import FaceAnimator, FaceSettings
 from face_animation.logo import LogoAnimator
-from llm.ollama import OllamaClient, OllamaUnavailableError
+from third_party.social_robot.llm.ollama import (
+    OllamaClient,
+    OllamaUnavailableError,
+)
 from PySide6.QtWidgets import QApplication
 
 if __package__ in (None, ""):
@@ -32,6 +35,8 @@ if __package__ in (None, ""):
 else:
     from .ui.chat_window import ChatWindow
 
+from background_agents.datetime_memory_agent import refresh_datetime_memory
+from background_agents.document_memory_agent import refresh_document_memory
 from tools import keywords, vision
 from tools.message_management import force_plaintext, requires_force_plaintext
 from utils.config_paths import get_logger
@@ -787,13 +792,52 @@ def main():
         else:
             print("-> User said:", transcript)
 
+        if tts_model.is_playing:
+            tts_model.stop_playback()
+
+        display_name = _identity_display(profile.name)
+        maintenance_match = keywords.detect_memory_refresh_keyword(cleaned)
+        if maintenance_match:
+            payload = maintenance_match.keyword.payload.lower()
+            if payload == "datetime":
+                print(
+                    "-> Update date/time keyword detected; refreshing temporal memory "
+                    f"for {display_name}..."
+                )
+                try:
+                    success = refresh_datetime_memory(profile.name, force=True, reason="keyword")
+                except Exception:
+                    logger.exception(
+                        "Unexpected error refreshing date/time memory for identity %s", profile.name
+                    )
+                    success = False
+                if success:
+                    print("-> Date/time refresh complete.")
+                else:
+                    print("-> Date/time refresh failed; check logs for details.")
+            else:
+                print(
+                    "-> Update documentation keyword detected; refreshing documentation memory "
+                    f"for {display_name}..."
+                )
+                try:
+                    success = refresh_document_memory(profile.name, force=True, reason="keyword")
+                except Exception:
+                    logger.exception(
+                        "Unexpected error refreshing documentation memory for identity %s", profile.name
+                    )
+                    success = False
+                if success:
+                    print("-> Documentation refresh complete.")
+                else:
+                    print("-> Documentation refresh failed; check logs for details.")
+            animator.update_amplitude(0.0)
+            return
+
         if source == "voice":
             chat_window.append_user_message(cleaned, via_voice=True)
         elif source == "command":
             chat_window.append_user_message(cleaned)
-
-        if tts_model.is_playing:
-            tts_model.stop_playback()
 
         normalized_user = cleaned.lower()
         normalized_bot = last_bot_response.strip().lower()

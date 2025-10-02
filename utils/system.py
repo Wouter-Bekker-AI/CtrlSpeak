@@ -704,11 +704,42 @@ def handle_transcribed_text_from_hotkey(text: str) -> bool:
         return False
 
     try:
+        from background_agents.datetime_memory_agent import refresh_datetime_memory
+        from background_agents.document_memory_agent import refresh_document_memory
         from tools import keywords
         from utils import bot_integration
     except Exception:
         logger.exception("Failed to import keyword handlers for hotkey processing")
         return False
+
+    maintenance_match = keywords.detect_memory_refresh_keyword(cleaned)
+    if maintenance_match:
+        target_identity = bot_integration.get_active_identity() or "assistant"
+        payload = maintenance_match.keyword.payload.lower()
+        if payload == "datetime":
+            prefix = "[DateTimeMemory]"
+            description = "date/time refresh"
+            helper = refresh_datetime_memory
+        else:
+            prefix = "[DocMemory]"
+            description = "documentation refresh"
+            helper = refresh_document_memory
+
+        print(
+            f"{prefix} Hotkey keyword detected; forcing {description} for '{target_identity}'..."
+        )
+        try:
+            success = helper(target_identity, force=True, reason="hotkey")
+        except Exception:
+            logger.exception("Unexpected error refreshing background memory from hotkey keyword")
+            return True
+        if not success:
+            logger.error(
+                "%s failed after hotkey keyword trigger for %s",
+                description.capitalize(),
+                target_identity,
+            )
+        return True
 
     match = keywords.detect_conversation_start_keyword(cleaned)
     if match:

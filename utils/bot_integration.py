@@ -13,6 +13,8 @@ from urllib.parse import urlparse, urlunparse
 
 import requests
 
+from background_agents.datetime_memory_agent import refresh_datetime_memory
+from background_agents.document_memory_agent import refresh_document_memory
 from utils.config_paths import get_logger, settings, settings_lock
 from utils.system import (
     CLIENT_ONLY_BUILD,
@@ -61,6 +63,35 @@ _active_identity: Optional[str] = None
 _identity_lock: Optional[IdentityLock] = None
 
 _OLLAMA_HARDWARE_CHOICES = {"cpu_only", "cpu_and_gpu", "gpu_only"}
+_DOC_REFRESH_IDENTITIES = {"assistant", "default"}
+_PRELAUNCH_REFRESHERS = (
+    ("documentation memory", refresh_document_memory),
+    ("date/time memory", refresh_datetime_memory),
+)
+
+
+def _should_refresh_docs_on_start(identity: str) -> bool:
+    return identity.strip().lower() in _DOC_REFRESH_IDENTITIES
+
+
+def _prepare_identity_memories(identity: str) -> bool:
+    for description, helper in _PRELAUNCH_REFRESHERS:
+        try:
+            if not helper(identity, reason="startup"):
+                logger.error(
+                    "Aborting launch because %s preparation failed for %s",
+                    description,
+                    identity,
+                )
+                return False
+        except Exception:
+            logger.exception(
+                "Unexpected error while preparing %s for %s",
+                description,
+                identity,
+            )
+            return False
+    return True
 
 
 def list_available_identities(identities_dir: Optional[str] = None) -> list[str]:
@@ -757,6 +788,11 @@ def start_bot(
     except Exception:
         logger.debug("Failed to record lock wait metric", exc_info=True)
 
+    if _should_refresh_docs_on_start(target_identity):
+        if not _prepare_identity_memories(target_identity):
+            _release_identity_lock()
+            return False
+
     agent_llm_url: Optional[str] = None
     agent_llm_model: Optional[str] = None
     agent_options: Dict[str, Any] = {}
@@ -838,8 +874,25 @@ def start_bot(
     if identities_dir:
         env["BOT_IDENTITIES_DIR"] = identities_dir
 
+    load_settings()
+    forced_langgraph = False
     with settings_lock:
         use_langgraph = bool(settings.get("use_langgraph_memory_orchestrator", False))
+        if _should_refresh_docs_on_start(target_identity) and not use_langgraph:
+            use_langgraph = True
+            settings["use_langgraph_memory_orchestrator"] = True
+            forced_langgraph = True
+    if forced_langgraph:
+        try:
+            save_settings()
+            logger.info(
+                "Enabled LangGraph memory orchestrator for %s identity to guarantee documentation retrieval.",
+                target_identity,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to persist LangGraph orchestrator setting for %s", target_identity
+            )
     if use_langgraph:
         env["CTRLSPK_USE_LANGGRAPH_MEMORY_ORCHESTRATOR"] = "1"
 
