@@ -8,6 +8,7 @@ import pytest
 
 pytest.importorskip("tkinter")
 pytest.importorskip("tkinter.ttk")
+pytest.importorskip("huggingface_hub")
 
 import utils.gui as gui
 

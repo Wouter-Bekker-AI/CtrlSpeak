@@ -1,11 +1,22 @@
 import importlib
-import threading
-import importlib
+import importlib.util
+import sys
 import threading
 import time
 from pathlib import Path
+from typing import Iterable, Optional
 
 import pytest
+
+_MANAGE_THINK_PATH = Path(__file__).resolve().parents[2] / "background_agents" / "manage_think.py"
+_MANAGE_THINK_SPEC = importlib.util.spec_from_file_location(
+    "_manage_think_for_memory_tests", _MANAGE_THINK_PATH
+)
+assert _MANAGE_THINK_SPEC and _MANAGE_THINK_SPEC.loader, "Failed to load manage_think helper"
+_MANAGE_THINK_MODULE = importlib.util.module_from_spec(_MANAGE_THINK_SPEC)
+sys.modules[_MANAGE_THINK_SPEC.name] = _MANAGE_THINK_MODULE
+_MANAGE_THINK_SPEC.loader.exec_module(_MANAGE_THINK_MODULE)
+ManageThinkAgent = _MANAGE_THINK_MODULE.ManageThinkAgent
 
 pytestmark = pytest.mark.core_headless
 
@@ -39,13 +50,23 @@ def _prepare(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 class DummyLLM:
-    def __init__(self) -> None:
+    def __init__(self, planner_script: Optional[Iterable[str]] = None) -> None:
         self.calls = []
+        self._planner_script = list(planner_script or [])
 
     def query(self, user_text: str, history=None, content=None):
         history_copy = list(history or [])
         content_copy = list(content or [])
         self.calls.append({"text": user_text, "history": history_copy, "content": content_copy})
+        planner_requested = any(
+            isinstance(entry, dict)
+            and entry.get("role") == "system"
+            and isinstance(entry.get("content"), str)
+            and "retrieval planner" in entry.get("content", "").lower()
+            for entry in history_copy
+        )
+        if planner_requested and self._planner_script:
+            return self._planner_script.pop(0)
         return f"echo:{user_text}"
 
 
@@ -74,7 +95,7 @@ def test_orchestrator_persists_and_retrieves(tmp_path, monkeypatch):
         "pii_redaction": False,
     }
 
-    llm = DummyLLM()
+    llm = DummyLLM(["none", "chat_history"])
     metrics_path = tmp_path / "metrics.csv"
     orchestrator = orchestrator_module.MemoryOrchestrator(
         "Tester",
@@ -100,13 +121,34 @@ def test_orchestrator_persists_and_retrieves(tmp_path, monkeypatch):
 
     assert result1.response_text == "echo:hello world"
     assert result2.response_text == "echo:hello again"
-    assert result1.vector_query_attempted is True
+    assert result1.vector_query_attempted is False
     assert result1.vector_query_result_count == 0
-    assert len(llm.calls) >= 2
+    assert result1.retrieval_plan == {
+        "documentation": False,
+        "chat_history": False,
+        "date": False,
+    }
+    assert len(llm.calls) >= 3
+    assert result2.vector_query_attempted is True
+    assert result2.retrieval_plan.get("chat_history") is True
+    response_calls = [
+        call
+        for call in llm.calls
+        if not any(
+            isinstance(entry, dict)
+            and entry.get("role") == "system"
+            and isinstance(entry.get("content"), str)
+            and "retrieval planner" in entry.get("content", "").lower()
+            for entry in call["history"]
+        )
+    ]
+    assert response_calls, "expected the LLM to be invoked for a user-facing response"
+    latest_response = response_calls[-1]
     assert any(
         entry.get("role") == "system" and "Relevant memory" in entry.get("content", "")
-        for entry in llm.calls[1]["history"]
+        for entry in latest_response["history"]
     )
+    assert result1.retrieval_plan_used_llm is True
 
     conversation_log = memory_paths.get_bot_conversation_log("Tester")
     assert conversation_log.exists()
@@ -136,7 +178,7 @@ def test_orchestrator_attaches_identity_image(tmp_path, monkeypatch):
 
     assert image_store.write_identity_image_from_base64("VisionTester", _SAMPLE_PNG_B64, source="screen") is not None
 
-    llm = DummyLLM()
+    llm = DummyLLM(["none"])
     metrics_path = tmp_path / "metrics_vision.csv"
     orchestrator = orchestrator_module.MemoryOrchestrator(
         "VisionTester",
@@ -151,7 +193,19 @@ def test_orchestrator_attaches_identity_image(tmp_path, monkeypatch):
     orchestrator.close()
 
     assert llm.calls, "expected the LLM to be invoked"
-    payload = llm.calls[0]["content"]
+    response_calls = [
+        call
+        for call in llm.calls
+        if not any(
+            isinstance(entry, dict)
+            and entry.get("role") == "system"
+            and isinstance(entry.get("content"), str)
+            and "retrieval planner" in entry.get("content", "").lower()
+            for entry in call["history"]
+        )
+    ]
+    assert response_calls, "expected at least one user-facing LLM invocation"
+    payload = response_calls[-1]["content"]
     assert isinstance(payload, list)
     assert len(payload) == 2
     assert payload[1]["type"] == "image"
@@ -196,8 +250,13 @@ def test_orchestrator_scrubs_responses_before_persistence(tmp_path, monkeypatch)
     )
 
     class MarkdownLLM(DummyLLM):
+        def __init__(self) -> None:
+            super().__init__(planner_script=["chat_history"])
+
         def query(self, user_text: str, history=None, content=None):
-            super().query(user_text, history=history, content=content)
+            result = super().query(user_text, history=history, content=content)
+            if result == "chat_history":
+                return result
             return "*   **Name:** Wouter\n# Header"
 
     identity_settings = {
@@ -255,7 +314,7 @@ def test_orchestrator_prioritizes_documentation(tmp_path, monkeypatch):
         "pii_redaction": False,
     }
 
-    llm = DummyLLM()
+    llm = DummyLLM(["none"])
     metrics_path = tmp_path / "metrics_docs.csv"
     orchestrator = orchestrator_module.MemoryOrchestrator(
         "DocTester",
@@ -292,11 +351,29 @@ def test_orchestrator_prioritizes_documentation(tmp_path, monkeypatch):
     assert result.vector_query_documentation_count >= 1
 
     assert llm.calls, "expected the LLM to be invoked"
+    response_calls = [
+        call
+        for call in llm.calls
+        if not any(
+            isinstance(entry, dict)
+            and entry.get("role") == "system"
+            and isinstance(entry.get("content"), str)
+            and "retrieval planner" in entry.get("content", "").lower()
+            for entry in call["history"]
+        )
+    ]
+    assert response_calls, "expected a user-facing LLM response"
     history_entry = next(
-        (entry for entry in llm.calls[0]["history"] if entry.get("role") == "system"),
+        (
+            entry
+            for entry in response_calls[-1]["history"]
+            if entry.get("role") == "system"
+        ),
         {},
     )
     assert "Documentation excerpts" in history_entry.get("content", "")
+    assert result.retrieval_plan.get("documentation") is True
+    assert result.retrieval_plan_used_llm is False
 
 
 def test_orchestrator_returns_temporal_context(tmp_path, monkeypatch):
@@ -312,7 +389,7 @@ def test_orchestrator_returns_temporal_context(tmp_path, monkeypatch):
         "pii_redaction": False,
     }
 
-    llm = DummyLLM()
+    llm = DummyLLM(["date"])
     metrics_path = tmp_path / "metrics_time.csv"
     orchestrator = orchestrator_module.MemoryOrchestrator(
         "TimeTester",
@@ -345,9 +422,161 @@ def test_orchestrator_returns_temporal_context(tmp_path, monkeypatch):
     assert result.vector_query_temporal_count >= 1
 
     assert llm.calls, "expected the LLM to be invoked"
+    response_calls = [
+        call
+        for call in llm.calls
+        if not any(
+            isinstance(entry, dict)
+            and entry.get("role") == "system"
+            and isinstance(entry.get("content"), str)
+            and "retrieval planner" in entry.get("content", "").lower()
+            for entry in call["history"]
+        )
+    ]
+    assert response_calls, "expected a user-facing LLM response"
     history_entry = next(
-        (entry for entry in llm.calls[0]["history"] if entry.get("role") == "system"),
+        (
+            entry
+            for entry in response_calls[-1]["history"]
+            if entry.get("role") == "system"
+        ),
         {},
     )
     assert "Temporal context" in history_entry.get("content", "")
     assert "Today is" in history_entry.get("content", "")
+    assert result.retrieval_plan.get("date") is True
+    assert result.retrieval_plan_used_llm is False
+
+
+def test_orchestrator_skips_planner_when_heuristics_trigger(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+
+    identity_settings = {
+        "store_vector_memory": True,
+        "retrieval_top_k": 5,
+        "retrieval_threshold": 0.1,
+        "max_vector_items": 10,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+    }
+
+    llm = DummyLLM(["none"])
+    metrics_path = tmp_path / "metrics_chat.csv"
+    orchestrator = orchestrator_module.MemoryOrchestrator(
+        "HistoryTester",
+        llm,
+        memory_dir=tmp_path,
+        metrics_path=metrics_path,
+        identity_settings=identity_settings,
+    )
+
+    orchestrator.vector_store.add_memories(
+        ["You told me your favourite title is Captain."],
+        metadata=[{"category": "chat_history"}],
+        max_items=10,
+    )
+
+    result = orchestrator.run_turn("what do you know about me?")
+    orchestrator.close()
+
+    assert result.retrieval_plan.get("chat_history") is True
+    assert result.retrieval_plan_used_llm is False
+
+
+def test_orchestrator_appends_no_think_for_einstein_planner(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+
+    identity_settings = {
+        "store_vector_memory": False,
+        "retrieval_top_k": 5,
+        "retrieval_threshold": 0.75,
+        "max_vector_items": 10,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+    }
+
+    llm = DummyLLM(["none"])
+    metrics_path = tmp_path / "metrics_einstein.csv"
+    think_agent = ManageThinkAgent()
+    orchestrator = orchestrator_module.MemoryOrchestrator(
+        "einstein",
+        llm,
+        memory_dir=tmp_path,
+        metrics_path=metrics_path,
+        identity_settings=identity_settings,
+        think_manager=think_agent,
+    )
+
+    result = orchestrator.run_turn("hi there", augmented_text="hi there /think")
+    orchestrator.close()
+
+    planner_calls = [
+        call
+        for call in llm.calls
+        if any(
+            isinstance(entry, dict)
+            and entry.get("role") == "system"
+            and isinstance(entry.get("content"), str)
+            and "retrieval planner" in entry["content"].lower()
+            for entry in call["history"]
+        )
+    ]
+    assert planner_calls, "expected the planner prompt to invoke the LLM"
+    planner_text = planner_calls[0]["text"]
+    assert "hi there" in planner_text
+    assert "/no_think" in planner_text
+    assert "/think" not in planner_text.lower().replace("/no_think", "")
+    assert result.retrieval_plan_used_llm is True
+
+
+def test_orchestrator_hides_think_blocks_with_manager(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+    memory_paths = modules["utils.memory_paths"]
+
+    class ThinkingLLM(DummyLLM):
+        def __init__(self):
+            super().__init__(planner_script=["none"])
+
+        def query(self, user_text: str, history=None, content=None):
+            result = super().query(user_text, history=history, content=content)
+            if result.startswith("echo:"):
+                return "<think>Plan the steps carefully.</think>\nAnswer: Provide guidance."
+            return result
+
+    identity_settings = {
+        "store_vector_memory": True,
+        "retrieval_top_k": 1,
+        "retrieval_threshold": 0.0,
+        "max_vector_items": 5,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+    }
+
+    think_manager = ManageThinkAgent()
+    metrics_path = tmp_path / "metrics_think.csv"
+    orchestrator = orchestrator_module.MemoryOrchestrator(
+        "ThinkTester",
+        ThinkingLLM(),
+        memory_dir=tmp_path,
+        metrics_path=metrics_path,
+        identity_settings=identity_settings,
+        think_manager=think_manager,
+    )
+
+    result = orchestrator.run_turn("please think aloud about this request")
+    time.sleep(0.1)
+    orchestrator.close()
+
+    assert result.think_hidden is True
+    assert result.think_placeholder == "Thinking..."
+    assert result.response_text == "Provide guidance."
+    assert "<think>" not in result.response_text
+    assert "<think>" in result.raw_response_text
+
+    conversation_log = memory_paths.get_bot_conversation_log("ThinkTester")
+    assert conversation_log.exists()
+    log_text = conversation_log.read_text(encoding="utf-8")
+    assert "<think>" not in log_text

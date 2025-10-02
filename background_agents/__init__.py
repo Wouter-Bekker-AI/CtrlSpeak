@@ -2,6 +2,7 @@
 
 from .datetime_memory_agent import refresh_datetime_memory
 from .document_memory_agent import refresh_document_memory
+from .manage_think import ManageThinkAgent, ManageThinkResult, load_manage_think_agent
 from .tts_preprocessing_agent.background_agent import (
     BackgroundAgentResources,
     TTSPreprocessingAgent,
@@ -18,4 +19,7 @@ __all__ = [
     "text_requires_cleaning",
     "refresh_document_memory",
     "refresh_datetime_memory",
+    "ManageThinkAgent",
+    "ManageThinkResult",
+    "load_manage_think_agent",
 ]

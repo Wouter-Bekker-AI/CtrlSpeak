@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import queue
+import re
 import threading
 import time
 import uuid
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
+
+from background_agents.manage_think import ManageThinkAgent
 
 from utils.config_paths import get_logger
 from utils.image_store import is_image_request, load_identity_image
@@ -30,6 +33,7 @@ PERSIST_START_DELAY_SECONDS = 0.05
 
 DOCUMENTATION_CATEGORY = "documentation"
 TEMPORAL_CATEGORY = "temporal_context"
+_REASONING_TAG_PATTERN = re.compile(r"/(?:no_)?think\b", re.IGNORECASE)
 _DOCUMENTATION_INTENT_PHRASES = (
     "how do i",
     "how can i",
@@ -68,6 +72,40 @@ _TEMPORAL_INTENT_PHRASES = (
     "utc offset",
 )
 
+_CHAT_HISTORY_INTENT_PHRASES = (
+    "what do you know about me",
+    "what's my name",
+    "what is my name",
+    "do you remember",
+    "remember what i",
+    "what did i say",
+    "what was i talking",
+    "who am i",
+    "about our conversation",
+    "previous conversation",
+    "earlier we",
+    "chat history",
+    "conversation history",
+    "our history",
+    "history with me",
+)
+
+_ASSESSMENT_INSTRUCTIONS = (
+    "You are the CtrlSpeak retrieval planner."
+    " Decide whether the assistant needs extra context before answering a user."
+    " You can request any of the following resources:"
+    " documentation (instruction manuals and software guidance),"
+    " chat_history (conversation memories about the current user),"
+    " and date (current date, time, and timezone snapshot)."
+    " Only request documentation for programming, software, or CtrlSpeak usage questions."
+    " Only request chat_history when the query references previous conversation or personal details."
+    " Only request date when the user asks about the current date, time, or timezone."
+    " Respond ONLY with one of these options in lowercase:"
+    " 'none', 'documentation', 'chat_history', 'date', or a comma-separated combination such as"
+    " 'documentation,chat_history'."
+    " Do not add explanations or punctuation beyond commas."
+)
+
 
 logger = get_logger(__name__)
 
@@ -80,16 +118,24 @@ class _TurnState(TypedDict, total=False):
     history: List[dict]
     retrieved: List[Dict[str, Any]]
     response_text: str
+    raw_response_text: str
     metrics: Dict[str, float]
     errors: List[Dict[str, Any]]
     vision_metadata: Optional[Dict[str, Any]]
     vision_attached: bool
+    retrieval_plan: Dict[str, bool]
+    retrieval_plan_summary: str
+    vector_query_planned: bool
+    think_hidden: bool
+    think_placeholder: str
+    hidden_think: str
 
 
 @dataclass
 class TurnResult:
     correlation_id: str
     response_text: str
+    raw_response_text: str
     history_entries: List[dict]
     retrieved: List[RetrievedMemory]
     trace_path: Path
@@ -98,6 +144,11 @@ class TurnResult:
     vector_query_result_count: int
     vector_query_documentation_count: int
     vector_query_temporal_count: int
+    retrieval_plan: Dict[str, bool]
+    retrieval_plan_used_llm: bool = False
+    think_hidden: bool = False
+    think_placeholder: Optional[str] = None
+    hidden_think: Optional[str] = None
 
 
 class PersistenceTask:
@@ -222,6 +273,7 @@ class MemoryOrchestrator:
         memory_dir: Path,
         metrics_path: Path,
         identity_settings: Optional[Dict[str, Any]] = None,
+        think_manager: Optional[ManageThinkAgent] = None,
     ) -> None:
         self.identity = identity
         self.llm_client = llm_client
@@ -231,6 +283,7 @@ class MemoryOrchestrator:
             if identity_settings is not None
             else load_identity_settings(identity)
         )
+        self.think_manager = think_manager
         self.conversation_log = get_bot_conversation_log(identity)
         self.traces_dir = get_bot_traces_dir(identity)
         self.metrics = MetricsRecorder(metrics_path)
@@ -270,12 +323,14 @@ class MemoryOrchestrator:
     # ------------------------------------------------------------------
     def _build_graph(self):
         graph = StateGraph(_TurnState)
+        graph.add_node("assess_context", self._node_assess_context)
         graph.add_node("retrieve", self._node_retrieve)
         graph.add_node("plan_tools", self._node_plan_tools)
         graph.add_node("call_tools", self._node_call_tools)
         graph.add_node("llm", self._node_llm)
         graph.add_node("persist", self._node_persist)
-        graph.set_entry_point("retrieve")
+        graph.set_entry_point("assess_context")
+        graph.add_edge("assess_context", "retrieve")
         graph.add_edge("retrieve", "plan_tools")
         graph.add_edge("plan_tools", "call_tools")
         graph.add_edge("call_tools", "llm")
@@ -290,6 +345,19 @@ class MemoryOrchestrator:
         except Exception:
             return 0.35
 
+    def _build_planner_prompt(self, query_text: str) -> str:
+        cleaned = _REASONING_TAG_PATTERN.sub("", query_text or "")
+        cleaned = cleaned.strip()
+        if not cleaned:
+            cleaned = (query_text or "").strip()
+        prompt = (
+            "Decide which additional context is required for this user question:\n"
+            f"{cleaned}"
+        )
+        if self.identity.casefold() == "einstein":
+            prompt = f"{prompt}\n/no_think"
+        return prompt
+
     @staticmethod
     def _should_prioritize_documentation(text: str) -> bool:
         if not text:
@@ -297,6 +365,10 @@ class MemoryOrchestrator:
         lowered = text.casefold()
         stripped = lowered.strip()
         if stripped in {"help", "docs", "documentation", "manual", "guide"}:
+            return True
+        if "explain" in lowered and any(
+            phrase in lowered for phrase in {"program", "software", "ctrlspeak", "app", "bot"}
+        ):
             return True
         return any(phrase in lowered for phrase in _DOCUMENTATION_INTENT_PHRASES)
 
@@ -316,6 +388,57 @@ class MemoryOrchestrator:
         if stripped in {"date", "time", "timezone", "time zone"}:
             return True
         return any(phrase in lowered for phrase in _TEMPORAL_INTENT_PHRASES)
+
+    @staticmethod
+    def _should_prioritize_chat_history(text: str) -> bool:
+        if not text:
+            return False
+        lowered = text.casefold()
+        if "history" in lowered and any(
+            token in lowered for token in {"chat", "conversation", "with me", "about us"}
+        ):
+            return True
+        return any(phrase in lowered for phrase in _CHAT_HISTORY_INTENT_PHRASES)
+
+    @staticmethod
+    def _parse_assessment_response(response: str) -> Optional[Dict[str, bool]]:
+        if not response:
+            return None
+        lowered = response.strip().casefold()
+        if not lowered:
+            return None
+        if lowered in {"no", "nope", "nah"}:
+            lowered = "none"
+        tokens = [token for token in re.split(r"[^a-z]+", lowered) if token]
+        if not tokens:
+            return None
+        if any(token not in {"documentation", "chat", "chat_history", "history", "date", "time", "timezone", "none"} for token in tokens):
+            return None
+        if "none" in tokens:
+            return {"documentation": False, "chat_history": False, "date": False}
+        normalized: Dict[str, bool] = {"documentation": False, "chat_history": False, "date": False}
+        for token in tokens:
+            if token == "documentation":
+                normalized["documentation"] = True
+            elif token in {"chat_history", "history", "chat"}:
+                normalized["chat_history"] = True
+            elif token in {"date", "time", "timezone"}:
+                normalized["date"] = True
+        return normalized
+
+    @staticmethod
+    def _summarize_plan(plan: Dict[str, bool]) -> str:
+        if not plan:
+            return "none"
+        requested = [key for key, value in plan.items() if value]
+        return "+".join(requested) if requested else "none"
+
+    def _default_retrieval_plan(self, text: str) -> Dict[str, bool]:
+        return {
+            "documentation": self._should_prioritize_documentation(text),
+            "chat_history": self._should_prioritize_chat_history(text),
+            "date": self._should_prioritize_temporal(text),
+        }
 
     # ------------------------------------------------------------------
     def _resolve_vision_payload(
@@ -365,13 +488,54 @@ class MemoryOrchestrator:
     # ------------------------------------------------------------------
     # Graph nodes
     # ------------------------------------------------------------------
+    def _node_assess_context(self, state: _TurnState) -> _TurnState:
+        query_text = state.get("augmented_text") or state.get("user_text") or ""
+        plan: Dict[str, bool] = {"documentation": False, "chat_history": False, "date": False}
+        summary = "none"
+        planned = False
+        planner_invoked = False
+
+        if query_text.strip():
+            heuristic_plan = self._default_retrieval_plan(query_text)
+            for key, value in heuristic_plan.items():
+                if value:
+                    plan[key] = True
+            planned = any(plan.values())
+            parsed: Optional[Dict[str, bool]] = None
+            if not planned:
+                try:
+                    planner_prompt = self._build_planner_prompt(query_text)
+                    response = self.llm_client.query(
+                        planner_prompt,
+                        history=[{"role": "system", "content": _ASSESSMENT_INSTRUCTIONS}],
+                    )
+                    planner_invoked = True
+                except Exception as exc:
+                    logger.debug("Context assessment failed: %s", exc)
+                    response = ""
+                parsed = self._parse_assessment_response(str(response))
+                if parsed is not None:
+                    plan.update(parsed)
+                    planned = any(plan.values())
+            if not planned:
+                plan.update(heuristic_plan)
+                planned = any(plan.values())
+            summary = self._summarize_plan(plan)
+        state["retrieval_plan"] = plan
+        state["retrieval_plan_summary"] = summary
+        state["vector_query_planned"] = planned
+        state["retrieval_plan_used_llm"] = planner_invoked
+        return state
+
     def _node_retrieve(self, state: _TurnState) -> _TurnState:
         threshold = float(self.identity_settings.get("retrieval_threshold", 0.75))
         top_k = int(self.identity_settings.get("retrieval_top_k", 5))
         query_text = state.get("augmented_text") or state.get("user_text") or ""
 
-        doc_intent = self._should_prioritize_documentation(query_text)
-        temporal_intent = self._should_prioritize_temporal(query_text)
+        plan = state.get("retrieval_plan") or {}
+        doc_intent = bool(plan.get("documentation"))
+        temporal_intent = bool(plan.get("date"))
+        chat_intent = bool(plan.get("chat_history"))
         doc_threshold = self._documentation_threshold()
         doc_limit = min(top_k, 3 if doc_intent else 1)
         category_thresholds: dict[str, float] = {}
@@ -391,7 +555,7 @@ class MemoryOrchestrator:
         metrics: Dict[str, float] = {}
         attempted = False
 
-        if query_text:
+        if query_text and (doc_intent or temporal_intent or chat_intent):
             attempted = True
             try:
                 results = self.vector_store.retrieve(
@@ -404,7 +568,14 @@ class MemoryOrchestrator:
             except Exception as exc:
                 state.setdefault("errors", []).append({"node": "retrieve", "error": str(exc)})
 
-        if attempted and not results and not doc_intent and not temporal_intent and query_text:
+        if (
+            attempted
+            and not results
+            and not doc_intent
+            and not temporal_intent
+            and chat_intent
+            and query_text
+        ):
             try:
                 results = self.vector_store.retrieve(
                     query_text,
@@ -415,6 +586,20 @@ class MemoryOrchestrator:
                 )
             except Exception as exc:
                 state.setdefault("errors", []).append({"node": "retrieve", "error": str(exc)})
+
+        if attempted:
+            filtered = []
+            for item in results:
+                metadata = item.metadata or {}
+                category = str(metadata.get("category", ""))
+                if category == DOCUMENTATION_CATEGORY and not doc_intent:
+                    continue
+                if category == TEMPORAL_CATEGORY and not temporal_intent:
+                    continue
+                if category not in {DOCUMENTATION_CATEGORY, TEMPORAL_CATEGORY} and not chat_intent:
+                    continue
+                filtered.append(item)
+            results = filtered
 
         if results:
             avg_similarity = sum(item.similarity for item in results) / len(results)
@@ -442,6 +627,8 @@ class MemoryOrchestrator:
         state["vector_query_result_count"] = len(results)
         state["vector_query_documentation_count"] = doc_matches
         state["vector_query_temporal_count"] = temporal_matches
+        if not attempted:
+            state["retrieved"] = []
         if metrics:
             container = state.get("metrics")
             if not isinstance(container, dict):
@@ -500,7 +687,23 @@ class MemoryOrchestrator:
         except Exception as exc:
             state.setdefault("errors", []).append({"node": "llm", "error": str(exc)})
             response = "I'm having trouble responding right now."
-        state["response_text"] = response or ""
+        raw_response = (response or "")
+        state["raw_response_text"] = raw_response
+        filtered_response = raw_response
+        if self.think_manager is not None:
+            try:
+                think_result = self.think_manager.filter_response(raw_response)
+            except Exception as exc:
+                logger.debug("Think manager failed: %s", exc)
+            else:
+                filtered_response = think_result.visible_text
+                if think_result.removed:
+                    state["think_hidden"] = True
+                    if think_result.placeholder_text:
+                        state["think_placeholder"] = think_result.placeholder_text
+                    if think_result.hidden_think:
+                        state["hidden_think"] = think_result.hidden_think
+        state["response_text"] = filtered_response or ""
         return state
 
     def _node_persist(self, state: _TurnState) -> _TurnState:
@@ -609,6 +812,9 @@ class MemoryOrchestrator:
             RetrievedMemory(item["content"], item.get("metadata", {}), float(item.get("similarity", 0)))
             for item in result_state.get("retrieved", [])
         ]
+        raw_response_text = result_state.get("raw_response_text")
+        if raw_response_text is None:
+            raw_response_text = result_state.get("response_text", "")
         attempted_flag = bool(result_state.get("vector_query_attempted"))
         result_count = int(result_state.get("vector_query_result_count", len(retrieved)))
         doc_count = int(
@@ -631,18 +837,27 @@ class MemoryOrchestrator:
                 ),
             )
         )
+        plan = result_state.get("retrieval_plan")
+        plan_summary = result_state.get("retrieval_plan_summary") or "none"
         if attempted_flag:
             print(
                 "[Memory] Vector store queried "
-                f"(results={result_count}, documentation={doc_count}, temporal={temporal_count})."
+                f"(plan={plan_summary}, method={'llm' if result_state.get('retrieval_plan_used_llm') else 'heuristic'}, "
+                f"results={result_count}, documentation={doc_count}, temporal={temporal_count})."
             )
         else:
-            print("[Memory] Vector store not queried.")
+            print(
+                "[Memory] Vector store not queried "
+                f"(plan={plan_summary}, method={'llm' if result_state.get('retrieval_plan_used_llm') else 'heuristic'})."
+            )
         result_metadata = result_state.get("vision_metadata")
         result_attached = bool(result_state.get("vision_attached"))
         scrubbed_response = result_state.get("scrubbed_response")
         if scrubbed_response is None:
             scrubbed_response = force_plaintext(result_state.get("response_text", ""))
+        think_hidden = bool(result_state.get("think_hidden"))
+        think_placeholder = result_state.get("think_placeholder")
+        hidden_think = result_state.get("hidden_think")
         entries = self._build_history_entries(
             user_text,
             scrubbed_response,
@@ -652,6 +867,7 @@ class MemoryOrchestrator:
         return TurnResult(
             correlation_id=correlation_id,
             response_text=result_state.get("response_text", ""),
+            raw_response_text=str(raw_response_text or ""),
             history_entries=entries,
             retrieved=retrieved,
             trace_path=trace_path,
@@ -660,6 +876,15 @@ class MemoryOrchestrator:
             vector_query_result_count=result_count,
             vector_query_documentation_count=doc_count,
             vector_query_temporal_count=temporal_count,
+            retrieval_plan=dict(plan) if isinstance(plan, dict) else {},
+            retrieval_plan_used_llm=bool(result_state.get("retrieval_plan_used_llm")),
+            think_hidden=think_hidden,
+            think_placeholder=str(think_placeholder)
+            if isinstance(think_placeholder, str) and think_placeholder
+            else None,
+            hidden_think=str(hidden_think)
+            if isinstance(hidden_think, str) and hidden_think
+            else None,
         )
 
     def _write_trace(self, state: _TurnState) -> Path:
@@ -677,6 +902,10 @@ class MemoryOrchestrator:
         trace["vision_attached"] = bool(state.get("vision_attached"))
         if state.get("vision_metadata"):
             trace["vision_metadata"] = state.get("vision_metadata")
+        if state.get("retrieval_plan"):
+            trace["retrieval_plan"] = state.get("retrieval_plan")
+        if state.get("retrieval_plan_summary"):
+            trace["retrieval_plan_summary"] = state.get("retrieval_plan_summary")
         atomic_write_text(path, json.dumps(trace, indent=2, ensure_ascii=False))
         return path
 

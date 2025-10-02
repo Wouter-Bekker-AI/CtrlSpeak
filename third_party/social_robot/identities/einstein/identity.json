@@ -26,8 +26,9 @@
     "onnx_provider": "CUDAExecutionProvider",
     "device_id": 0
   },
+  "hide_think": true,
   "require_text_cleaning": true,
-  "vision": true,
+  "vision": false,
   "tool": false,
   "memory_dir": "memory"
 }
