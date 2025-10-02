@@ -4,7 +4,7 @@ CtrlSpeak includes an optional "Chat with Bot" experience accessible from the ma
 
 - **Speech to Text (STT)** - Uses CtrlSpeak's `/transcribe` endpoint. Audio captured by the VAD listener is sent to the running CtrlSpeak server (local or remote depending on mode). The server returns the recognized text.
 - **Language Model (LLM)** - The recognized text is sent to the Ollama-compatible client inside SocialRobot. By default CtrlSpeak ships with a lightweight fallback response if no LLM endpoint is reachable, but you can supply your own by setting the `BOT_LLM_URL` and `BOT_LLM_MODEL` environment variables (or the matching CLI flags) before launching CtrlSpeak.
-- **Text cleanup (background agent)** - SocialRobot now checks each reply and only calls `tools.message_management.force_plaintext` when markdown bullets or control characters are present. The scrubbed text populates the chat transcript, memory persistence, and Kokoro playback; otherwise the untouched reply flows straight through. The Profile Paragraphizer assets remain in `background_agents/tts_preprocessing_agent/`, but the helper is currently disabled in the runtime pipeline.
+- **Text cleanup** - SocialRobot checks each reply and only calls `tools.message_management.force_plaintext` when markdown bullets or control characters are present. The scrubbed text populates the chat transcript, memory persistence, and Kokoro playback; otherwise the untouched reply flows straight through.
 - **Text to Speech (TTS)** - The LLM response is converted to audio via Kokoro-ONNX. CtrlSpeak now ships the default receptionist persona with the cheerful `af_heart` voice; override it with `BOT_VOICE` or the `--voice` flag when you need a different Kokoro voice.
 - **Animated Face / Logo** - SocialRobot renders the default TrueAI transparent logo with amplitude-based scaling for visual feedback. Identity folders can still supply alternate assets under `third_party/social_robot/identities/<name>` when a different look is desired.
 - **Text chat window** - Sessions now start in text mode. A PySide chat window shows the running transcript, accepts typed input, and exposes a microphone toggle. The window anchors itself to the bottom-right corner where the floating logo normally lives and applies `assets/icon.ico` to both the window chrome and the microphone button for consistent branding. When you click the microphone to enter voice mode the chat window slides to the top-right corner, hides the input, shows the floating logo again, and hands control back to the VAD/TTS pipeline. Clicking the button again (or ending the session) returns to text chat, restores the bottom-right placement, and leaves the conversation in on-screen text.
@@ -101,7 +101,7 @@ Launch Ollama with `CUDA_VISIBLE_DEVICES=0,1` so both GPUs can host the checkpoi
 
 The additional boolean keys control multimodal, cleaning, and future extensibility features:
 
-- `require_text_cleaning` – Reserved for the paragraphizer workflow. The assets remain in place, but the helper is currently disabled so every identity relies on the deterministic plaintext scrub alone.
+- `require_text_cleaning` – When `true`, CtrlSpeak always runs the deterministic plaintext scrub before TTS playback. Identities that set it to `false` skip the scrub unless keywords or other sanitizers trigger.
 - `vision` – Enables image capture tooling documented in [`docs/tooling.md`](tooling.md). When `true`, SocialRobot listens for the spoken “look at my screen” and “look at my clipboard” commands, exposes matching context-menu actions on the floating logo, and routes captured images to the LLM. When `false`, the commands are ignored, the context-menu items are hidden, and no images are taken.
 - `tool` – Reserved flag for forthcoming external tool integrations. It defaults to `false` today but can be toggled once tool calling is implemented.
 
@@ -173,18 +173,6 @@ Run `python main.py --health [--health-identity <name>]` to probe the same pipel
 ## SocialRobot entrypoint responsibilities
 
 `third_party/social_robot/main.py` remains the authoritative entrypoint for the Chat with Bot workflow. CtrlSpeak launches it as a subprocess from `utils.bot_integration.start_bot`, passes the resolved identity settings and CtrlSpeak STT URL, and relies on its stdin control channel for graceful shutdowns.【F:utils/bot_integration.py†L667-L760】【F:third_party/social_robot/main.py†L251-L399】 The module bootstraps speech recognition, Ollama chat streaming, Kokoro playback, optional preprocessing, and the animated face/logo UI before wiring the stdin listener that handles `goodbye` commands issued by the parent process.【F:third_party/social_robot/main.py†L146-L532】 Removing or partially deleting this file will break bot startup and teardown, so trim functionality only when you can update every caller and test path accordingly.
-
-## Background agents
-
-The speech rewrite pass lives under `background_agents/tts_preprocessing_agent`. The directory mirrors an identity folder:
-
-- `identity.json` declares the Gemma 3 1B model, its Ollama URL, deterministic decoding options (temperature 0, top_p 1, repeat_penalty 1, mirostat disabled, fixed seed, and a `"\n\n"` stop), and the prompt files to load.
-- `system_prompt.txt` contains the Profile Paragraphizer instructions that turn label/value profile dumps into a single paragraph beginning with “Here’s what I know about you.”
-- `header_text.txt` remains available for legacy configurations that still set `preamble` to `header` or `both`, but the bundled identity now defaults to `system` and ignores the header.
-
-`background_agents/tts_preprocessing_agent/background_agent.py` still constructs a non-streaming `OllamaClient` and exposes `load_tts_preprocessing_agent()` for future use. The Profile Paragraphizer prompt and identity metadata remain unchanged, but SocialRobot no longer calls the helper at runtime; deterministic scrubbing handles every reply instead.【F:background_agents/tts_preprocessing_agent/background_agent.py†L1-L199】
-
-CtrlSpeak treats the agent as a first-class asset for identities that request it: `utils.bot_integration.start_bot` only stages the Gemma weights and pre-warms the checkpoint when the selected identity advertises `require_text_cleaning: true`, skipping the additional download and warm-up otherwise.【F:utils/bot_integration.py†L116-L214】【F:utils/bot_integration.py†L635-L790】 Packaged builds bundle `background_agents/` so the helper is present in single-file executables.【F:packaging/CtrlSpeak.spec†L42-L63】【F:packaging/CtrlSpeak_Watcher.spec†L42-L63】【F:utils/build_exe.py†L22-L82】
 
 ## Runtime Requirements
 
