@@ -1024,6 +1024,8 @@ def main():
         capture_result: Optional[vision.VisionCapture] = None
         identity_image: Optional[IdentityImageRecord] = None
         augmented_text = cleaned
+        identity_name = profile.name.strip().lower()
+        enforce_thinking = identity_name == "einstein"
         capture_request = capture_override
         capture_pattern: Optional[Pattern[str]] = None
 
@@ -1081,6 +1083,13 @@ def main():
             vision_metadata = identity_image.as_metadata(vision_request=capture_request)
         elif capture_request:
             vision_metadata = {"vision_request": capture_request}
+
+        if enforce_thinking:
+            lowered_augmented = augmented_text.casefold()
+            if "/no_think" not in lowered_augmented:
+                if "/think" not in lowered_augmented:
+                    stripped = augmented_text.rstrip()
+                    augmented_text = (f"{stripped} /think" if stripped else "/think").strip()
 
         fallback_content: Optional[List[dict]] = None
         if identity_image is not None and (
