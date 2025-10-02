@@ -1,6 +1,11 @@
-CtrlSpeak Tip: Hold the right Ctrl key to start recording and let go when you want the transcript.
-Fun Fact: Whisper small is optimised for quick responses while keeping accuracy high—perfect for first-time installs.
-Need GPU later? Open the management window and use “Install or repair CUDA” without reinstalling the app.
-Tray power: Right-click the CtrlSpeak tray icon any time to change modes or quit cleanly.
-Headless validation is easy—run python main.py --automation-flow to exercise the full install automatically.
-Quiet spaces boost accuracy. Switch microphones from the management window if you need a cleaner signal.
+CtrlSpeak Tip: Hold the right Ctrl key while you speak and keep it pressed until you finish—your words are captured the whole time.
+Hotkey Reminder: After you release the Ctrl key, leave the caret in the same text box; the transcript appears right where you were typing.
+Focus Check: Avoid clicking other apps while processing finishes so CtrlSpeak can drop the text exactly into the field you chose.
+Persona Spotlight: The default bot is your friendly receptionist—perfect for quick questions and lightweight chat.
+Vision Ready: Ask for the assistant persona when you want screen-aware help; it can look at approved screenshots to guide you.
+Power User: Switch to Einstein when you need tool calls, calculations, or deeper reasoning beyond casual conversation.
+Quick Launch: Say "chat with assistant" or hold Ctrl and speak it to swap personas without touching the mouse.
+Accuracy Boost: Use a quiet room and speak clearly toward your mic for faster, cleaner transcripts.
+AI Fun Fact: Whisper, the speech engine behind CtrlSpeak, is a transformer model trained on 680,000 hours of multilingual audio.
+History Byte: The phrase "artificial intelligence" was first used at the 1956 Dartmouth workshop that kicked off modern AI research.
+Jarvis Nod: Iron Man's JARVIS assistant was named after Tony Stark's family butler and inspired countless real-world voice helpers.
