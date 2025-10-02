@@ -5,7 +5,7 @@
 - The ground rules themselves cannot be relaxed or ignored. When you extend the project, redesign within these boundaries rather than weakening them.
 
 ## Mandatory orientation for AI agents
-- On your first pass through this repository, read **every** Markdown file so you understand the existing expectations before editing code. That includes `README.md`, everything under `docs/` (notably [`docs/tooling.md`](tooling.md) for shared tooling guidance), and the testing notes under `tests/` (especially `tests/TESTING.md`).
+- On your first pass through this repository, read **every** Markdown file so you understand the existing expectations before editing code. That includes `README.md`, everything under `docs/` (notably [`docs/tooling.md`](tooling.md) for shared tooling guidance), and the consolidated testing playbook in [`docs/TESTING.md`](TESTING.md).
 - When you make code changes that affect or invalidate existing documentation, update the impacted Markdown files in the same pull request so the written guidance never diverges from reality.
 
 ## Repository mutability lifecycle
@@ -64,11 +64,11 @@
 
 ## Testing obligations before submitting changes
 - Run the compile smoke test to ensure every module still compiles to bytecode: `python -m compileall .`.
-- Execute the core headless pytest suite on every change: `python -m pytest -m core_headless`. This fast suite guards configuration helpers, CLI parsing, and discovery utilities. The run must succeed; if it fails, stop, investigate, and explain the failure in your status update before proceeding.【F:tests/TESTING.md†L1-L34】
-- Regularly run the full GUI/integration suite (`CTRLSPEAK_RUN_FULL_TESTS=1 python -m pytest -m full_gui`) and the combined run (`CTRLSPEAK_RUN_FULL_TESTS=1 python -m pytest`) to catch regressions that span the entire pipeline.【F:tests/TESTING.md†L18-L52】
+- Execute the core headless pytest suite on every change: `python -m pytest -m core_headless`. This fast suite guards configuration helpers, CLI parsing, and discovery utilities. The run must succeed; if it fails, stop, investigate, and explain the failure in your status update before proceeding.【F:docs/TESTING.md†L29-L36】
+- Regularly run the full GUI/integration suite (`CTRLSPEAK_RUN_FULL_TESTS=1 python -m pytest -m full_gui`) and the combined run (`CTRLSPEAK_RUN_FULL_TESTS=1 python -m pytest`) to catch regressions that span the entire pipeline.【F:docs/TESTING.md†L40-L60】
 
 ## Documentation synchronization
-- When code changes alter behavior, configuration, or user interaction, update the relevant Markdown documentation (`README.md`, files in `docs/`, `tests/TESTING.md`, etc.) in the same change set.
+- When code changes alter behavior, configuration, or user interaction, update the relevant Markdown documentation (`README.md`, files in `docs/`, [`docs/TESTING.md`](TESTING.md), etc.) in the same change set.
 - Maintain the running backlog in [`docs/TODO.md`](TODO.md) so pending enhancements stay discoverable and current.
 - This ground-rules document sets the guardrails those updates must respect; do not rewrite history to relax these requirements.
 
