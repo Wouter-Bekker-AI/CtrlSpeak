@@ -78,7 +78,13 @@ If you omit the block entirely, Kokoro continues to probe GPU providers automati
 
 ### Bundled personas
 
-CtrlSpeak ships with three ready-to-use personas:
+CtrlSpeak ships with three ready-to-use personas. The matrix below consolidates their roles and capabilities so operators and agents can quickly pick the right bot for a task:
+
+| Persona | Identity name | Primary role | Key capabilities | Key limitations |
+| --- | --- | --- | --- | --- |
+| Default receptionist | `default` | Welcomes users, answers CtrlSpeak usage questions, and routes requests to the right specialist. | Reads the bundled documentation set before every session and can describe other personas so it acts as a knowledgeable receptionist. | No vision capture and no tool calling; delegates advanced requests to the assistant or Einstein personas. |
+| Assistant | `assistant` | General-purpose helper for day-to-day requests. | Vision-enabled—can capture the screen or clipboard on request, references the documentation corpus, and delivers polished natural-language replies. | Tool calling remains disabled; for complex planning or actions it will escalate to Einstein. |
+| Einstein | `einstein` | Deep-thinking strategist and automation specialist. | Runs with `/think` enabled for deliberate reasoning and is authorized to invoke LangGraph-managed tools (create, search, future automation) when available. Also ingests the shared documentation set at startup. | Vision capture stays disabled so it focuses on analysis and tooling; relies on other personas for pure receptionist duties. |
 
 - **assistant** – A Jarvis-inspired general helper backed by `gemma3:12b` with deterministic paragraph cleaning enabled.
 - **default** – TrueAI's upbeat front-desk receptionist persona that uses `gemma3:1b`, keeps vision disabled, and focuses on guiding people to the right bot or CtrlSpeak feature.
@@ -105,7 +111,7 @@ The additional boolean keys control multimodal, cleaning, and future extensibili
 - `vision` – Enables image capture tooling documented in [`docs/tooling.md`](tooling.md). When `true`, SocialRobot listens for the spoken “look at my screen” and “look at my clipboard” commands, exposes matching context-menu actions on the floating logo, and routes captured images to the LLM. When `false`, the commands are ignored, the context-menu items are hidden, and no images are taken.
 - `tool` – Reserved flag for forthcoming external tool integrations. It defaults to `false` today but can be toggled once tool calling is implemented.
 
-CtrlSpeak now includes three bundled identities: `assistant` (vision enabled, text cleaning enabled), `default` (vision disabled, text cleaning disabled), and `einstein` (vision enabled, text cleaning enabled with Qwen3 reasoning defaults). All currently set `tool` to `false` until external tool integrations are wired up.
+CtrlSpeak now includes three bundled identities: `assistant` (vision enabled, text cleaning enabled), `default` (vision disabled, text cleaning disabled), and `einstein` (vision disabled, text cleaning enabled with Qwen3 reasoning defaults). The configuration flag `tool` remains `false` today for compatibility, but Einstein is the designated tool-calling persona and gains access as soon as LangGraph exposes approved tools.
 
 All face, mouth, and logo assets now live inside the identity directories; the legacy `third_party/social_robot/images/` placeholders have been removed so new personas should bundle their own art alongside `identity.json`. Likewise, shared prompt templates are deprecated—store any reusable system prompts with the identity that consumes them so packaging stays self-contained.
 
