@@ -37,6 +37,7 @@ else:
 
 from background_agents.datetime_memory_agent import refresh_datetime_memory
 from background_agents.document_memory_agent import refresh_document_memory
+from background_agents.manage_think import ManageThinkAgent, load_manage_think_agent
 from tools import keywords, vision
 from tools.message_management import force_plaintext, requires_force_plaintext
 from utils.config_paths import get_logger
@@ -144,6 +145,7 @@ class IdentityProfile:
         vision_enabled: bool = False,
         tool_enabled: bool = False,
         require_text_cleaning: bool = True,
+        hide_think: bool = False,
         tts_provider: Optional[str] = None,
         tts_device_id: Optional[int] = None,
         tts_providers: Optional[List[object]] = None,
@@ -161,6 +163,7 @@ class IdentityProfile:
         self.vision_enabled = vision_enabled
         self.tool_enabled = tool_enabled
         self.require_text_cleaning = require_text_cleaning
+        self.hide_think = hide_think
         self.tts_provider = tts_provider
         self.tts_device_id = tts_device_id
         if tts_providers:
@@ -351,6 +354,15 @@ def resolve_identity(args) -> tuple[IdentityProfile, dict]:
     else:
         require_text_cleaning = True
 
+    hide_think_flag = config.get("hide_think")
+    if isinstance(hide_think_flag, bool):
+        hide_think = hide_think_flag
+    elif hide_think_flag is not None:
+        print("-> Ignoring hide_think value; expected a boolean true/false.")
+        hide_think = False
+    else:
+        hide_think = False
+
     tts_config = config.get("tts", {}) if isinstance(config.get("tts"), dict) else {}
     if config.get("tts") is not None and not isinstance(config.get("tts"), dict):
         print("-> Ignoring tts value; expected an object with provider settings.")
@@ -406,6 +418,7 @@ def resolve_identity(args) -> tuple[IdentityProfile, dict]:
         vision_enabled=vision_enabled,
         tool_enabled=tool_enabled,
         require_text_cleaning=require_text_cleaning,
+        hide_think=hide_think,
         tts_provider=tts_provider,
         tts_device_id=tts_device_id,
         tts_providers=tts_providers,
@@ -531,6 +544,11 @@ def main():
         metrics_path = profile.memory_path / "traces" / "metrics.csv"
     else:
         metrics_path = Path(tempfile.gettempdir()) / "ctrlspeak_metrics.csv"
+    think_agent: Optional[ManageThinkAgent] = None
+    if profile.hide_think:
+        think_agent = load_manage_think_agent()
+        print("-> Hide-think mode enabled; suppressing <think> plans from chat history.")
+
     orchestrator: Optional[MemoryOrchestrator] = None
     global _memory_orchestrator
     if use_orchestrator and profile.memory_path is None:
@@ -548,6 +566,7 @@ def main():
                 memory_dir=profile.memory_path,
                 metrics_path=metrics_path,
                 identity_settings=identity_settings,
+                think_manager=think_agent if profile.hide_think else None,
             )
             _memory_orchestrator = orchestrator
             atexit.register(_shutdown_orchestrator)
@@ -1028,6 +1047,19 @@ def main():
         enforce_thinking = identity_name == "einstein"
         capture_request = capture_override
         capture_pattern: Optional[Pattern[str]] = None
+        placeholder_displayed = False
+        placeholder_text: Optional[str] = None
+        if profile.hide_think:
+            if think_agent is not None:
+                candidate_placeholder = think_agent.placeholder_text
+                if isinstance(candidate_placeholder, str) and candidate_placeholder.strip():
+                    placeholder_text = candidate_placeholder
+            else:
+                placeholder_text = "Thinking..."
+
+        if placeholder_text and not placeholder_displayed:
+            chat_window.append_bot_message(placeholder_text)
+            placeholder_displayed = True
 
         if profile.vision_enabled:
             if capture_request is None:
@@ -1101,7 +1133,10 @@ def main():
             ]
 
         llm_response = ""
+        raw_llm_response = ""
         used_orchestrator = False
+        think_hidden = False
+        think_placeholder: Optional[str] = None
         if use_orchestrator and orchestrator is not None:
             try:
                 turn_result = orchestrator.run_turn(
@@ -1110,6 +1145,9 @@ def main():
                     vision_metadata=vision_metadata,
                 )
                 llm_response = turn_result.response_text
+                raw_llm_response = turn_result.raw_response_text
+                think_hidden = turn_result.think_hidden
+                think_placeholder = turn_result.think_placeholder
                 used_orchestrator = True
             except Exception as exc:
                 print("-> LangGraph orchestrator failure; falling back to legacy conversation.")
@@ -1153,18 +1191,39 @@ def main():
 
             history.append(history_entry)
 
-        raw_response = llm_response
+        if not raw_llm_response:
+            raw_llm_response = llm_response
+
+        manage_result = None
+        if think_agent is not None and profile.hide_think and not used_orchestrator:
+            try:
+                manage_result = think_agent.filter_response(raw_llm_response)
+            except Exception:
+                logger.exception("Manage-think agent failed to filter response")
+                manage_result = None
+            else:
+                llm_response = manage_result.visible_text
+                think_hidden = manage_result.removed
+                think_placeholder = manage_result.placeholder_text if manage_result.removed else None
+
+        raw_response = raw_llm_response or llm_response
         print("-> Raw LLM reply:", raw_response)
 
-        if requires_force_plaintext(raw_response):
+        if think_hidden and think_placeholder and not placeholder_displayed:
+            chat_window.append_bot_message(think_placeholder)
+            placeholder_displayed = True
+
+        final_response = llm_response
+
+        if requires_force_plaintext(final_response):
             print("-> Handing reply to force_plaintext().")
-            final_response = force_plaintext(raw_response)
+            final_response = force_plaintext(final_response)
             print("-> Scrubbed reply:", final_response)
-            if final_response != raw_response:
+            if final_response != llm_response:
                 print("-> Applied deterministic TTS scrub.")
         else:
             print("-> Reply does not require deterministic scrub.")
-            final_response = raw_response
+            final_response = llm_response
         print("-> Final reply for chat history and TTS:", final_response)
 
         if not used_orchestrator:

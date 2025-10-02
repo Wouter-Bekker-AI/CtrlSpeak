@@ -82,7 +82,7 @@ CtrlSpeak ships with three ready-to-use personas:
 
 - **assistant** – A Jarvis-inspired general helper backed by `gemma3:12b` with deterministic paragraph cleaning enabled.
 - **default** – A lighter companion persona that uses `gemma3:1b` and keeps vision disabled by default.
-- **einstein** – The deep-thinking and tool-planning specialist powered by `qwen3:14b`. CtrlSpeak appends `/think` to every Einstein turn (unless the user says `/no_think`) so Qwen3’s reasoning mode emits `<think>…</think>` plans before the final answer. The identity’s `identity.json` requests GPU-only execution, an 8 192 token context window, and the recommended sampling settings (`temperature` 0.6, `top_p` 0.95, `top_k` 20, `repeat_penalty` 1.1). Stage the model in Ollama with a Modelfile equivalent to:
+- **einstein** – The deep-thinking and tool-planning specialist powered by `qwen3:14b`. CtrlSpeak appends `/think` to every Einstein turn (unless the user says `/no_think`) so Qwen3’s reasoning mode emits `<think>…</think>` plans before the final answer. The identity’s `identity.json` requests GPU-only execution, an 8 192 token context window, and the recommended sampling settings (`temperature` 0.6, `top_p` 0.95, `top_k` 20, `repeat_penalty` 1.1). Einstein also opts into `"hide_think": true`, which enables the `background_agents.manage_think` helper to strip `<think>` plans from the persisted chat history and Kokoro playback, drop the leading “Answer:” label before the visible reply, and immediately print a transient `Thinking...` placeholder in the chat window as soon as the user submits a message. Vision capture is disabled for this persona (`"vision": false`), so “look at my screen/clipboard” shortcuts only work with other identities. Stage the model in Ollama with a Modelfile equivalent to:
 
 ```
 FROM hf.co/Qwen/Qwen3-14B-GGUF:Q4_K_M
@@ -118,11 +118,15 @@ The bundled personas keep their reference material up to date without overflowin
 3. Terminal-only messages confirm the trigger (startup, keyword, hash change), report how many chunks were written, and indicate whether any older memories were evicted to honour the cap. The GUI and TTS layers remain silent.
 4. Operators can say or type “update documentation” or “update datetime” (including via the Ctrl hotkey workflow) to force a refresh immediately. Forced runs bypass the cooldown so emergency edits or timezone changes land before the next user turn. The hotkey path refreshes the active identity, while in-session requests refresh whichever persona is currently running inside SocialRobot. Questions that mention the current date, time, or timezone automatically lower the retrieval threshold for the temporal-context chunk so the assistant responds with the stored snapshot instead of only referencing the tracker file.
 
-Other identities can invoke the helper manually if they enable vector memory for documentation, but only the assistant, Einstein, and default personas do so automatically. Launching either persona also forces the LangGraph memory orchestrator on—even when `settings.json` never toggled the feature—so documentation retrieval always flows through the structured `retrieve → plan → call_tools → llm → persist` graph before the chat window becomes interactive.
+Other identities can invoke the helper manually if they enable vector memory for documentation, but only the assistant, Einstein, and default personas do so automatically. Launching either persona also forces the LangGraph memory orchestrator on—even when `settings.json` never toggled the feature—so documentation retrieval always flows through the structured `assess_context → retrieve → plan_tools → call_tools → llm → persist` graph before the chat window becomes interactive.
+
+Once the orchestrator is active, every user turn starts with a lightweight planner prompt that asks the LLM whether it wants additional context. The model must respond with `documentation`, `chat_history`, `date`, any comma-separated combination of those tokens, or `none`. A `none` answer skips the vector database entirely; otherwise the retrieval node limits its query to the requested buckets so documentation and temporal context are only attached when the model explicitly requests them. Questions about CtrlSpeak usage typically elicit `documentation`, while requests like “what’s my name?” surface `chat_history` so the assistant replays the correct conversation memories.
+
+If the planner claims `none` but the user explicitly mentions the documentation, prior conversation history, or the current date/time, the orchestrator now overrides the plan based on those heuristics and still performs the relevant lookup. That safeguard catches prompts such as “look at our chat history” or “explain how to use this program” even when the planner misses the cue.
 
 When the assistant or default persona receives an utterance that sounds like a “how do I use CtrlSpeak?” request (or when retrieval would otherwise return nothing), the LangGraph orchestrator relaxes the similarity check for `category="documentation"` memories and guarantees at least one documentation chunk appears in the retrieved context. Those passages are forwarded to the LLM inside a dedicated `Documentation excerpts` system message so the persona understands the text is canonical guidance and can quote it directly.
 
-Every turn prints a terminal-only status line such as `[Memory] Vector store queried (results=2, documentation=1, temporal=1).` or `[Memory] Vector store not queried.` so operators can confirm whether the vector database contributed context for the pending reply. The GUI and TTS surfaces remain silent.
+Every turn prints a terminal-only status line such as `[Memory] Vector store queried (plan=documentation, results=2, documentation=1, temporal=1).` or `[Memory] Vector store not queried (plan=none).` so operators can confirm both the planner’s decision and whether the vector database contributed context for the pending reply. The GUI and TTS surfaces remain silent.
 
 You can switch identities from the command line with:
 
@@ -155,11 +159,12 @@ Setting `use_langgraph_memory_orchestrator: true` in `settings.json` (or exporti
 
 > **Bundled personas:** When you start the assistant, Einstein, or default personas, CtrlSpeak automatically flips this setting on (persisting it back to `settings.json`) so documentation ingestion and retrieval always use the LangGraph path even on pristine installs.
 
-1. **retrieve** – query Chroma for up to `retrieval_top_k` memories above `retrieval_threshold`; empty stores or low scores short-circuit.
-2. **plan_tools** – reserved for future branching/tooling (currently a pass-through node).
-3. **call_tools** – executes planned tools (no-ops today).
-4. **llm** – calls the Ollama client with the existing history plus any retrieved memory preamble.
-5. **persist** – enqueues atomic JSONL appends and Chroma upserts on a background worker so Kokoro playback can start immediately.
+1. **assess_context** – ask the LLM which context buckets (`documentation`, `chat_history`, `date`, or `none`) it wants for the turn and cache the response.
+2. **retrieve** – query Chroma for up to `retrieval_top_k` memories above `retrieval_threshold`, limited to the planner’s requested categories; empty stores or low scores short-circuit.
+3. **plan_tools** – reserved for future branching/tooling (currently a pass-through node).
+4. **call_tools** – executes planned tools (no-ops today).
+5. **llm** – calls the Ollama client with the existing history plus any retrieved memory preamble.
+6. **persist** – enqueues atomic JSONL appends and Chroma upserts on a background worker so Kokoro playback can start immediately.
 
 Persistence enforces the 10 MB/5-file JSONL rotation, 5 000-vector cap with LRU eviction, optional TTL, and the `pii_redaction` toggle before embedding. Per-turn traces (`run_<timestamp>_<correlation>.json`) and CSV metrics (`retrieval_hits`, `avg_similarity`, `persist_latency_ms`, `evictions`, `lock_wait_ms`) accumulate under `${data_root}/bot_memory/<identity>/traces` for post-mortems. If initialization fails (missing AppData, Chroma errors, LangGraph import issues), SocialRobot prints “LangGraph orchestrator failure; falling back to legacy conversation.”, logs the exception, and resumes the synchronous history writer.
 

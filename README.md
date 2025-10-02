@@ -7,7 +7,7 @@ Both flavours support Windows 10/11, enforce a single running instance, expose a
 ## Repository Layout
 
 - `main.py` – application entry point.
-- `background_agents/` – self-contained helpers that run alongside Chat with Bot. The bundled `tts_preprocessing_agent` paragraphizes profile-style replies for identities that opt into text cleaning.
+- `background_agents/` – self-contained helpers that run alongside Chat with Bot. The bundled `manage_think` helper suppresses `<think>` plans for personas that set `"hide_think": true`, and the `tts_preprocessing_agent` paragraphizes profile-style replies for identities that opt into text cleaning.
 - `assets/` – static resources such as the tray icon (`icon.ico`), the welcome video (`TrueAI_Intro_Video.mp4`), the fun-fact rotation list (`fun_facts.txt`), and the processing chime (`loading.wav`).
 - `utils/` – implementation modules (GUI, models, networking, configuration helpers, etc.).
 - `utils/build_exe.py` – helper script that runs PyInstaller with the correct data files.
