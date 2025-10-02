@@ -7,12 +7,22 @@
   "logo_image": "TrueAI_Logo_Transparent_Final.png",
   "llm_model": "gemma3:12b",
   "llm_url": "http://localhost:11434/api/chat",
-  "ollama_hardware": "cpu_and_gpu",
+  "ollama_hardware": "gpu_only",
   "ollama_options": {
     "temperature": 0.7,
-    "num_ctx": 8192
+    "num_ctx": 8192,
+    "num_gpu": 999,
+    "main_gpu": 0,
+    "gpu_split": [
+      0.6,
+      0.4
+    ]
   },
   "voice": "af_sky",
+  "tts": {
+    "onnx_provider": "CUDAExecutionProvider",
+    "device_id": 0
+  },
   "require_text_cleaning": true,
   "vision": true,
   "tool": false,

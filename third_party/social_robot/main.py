@@ -144,6 +144,10 @@ class IdentityProfile:
         vision_enabled: bool = False,
         tool_enabled: bool = False,
         require_text_cleaning: bool = True,
+        tts_provider: Optional[str] = None,
+        tts_device_id: Optional[int] = None,
+        tts_providers: Optional[List[object]] = None,
+        tts_provider_options: Optional[Dict[str, object]] = None,
     ) -> None:
         self.name = name
         self.system_prompt = system_prompt
@@ -157,6 +161,23 @@ class IdentityProfile:
         self.vision_enabled = vision_enabled
         self.tool_enabled = tool_enabled
         self.require_text_cleaning = require_text_cleaning
+        self.tts_provider = tts_provider
+        self.tts_device_id = tts_device_id
+        if tts_providers:
+            normalized: List[object] = []
+            for entry in tts_providers:
+                if isinstance(entry, dict):
+                    item = dict(entry)
+                    options = item.get("options")
+                    if isinstance(options, dict):
+                        item["options"] = dict(options)
+                    normalized.append(item)
+                else:
+                    normalized.append(entry)
+            self.tts_providers = normalized
+        else:
+            self.tts_providers = None
+        self.tts_provider_options = dict(tts_provider_options) if tts_provider_options else None
 
 def _resolve_identities_root(arg_value: Optional[str]) -> Path:
     if arg_value:
@@ -198,6 +219,49 @@ def _read_prompt(identity_path: Path, prompt_file: str) -> Optional[str]:
 
 def _identity_display(name: str) -> str:
     return name.replace("_", " ").strip().title() or name
+
+
+def _coerce_int(value, *, context: str) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            print(f"-> Ignoring {context}; expected an integer but received '{value}'.")
+            return None
+    print(f"-> Ignoring {context}; expected an integer but received {type(value)!r}.")
+    return None
+
+
+def _parse_json_list(raw: Optional[str], *, context: str) -> Optional[List[object]]:
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"-> Failed to parse {context}: {exc}")
+        return None
+    if isinstance(parsed, list):
+        return parsed
+    print(f"-> Ignoring {context}; expected a JSON list but received {type(parsed)!r}.")
+    return None
+
+
+def _parse_json_dict(raw: Optional[str], *, context: str) -> Optional[Dict[str, object]]:
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"-> Failed to parse {context}: {exc}")
+        return None
+    if isinstance(parsed, dict):
+        return parsed
+    print(f"-> Ignoring {context}; expected a JSON object but received {type(parsed)!r}.")
+    return None
 
 
 def resolve_identity(args) -> tuple[IdentityProfile, dict]:
@@ -287,6 +351,48 @@ def resolve_identity(args) -> tuple[IdentityProfile, dict]:
     else:
         require_text_cleaning = True
 
+    tts_config = config.get("tts", {}) if isinstance(config.get("tts"), dict) else {}
+    if config.get("tts") is not None and not isinstance(config.get("tts"), dict):
+        print("-> Ignoring tts value; expected an object with provider settings.")
+
+    tts_provider = args.tts_provider
+    if not tts_provider:
+        tts_provider = os.getenv("BOT_TTS_PROVIDER")
+    if not tts_provider:
+        raw_provider = tts_config.get("onnx_provider") or tts_config.get("provider")
+        if isinstance(raw_provider, str):
+            tts_provider = raw_provider
+        elif raw_provider is not None:
+            print("-> Ignoring tts.onnx_provider; expected a string value.")
+
+    tts_device_id = args.tts_device_id
+    if tts_device_id is None:
+        env_device = _coerce_int(os.getenv("BOT_TTS_DEVICE_ID"), context="BOT_TTS_DEVICE_ID")
+        if env_device is not None:
+            tts_device_id = env_device
+    if tts_device_id is None:
+        tts_device_id = _coerce_int(tts_config.get("device_id"), context="tts.device_id")
+
+    tts_provider_options = _parse_json_dict(
+        os.getenv("BOT_TTS_PROVIDER_OPTIONS"), context="BOT_TTS_PROVIDER_OPTIONS"
+    )
+    if tts_provider_options is None:
+        raw_options = tts_config.get("provider_options")
+        if isinstance(raw_options, dict):
+            tts_provider_options = raw_options
+        elif raw_options is not None:
+            print("-> Ignoring tts.provider_options; expected an object with option keys.")
+
+    tts_providers = _parse_json_list(args.tts_providers, context="--tts-providers")
+    if tts_providers is None:
+        tts_providers = _parse_json_list(os.getenv("BOT_TTS_PROVIDERS"), context="BOT_TTS_PROVIDERS")
+    if tts_providers is None:
+        raw_providers = tts_config.get("providers")
+        if isinstance(raw_providers, list):
+            tts_providers = raw_providers
+        elif raw_providers is not None:
+            print("-> Ignoring tts.providers; expected a list of provider definitions.")
+
     profile = IdentityProfile(
         name=identity_name,
         system_prompt=system_prompt,
@@ -300,6 +406,10 @@ def resolve_identity(args) -> tuple[IdentityProfile, dict]:
         vision_enabled=vision_enabled,
         tool_enabled=tool_enabled,
         require_text_cleaning=require_text_cleaning,
+        tts_provider=tts_provider,
+        tts_device_id=tts_device_id,
+        tts_providers=tts_providers,
+        tts_provider_options=tts_provider_options,
     )
 
     print(f"-> Loaded identity '{profile.name}' (voice={profile.voice}, model={profile.llm_model})")
@@ -324,6 +434,12 @@ def parse_args():
     p.set_defaults(read_prompt_from_file=None)
     p.add_argument("--system-prompt", default=os.getenv("BOT_SYSTEM_PROMPT"))
     p.add_argument("--memory-dir", default=os.getenv("BOT_MEMORY_DIR"))
+    p.add_argument("--tts-provider", help="Override the ONNX Runtime provider for Kokoro TTS.")
+    p.add_argument("--tts-device-id", type=int, help="Override the GPU device id for the TTS provider when supported.")
+    p.add_argument(
+        "--tts-providers",
+        help="JSON list of provider entries to pass directly to onnxruntime (advanced).",
+    )
     p.add_argument("--test-wav", help="Path to a WAV file to process for testing (bypasses VAD/mic).")
     return p.parse_args()
 
@@ -395,7 +511,14 @@ def main():
         hardware_mode=profile.ollama_hardware,
     )
 
-    tts_model = KokoroTTS(voice=profile.voice, speed=1.0)
+    tts_model = KokoroTTS(
+        voice=profile.voice,
+        speed=1.0,
+        onnx_provider=profile.tts_provider,
+        onnx_device_id=profile.tts_device_id,
+        onnx_providers=profile.tts_providers,
+        onnx_provider_options=profile.tts_provider_options,
+    )
     print("-> TTS preprocessing agent is disabled; using deterministic scrub only when needed.")
 
     identity_settings = load_identity_settings(profile.name)

@@ -22,6 +22,8 @@ VOICES_SHA256 = "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7
 MODEL_FILENAME = "kokoro-v1.0.onnx"
 VOICES_FILENAME = "voices-v1.0.bin"
 
+GPU_PROVIDER_NAMES = {"CUDAExecutionProvider", "ROCMExecutionProvider", "DmlExecutionProvider"}
+
 
 class KokoroTTS:
     """Generate audio using the Kokoro neural TTS model."""
@@ -31,6 +33,11 @@ class KokoroTTS:
         voice: str = "af_bella",
         speed: float = 1.0,
         model_dir: Optional[Path | str] = None,
+        *,
+        onnx_provider: Optional[str] = None,
+        onnx_device_id: Optional[int] = None,
+        onnx_providers: Optional[List[object]] = None,
+        onnx_provider_options: Optional[dict] = None,
     ) -> None:
         warnings.filterwarnings("once", category=UserWarning, module="phonemizer")
         self.voice = voice
@@ -41,7 +48,11 @@ class KokoroTTS:
         self._model_path = self._model_dir / MODEL_FILENAME
         self._voices_path = self._model_dir / VOICES_FILENAME
         self._ensure_model_files()
-        self._engine = Kokoro(str(self._model_path), str(self._voices_path))
+        self._onnx_provider = self._normalize_provider_name(onnx_provider)
+        self._onnx_device_id = onnx_device_id
+        self._onnx_provider_options = dict(onnx_provider_options or {})
+        self._custom_providers = self._normalize_custom_providers(onnx_providers)
+        self._engine = self._build_engine()
         self._validate_voice()
         print("-> Using Kokoro-ONNX for speech synthesis.")
         self._stop_event = threading.Event()
@@ -88,6 +99,198 @@ class KokoroTTS:
             )
 
         tmp_path.replace(destination)
+
+    @staticmethod
+    def _normalize_provider_name(name: Optional[str]) -> Optional[str]:
+        if not name:
+            return None
+        normalized = name.strip()
+        if not normalized:
+            return None
+        aliases = {
+            "cpu": "CPUExecutionProvider",
+            "cuda": "CUDAExecutionProvider",
+            "gpu": "CUDAExecutionProvider",
+            "rocm": "ROCMExecutionProvider",
+            "directml": "DmlExecutionProvider",
+        }
+        return aliases.get(normalized.lower(), normalized)
+
+    def _normalize_custom_providers(self, providers: Optional[List[object]]) -> Optional[List[object]]:
+        if not providers:
+            return None
+        normalized: List[object] = []
+        for entry in providers:
+            if isinstance(entry, str):
+                provider_name = self._normalize_provider_name(entry)
+                if provider_name:
+                    normalized.append(provider_name)
+                else:
+                    print(f"-> Ignoring blank TTS provider entry: {entry!r}")
+            elif isinstance(entry, dict):
+                provider_name = self._normalize_provider_name(entry.get("name"))
+                if not provider_name:
+                    print("-> Ignoring TTS provider mapping without a 'name' field.")
+                    continue
+                options = entry.get("options")
+                if isinstance(options, dict) and options:
+                    normalized.append((provider_name, dict(options)))
+                else:
+                    normalized.append(provider_name)
+            else:
+                print(f"-> Ignoring unsupported TTS provider entry type: {type(entry)!r}")
+        return normalized or None
+
+    def _sanitize_provider_specs(
+        self,
+        providers: List[object],
+        available: set[str],
+    ) -> Tuple[List[object], List[str], bool]:
+        sanitized: List[object] = []
+        skipped: List[str] = []
+        attempted_gpu = False
+
+        for entry in providers:
+            provider_name: Optional[str] = None
+            options: Optional[dict] = None
+
+            if isinstance(entry, str):
+                provider_name = self._normalize_provider_name(entry)
+            elif isinstance(entry, (list, tuple)) and entry:
+                provider_name = self._normalize_provider_name(entry[0])
+                if len(entry) > 1 and isinstance(entry[1], dict):
+                    options = dict(entry[1])
+            elif isinstance(entry, dict):
+                provider_name = self._normalize_provider_name(entry.get("name"))
+                raw_options = entry.get("options")
+                if isinstance(raw_options, dict):
+                    options = dict(raw_options)
+            else:
+                print(f"-> Ignoring unsupported TTS provider entry spec: {entry!r}")
+                continue
+
+            if not provider_name:
+                print("-> Ignoring TTS provider spec without a valid name.")
+                continue
+
+            if provider_name in GPU_PROVIDER_NAMES:
+                attempted_gpu = True
+
+            if available and provider_name not in available:
+                skipped.append(provider_name)
+                continue
+
+            if options:
+                sanitized.append((provider_name, options))
+            else:
+                sanitized.append(provider_name)
+
+        return sanitized, skipped, attempted_gpu
+
+    def _build_engine(self) -> Kokoro:
+        providers = self._custom_providers
+
+        if not providers and (
+            self._onnx_provider
+            or self._onnx_provider_options
+            or self._onnx_device_id is not None
+        ):
+            provider_name = self._normalize_provider_name(self._onnx_provider) or "CUDAExecutionProvider"
+            options = dict(self._onnx_provider_options)
+            if provider_name in GPU_PROVIDER_NAMES:
+                if self._onnx_device_id is not None:
+                    options.setdefault("device_id", self._onnx_device_id)
+                else:
+                    options.setdefault("device_id", 0)
+            elif self._onnx_device_id is not None:
+                options.setdefault("device_id", self._onnx_device_id)
+            providers = [(provider_name, options)] if options else [provider_name]
+
+        try:
+            import onnxruntime as ort
+        except Exception as exc:
+            if providers:
+                print("-> onnxruntime unavailable; Kokoro TTS falling back to default CPU provider.")
+                print(f"   Reason: {exc}")
+            return Kokoro(str(self._model_path), str(self._voices_path))
+
+        available: set[str] = set()
+        try:
+            available = set(ort.get_available_providers())
+        except Exception:
+            # When enumeration fails (for example due to missing DLLs), proceed and let
+            # InferenceSession construction raise a more descriptive error.
+            available = set()
+
+        if not providers:
+            for candidate in ("CUDAExecutionProvider", "ROCMExecutionProvider", "DmlExecutionProvider"):
+                normalized_candidate = self._normalize_provider_name(candidate)
+                if normalized_candidate and (
+                    not available or normalized_candidate in available
+                ):
+                    device_options: dict = {}
+                    if self._onnx_device_id is not None:
+                        device_options["device_id"] = self._onnx_device_id
+                    elif normalized_candidate == "CUDAExecutionProvider":
+                        device_options["device_id"] = 0
+                    providers = (
+                        [(normalized_candidate, device_options)]
+                        if device_options
+                        else [normalized_candidate]
+                    )
+                    break
+
+        attempted_gpu = False
+        if providers:
+            sanitized, skipped, attempted_gpu = self._sanitize_provider_specs(providers, available)
+
+            if skipped:
+                skipped_list = ", ".join(sorted(set(skipped)))
+                print(
+                    "-> Kokoro TTS skipping unavailable providers: "
+                    f"{skipped_list}. Install the required GPU dependencies or adjust the configuration."
+                )
+
+            if sanitized:
+                try:
+                    session = ort.InferenceSession(
+                        str(self._model_path),
+                        providers=sanitized,
+                    )
+                    provider_names = [entry[0] if isinstance(entry, tuple) else entry for entry in sanitized]
+                    used_gpu = any(name in GPU_PROVIDER_NAMES for name in provider_names)
+                    if used_gpu:
+                        print(f"-> Kokoro TTS using GPU providers: {sanitized}")
+                    else:
+                        if attempted_gpu:
+                            print(
+                                "-> Kokoro TTS warning: requested GPU providers resolved to CPU-only execution;"
+                                " verify your CUDA installation."
+                            )
+                        print(f"-> Kokoro TTS using ONNX providers: {sanitized}")
+                    return Kokoro.from_session(session, str(self._voices_path))
+                except Exception as exc:
+                    if attempted_gpu:
+                        print(
+                            "-> Failed to initialize Kokoro TTS with GPU providers. Falling back to CPU execution."
+                        )
+                    else:
+                        print(
+                            "-> Failed to initialize Kokoro TTS with the requested providers. Falling back to default providers."
+                        )
+                    print(f"   Reason: {exc}")
+            else:
+                if attempted_gpu:
+                    print(
+                        "-> Kokoro TTS GPU providers were requested but none could be initialized; falling back to CPU."
+                    )
+        else:
+            if available and not any(name in GPU_PROVIDER_NAMES for name in available):
+                print(
+                    "-> Kokoro TTS defaulting to CPU providers; ONNX Runtime did not report any GPU-capable backends."
+                )
+
+        return Kokoro(str(self._model_path), str(self._voices_path))
 
     def _validate_voice(self) -> None:
         available = self._engine.get_voices()
