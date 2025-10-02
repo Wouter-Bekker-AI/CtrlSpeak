@@ -1,0 +1,7 @@
+look at my clipboard
+look at my screen
+chat with assistant
+chat with default
+chat with einstein
+goodbye assistant
+goodbye default

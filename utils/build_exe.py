@@ -30,6 +30,7 @@ COMMON_REQUIRED_ASSETS = {
     "automation clip": assets_dir / "test.wav",
     "fun facts list": assets_dir / "fun_facts.txt",
     "TTS preprocessing agent": project_root / "background_agents" / "tts_preprocessing_agent",
+    "Transcript cleanup agent": project_root / "background_agents" / "transcript_cleanup_agent",
 }
 
 

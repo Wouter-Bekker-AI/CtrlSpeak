@@ -160,6 +160,23 @@ def test_hotkey_supports_fuzzy_chat(bot_module):
     assert start_calls == ["assistant"]
 
 
+def test_hotkey_normalizes_defunct_identity(bot_module):
+    start_calls: list[str] = []
+
+    bot_module.get_active_identity = lambda: None
+
+    def _start_bot(*, identity: str | None = None, **_kwargs) -> bool:
+        start_calls.append(identity)
+        return True
+
+    bot_module.start_bot = _start_bot
+
+    handled = system.handle_transcribed_text_from_hotkey("chat with defunct")
+
+    assert handled is True
+    assert start_calls == ["default"]
+
+
 def test_hotkey_update_documentation_uses_active_identity(monkeypatch, bot_module):
     calls: list[tuple[str, bool, str | None]] = []
 
