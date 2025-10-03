@@ -2,10 +2,10 @@
 
 from . import vision
 from . import keywords
-from . import workspace
+from . import goose_tool
 
 __all__ = [
     "vision",
     "keywords",
-    "workspace",
+    "goose_tool",
 ]
