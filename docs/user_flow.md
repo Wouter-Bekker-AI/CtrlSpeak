@@ -67,7 +67,7 @@ When the user initially selects â€œClient Onlyâ€, or later switches to 
 When operating as both client and server:
 
 1. **Local inference** â€“ All hotkey recordings are processed by the locally loaded Whisper model. Since `initialize_transcriber` was already called during startup, most requests avoid the cost of reloading weights. If the GPU preference was active and CUDA is available, inference uses GPU acceleration; otherwise it falls back to CPU and records a warning in the application log.ã€F:main.pyâ€ L92-L99ã€‘ã€F:utils/models.pyâ€ L1009-L1180ã€‘
-2. **Network availability** â€“ The HTTP server listens on the configured port (default 65432) for other clients. Discovery broadcasts advertise availability, and the management UI shows â€œServer Â· Onlineâ€ badges when threads are healthy.ã€F:utils/system.pyâ€ L780-L838ã€‘ã€F:utils/gui.pyâ€ L1194-L1253ã€‘
+2. **Network availability** â€“ The HTTP server listens on the configured port (65432 by default). If Windows refuses that port, CtrlSpeak automatically walks up the high-port range until it finds an open socket, updates the saved settings, and surfaces a notification so operators know the new address. Discovery broadcasts advertise availability, and the management UI shows â€œServer Â· Onlineâ€ badges when threads are healthy.ã€F:utils/system.pyâ€ L780-L838ã€‘ã€F:utils/gui.pyâ€ L1194-L1253ã€‘
 3. **Remote clients** â€“ External clients POST audio to `/transcribe`. The handler saves the payload to a temporary file, runs local transcription without playing audio feedback (because the originator already handles it), and returns JSON with the recognized text and elapsed processing time.ã€F:utils/system.pyâ€ L764-L838ã€‘
 
 ## 9. Management Window (Tray â†’ â€œManage CtrlSpeakâ€)

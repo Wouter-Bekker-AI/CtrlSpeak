@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import base64
 import io
+import os
 import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 from utils.config_paths import get_logger
 
