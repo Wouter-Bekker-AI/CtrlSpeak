@@ -272,13 +272,6 @@ class OllamaClient:
         if tool_choice:
             payload["tool_choice"] = tool_choice
 
-        if tools:
-            try:
-                debug_payload = json.dumps(payload, indent=2, ensure_ascii=False)
-            except (TypeError, ValueError):
-                debug_payload = str(payload)
-            print("-> Tool-enabled request payload (testing only):\n", debug_payload)
-
         if self._hardware_mode == "gpu_only":
             preload_payload = {"model": self.model, "messages": [], "stream": False}
             if options:
@@ -302,7 +295,6 @@ class OllamaClient:
             if isinstance(entry, dict) and entry.get("role") == "user":
                 probe_text = str(entry.get("content") or "")
                 break
-        print("-> Sending tool-routing probe to Ollama:\n", probe_text)
 
         try:
             response = requests.post(self.url, json=payload, timeout=120)

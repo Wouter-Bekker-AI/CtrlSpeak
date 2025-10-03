@@ -701,6 +701,7 @@ def main():
     vad_listener: Optional[VADListener] = None
     vad_thread: Optional[threading.Thread] = None
     voice_mode_active = threading.Event()
+    session_history: List[dict] = []
     last_bot_response: str = ""
     processing_lock = threading.Lock()
     shutdown_requested = threading.Event()
@@ -953,7 +954,7 @@ def main():
         capture_override: Optional[str] = None,
         source: str = "voice",
     ) -> None:
-        nonlocal last_bot_response, vad_listener
+        nonlocal last_bot_response, vad_listener, session_history
 
         if shutdown_requested.is_set():
             logger.debug(
@@ -1197,6 +1198,9 @@ def main():
         used_orchestrator = False
         think_hidden = False
         think_placeholder: Optional[str] = None
+        history = list(session_history)
+        history_baseline = len(history)
+        turn_result = None
         if use_orchestrator and orchestrator is not None:
             try:
                 turn_result = orchestrator.run_turn(
@@ -1215,9 +1219,10 @@ def main():
                 use_orchestrator = False
                 _shutdown_orchestrator()
 
+        if used_orchestrator and turn_result is not None:
+            session_history.extend(turn_result.history_entries)
+
         if not used_orchestrator:
-            history = load_history(profile.memory_path)
-            history_baseline = len(history)
             try:
                 llm_response = ollama_client.query(
                     augmented_text,
@@ -1288,7 +1293,10 @@ def main():
 
         if not used_orchestrator:
             history.append({"role": "assistant", "content": final_response})
-            save_history(profile.memory_path, history[history_baseline:])
+            new_entries = history[history_baseline:]
+            if new_entries:
+                session_history.extend(new_entries)
+                save_history(profile.memory_path, new_entries)
 
         chat_window.append_bot_message(final_response)
         last_bot_response = final_response
