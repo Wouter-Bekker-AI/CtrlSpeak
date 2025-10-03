@@ -129,6 +129,17 @@ class ChatWindow(QWidget):
             return
         self._append_message("Bot", text)
 
+    def append_status_message(self, speaker: str, text: str) -> None:
+        """Display a non-persistent status update in the transcript."""
+
+        if not text:
+            return
+        escaped_text = html.escape(text).replace("\n", "<br>")
+        escaped_speaker = html.escape(speaker)
+        self._append_html.emit(
+            f"<span style=\"color:#5f6368;\"><b>{escaped_speaker}:</b> {escaped_text}</span>"
+        )
+
     def _append_message(self, speaker: str, text: str) -> None:
         escaped_text = html.escape(text).replace("\n", "<br>")
         escaped_speaker = html.escape(speaker)
