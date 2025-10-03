@@ -14,11 +14,36 @@ ctrlspeak/
 │   ├── __init__.py
 │   ├── keywords.py
 │   ├── message_management.py
-│   └── vision.py
+│   ├── vision.py
+│   └── goose_tool.py
 ```
 
 - `tools/__init__.py` exposes the modules that make up the shared tooling surface. Import helpers via `from tools import vision` (or `keywords`) so the package can evolve without breaking downstream code.
 - Additional tooling (for example, browser automation or document parsing) should live beside `vision.py` inside this directory. Each module must document its public API in this file before it is merged.
+- `tools/goose_tool.py` wraps the Goose CLI so Einstein can delegate file inspection, edits, searches, and executions to a purpose-built automation agent.
+
+## Goose automation helper (`tools/goose_tool.py`)
+
+`goose_tool.py` exposes a single entry point that launches Goose in headless mode and returns the resulting transcript to CtrlSpeak:
+
+| Function | Description |
+| -------- | ----------- |
+| `goose_query(prompt, *, model="qwen3:14b", mode="auto", provider="ollama", goose_exe="goose", stream=False)` | Runs `goose run` with the supplied natural-language prompt. By default the command executes non-streaming so the combined transcript is returned once Goose exits (the wrapper still mirrors stdout to the console). Set `stream=True` to forward output live through `subprocess.Popen`. The call raises `RuntimeError` when Goose exits non-zero or produces no output. |
+
+### Usage guidelines
+
+- The prompt must be a non-empty string. The optional `mode` argument is validated against Goose's supported values (`auto`, `smart_approve`, `approve`, `chat`).
+- Goose runs without a persistent session (`--no-session`) and automatically enables the built-in `developer` tool so it can open shells, edit files, and manage approvals on Einstein's behalf.
+- The wrapper sets `GOOSE_MODE` in the environment before launching Goose so downstream scripts honour the requested approval strategy.
+- By default stdout is collected and echoed after Goose completes. Opt into live streaming with `stream=True` when real-time updates are necessary.
+
+### LangGraph integration
+
+- Einstein's tool belt now exposes a single function, `goose_tool_query(prompt, mode?, model?, provider?, goose_exe?, stream?)`. The orchestrator expects the model to describe the desired filesystem or shell task in natural language and let Goose execute it.
+- The orchestrator validates that every tool call includes a prompt. Missing prompts are rejected and surfaced back to the model so it can refine the request.
+- Goose executions always run with `stream=True` so the CLI's live output mirrors into the CtrlSpeak terminal. Once Goose exits the orchestrator stores its transcript (trimmed to 4 000 characters) as a `tool` role entry in the session history so later LLM calls can reference the result, while the chat window continues to show only the assistant's final reply.
+- The LangGraph workflow no longer stages Goose plans heuristically. Each turn simply presents the tool schema to Einstein and honours whatever tool call it issues, keeping responsibility for when and how Goose is used entirely with the LLM.
+
 
 ## Vision tooling (`tools/vision.py`)
 

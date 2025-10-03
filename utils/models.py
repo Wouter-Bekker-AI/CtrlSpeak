@@ -27,7 +27,21 @@ try:  # pragma: no cover - optional dependency rarely installed
 except ImportError:
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
-from huggingface_hub import HfApi, hf_hub_url
+try:
+    from huggingface_hub import HfApi, hf_hub_url
+except Exception:  # pragma: no cover - missing optional dependency
+    class HfApi:  # type: ignore[dead-code]
+        """Fallback stub used when huggingface_hub is unavailable."""
+
+        def __init__(self, *args: object, **kwargs: object) -> None:  # pragma: no cover - trivial stub
+            raise RuntimeError(
+                "huggingface_hub is required for model management but is not installed."
+            )
+
+    def hf_hub_url(*_args: object, **_kwargs: object) -> str:  # pragma: no cover - trivial stub
+        raise RuntimeError(
+            "huggingface_hub is required for model management but is not installed."
+        )
 import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageTk

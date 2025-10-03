@@ -8,10 +8,10 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, TypedDict
+from typing import Any, Callable, Dict, Iterable, List, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 
@@ -25,6 +25,7 @@ from utils.memory_paths import get_bot_conversation_log, get_bot_traces_dir
 from utils.memory_settings import load_identity_settings
 from utils.vector_memory import RetrievedMemory, VectorMemoryStore
 from tools.message_management import force_plaintext, requires_force_plaintext
+from tools.goose_tool import goose_query, ALLOWED_MODES as GOOSE_ALLOWED_MODES
 
 
 CONVERSATION_MAX_BYTES = 10 * 1024 * 1024
@@ -89,6 +90,58 @@ _CHAT_HISTORY_INTENT_PHRASES = (
     "our history",
     "history with me",
 )
+
+TOOL_RESPONSE_CHAR_LIMIT = 4000
+
+_TOOL_EXECUTION_GUARD = (
+    "You have access to the goose_tool_query function. Use it for any filesystem or execution task by describing the request in natural language. "
+    "Return a tool call whenever the user asks you to inspect, modify, search, list, or run files. Do not fabricate results—let the tool perform the work."
+)
+
+_GOOSE_TOOL_SCHEMA: List[Dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "goose_tool_query",
+            "description": (
+                "Delegate complex workspace operations to the Goose CLI. Provide a detailed natural-language prompt that explains"
+                " the desired file action (read, edit, create, list, search, execute, etc.)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Detailed instruction for Goose describing the desired workspace task.",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "Optional Goose mode ('auto', 'smart_approve', 'approve', or 'chat').",
+                        "enum": sorted(GOOSE_ALLOWED_MODES),
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional Goose model identifier to override the default.",
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Optional Goose provider name (defaults to 'ollama').",
+                    },
+                    "goose_exe": {
+                        "type": "string",
+                        "description": "Optional path to the Goose executable (defaults to 'goose').",
+                    },
+                    "stream": {
+                        "type": "boolean",
+                        "description": "Stream Goose output live (defaults to false).",
+                    },
+                },
+                "required": ["prompt"],
+                "additionalProperties": False,
+            },
+        },
+    }
+]
 
 _ASSESSMENT_INSTRUCTIONS = (
     "You are the CtrlSpeak retrieval planner."
@@ -167,6 +220,21 @@ class PersistenceTask:
         self.vector_metadata = vector_metadata
         self.settings = settings
         self.retries = 0
+
+
+@dataclass
+class ToolAction:
+    kind: str
+    description: str
+    candidate_path: Optional[str] = None
+    search_term: Optional[str] = None
+    location_hint: Optional[str] = None
+    source: str = "langgraph"
+    parameters: Optional[Dict[str, Any]] = None
+
+    def __post_init__(self) -> None:
+        if self.parameters is None:
+            self.parameters = {}
 
 
 class MemoryPersistenceWorker:
@@ -274,6 +342,8 @@ class MemoryOrchestrator:
         metrics_path: Path,
         identity_settings: Optional[Dict[str, Any]] = None,
         think_manager: Optional[ManageThinkAgent] = None,
+        tooling_enabled: bool = False,
+        tool_logger: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.identity = identity
         self.llm_client = llm_client
@@ -288,7 +358,17 @@ class MemoryOrchestrator:
         self.traces_dir = get_bot_traces_dir(identity)
         self.metrics = MetricsRecorder(metrics_path)
         self.vector_store = VectorMemoryStore(identity)
-        self.history: List[dict] = self._load_history()
+        prior_history = self._load_history()
+        self._prior_history_count = len(prior_history)
+        if self._prior_history_count:
+            logger.debug(
+                "Loaded %d persisted history entries for identity '%s'; starting new session with a fresh runtime history.",
+                self._prior_history_count,
+                self.identity,
+            )
+        self.history: List[dict] = []
+        self.tooling_enabled = bool(tooling_enabled)
+        self._custom_tool_logger: Optional[Callable[[str], None]] = tool_logger
         self._graph = self._build_graph()
         self._persistence = MemoryPersistenceWorker(
             identity,
@@ -338,156 +418,100 @@ class MemoryOrchestrator:
         graph.add_edge("persist", END)
         return graph.compile()
 
-    def _documentation_threshold(self) -> float:
-        value = self.identity_settings.get("documentation_retrieval_threshold")
-        try:
-            return float(value)
-        except Exception:
-            return 0.35
-
-    def _build_planner_prompt(self, query_text: str) -> str:
-        cleaned = _REASONING_TAG_PATTERN.sub("", query_text or "")
-        cleaned = cleaned.strip()
-        if not cleaned:
-            cleaned = (query_text or "").strip()
-        prompt = (
-            "Decide which additional context is required for this user question:\n"
-            f"{cleaned}"
-        )
-        if self.identity.casefold() == "einstein":
-            prompt = f"{prompt}\n/no_think"
-        return prompt
+    def _emit_tool_event(self, message: str) -> None:
+        if not self.tooling_enabled:
+            return
+        prefixed = f"[Tools] {message}"
+        if self._custom_tool_logger is not None:
+            try:
+                self._custom_tool_logger(prefixed)
+                return
+            except Exception:
+                pass
+        print(prefixed)
 
     @staticmethod
-    def _should_prioritize_documentation(text: str) -> bool:
-        if not text:
-            return False
-        lowered = text.casefold()
-        stripped = lowered.strip()
-        if stripped in {"help", "docs", "documentation", "manual", "guide"}:
-            return True
-        if "explain" in lowered and any(
-            phrase in lowered for phrase in {"program", "software", "ctrlspeak", "app", "bot"}
-        ):
-            return True
-        return any(phrase in lowered for phrase in _DOCUMENTATION_INTENT_PHRASES)
-
-    def _temporal_threshold(self) -> float:
-        value = self.identity_settings.get("temporal_retrieval_threshold")
-        try:
-            return float(value)
-        except Exception:
-            return 0.15
+    def _log_turn_event(message: str) -> None:
+        print(f"[LangGraph] {message}")
 
     @staticmethod
-    def _should_prioritize_temporal(text: str) -> bool:
-        if not text:
-            return False
-        lowered = text.casefold()
-        stripped = lowered.strip()
-        if stripped in {"date", "time", "timezone", "time zone"}:
-            return True
-        return any(phrase in lowered for phrase in _TEMPORAL_INTENT_PHRASES)
+    def _preview_text(value: str, *, limit: int = 200) -> str:
+        cleaned = value.replace("\n", " ").strip()
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[: limit - 1].rstrip() + "…"
+
+    def _plan_tool_actions(self, state: _TurnState) -> List[ToolAction]:
+        """Tool selection is delegated entirely to the LLM."""
+        return []
+
+    def _default_retrieval_plan(self, text: str) -> Dict[str, bool]:
+        lowered = text.lower()
+        plan = {"documentation": False, "chat_history": False, "date": False}
+        if any(phrase in lowered for phrase in _DOCUMENTATION_INTENT_PHRASES):
+            plan["documentation"] = True
+        if any(phrase in lowered for phrase in _CHAT_HISTORY_INTENT_PHRASES):
+            plan["chat_history"] = True
+        if any(phrase in lowered for phrase in _TEMPORAL_INTENT_PHRASES):
+            plan["date"] = True
+        return plan
+
+    def _build_planner_prompt(self, text: str) -> str:
+        cleaned = text.strip()
+        cleaned = _REASONING_TAG_PATTERN.sub("", cleaned).strip()
+        if "/no_think" not in cleaned.lower():
+            cleaned = f"{cleaned} /no_think".strip()
+        return cleaned
 
     @staticmethod
-    def _should_prioritize_chat_history(text: str) -> bool:
-        if not text:
-            return False
-        lowered = text.casefold()
-        if "history" in lowered and any(
-            token in lowered for token in {"chat", "conversation", "with me", "about us"}
-        ):
-            return True
-        return any(phrase in lowered for phrase in _CHAT_HISTORY_INTENT_PHRASES)
-
-    @staticmethod
-    def _parse_assessment_response(response: str) -> Optional[Dict[str, bool]]:
-        if not response:
+    def _parse_assessment_response(payload: str) -> Optional[Dict[str, bool]]:
+        if not payload:
             return None
-        lowered = response.strip().casefold()
-        if not lowered:
+        normalized = payload.strip().lower()
+        if not normalized:
             return None
-        if lowered in {"no", "nope", "nah"}:
-            lowered = "none"
-        tokens = [token for token in re.split(r"[^a-z]+", lowered) if token]
+        tokens = [token.strip() for token in normalized.split(",") if token.strip()]
         if not tokens:
+            if normalized == "none":
+                return {"documentation": False, "chat_history": False, "date": False}
             return None
-        if any(token not in {"documentation", "chat", "chat_history", "history", "date", "time", "timezone", "none"} for token in tokens):
+        valid = {"documentation", "chat_history", "date", "none"}
+        if any(token not in valid for token in tokens):
             return None
-        if "none" in tokens:
+        if tokens == ["none"]:
             return {"documentation": False, "chat_history": False, "date": False}
-        normalized: Dict[str, bool] = {"documentation": False, "chat_history": False, "date": False}
+        plan = {"documentation": False, "chat_history": False, "date": False}
         for token in tokens:
-            if token == "documentation":
-                normalized["documentation"] = True
-            elif token in {"chat_history", "history", "chat"}:
-                normalized["chat_history"] = True
-            elif token in {"date", "time", "timezone"}:
-                normalized["date"] = True
-        return normalized
+            if token == "none":
+                continue
+            plan[token] = True
+        return plan
 
     @staticmethod
     def _summarize_plan(plan: Dict[str, bool]) -> str:
         if not plan:
             return "none"
-        requested = [key for key, value in plan.items() if value]
-        return "+".join(requested) if requested else "none"
+        enabled = [name for name, enabled in plan.items() if enabled]
+        return ",".join(enabled) if enabled else "none"
 
-    def _default_retrieval_plan(self, text: str) -> Dict[str, bool]:
-        return {
-            "documentation": self._should_prioritize_documentation(text),
-            "chat_history": self._should_prioritize_chat_history(text),
-            "date": self._should_prioritize_temporal(text),
-        }
+    def _documentation_threshold(self) -> float:
+        raw = self.identity_settings.get("documentation_threshold")
+        try:
+            value = float(raw)
+        except Exception:
+            base = float(self.identity_settings.get("retrieval_threshold", 0.75))
+            value = min(base, 0.6)
+        return max(0.0, value)
 
-    # ------------------------------------------------------------------
-    def _resolve_vision_payload(
-        self,
-        augmented_text: str,
-        vision_metadata: Optional[Dict[str, Any]],
-    ) -> tuple[Optional[List[dict]], Optional[Dict[str, Any]], bool]:
-        metadata: Dict[str, Any] = {}
-        if isinstance(vision_metadata, dict):
-            metadata = dict(vision_metadata)
+    def _temporal_threshold(self) -> float:
+        raw = self.identity_settings.get("temporal_threshold")
+        try:
+            value = float(raw)
+        except Exception:
+            base = float(self.identity_settings.get("retrieval_threshold", 0.75))
+            value = min(base, 0.5)
+        return max(0.0, value)
 
-        request_hint = metadata.get("vision_request")
-        include_image = bool(request_hint)
-        if not include_image and is_image_request(augmented_text):
-            include_image = True
-
-        if not include_image:
-            metadata.pop("vision_attached", None)
-            return None, (metadata or None), False
-
-        record = load_identity_image(self.identity)
-        if record is None:
-            logger.debug(
-                "Requested image attachment for identity '%s' but no stored PNG was found.",
-                self.identity,
-            )
-            metadata.pop("vision_attached", None)
-            return None, (metadata or None), False
-
-        metadata.update(
-            {
-                "vision_file": str(record.path),
-                "vision_updated": record.updated_at_iso,
-            }
-        )
-        if record.source and not metadata.get("vision_source"):
-            metadata["vision_source"] = record.source
-        metadata["vision_attached"] = True
-        metadata.pop("vision_request", None)
-
-        content = [
-            {"type": "text", "text": augmented_text},
-            {"type": "image", "image": record.image_b64},
-        ]
-        return content, metadata, True
-
-    # ------------------------------------------------------------------
-    # Graph nodes
-    # ------------------------------------------------------------------
     def _node_assess_context(self, state: _TurnState) -> _TurnState:
         query_text = state.get("augmented_text") or state.get("user_text") or ""
         plan: Dict[str, bool] = {"documentation": False, "chat_history": False, "date": False}
@@ -637,20 +661,173 @@ class MemoryOrchestrator:
             container.update(metrics)
         return state
 
+    @staticmethod
+    def _serialize_tool_action(action: ToolAction) -> Dict[str, Any]:
+        return {
+            "kind": action.kind,
+            "description": action.description,
+            "candidate_path": action.candidate_path,
+            "search_term": action.search_term,
+            "location_hint": action.location_hint,
+            "source": action.source,
+            "parameters": action.parameters,
+        }
+
+    @staticmethod
+    def _deserialize_tool_action(payload: Dict[str, Any]) -> ToolAction:
+        return ToolAction(
+            kind=str(payload.get("kind", "")),
+            description=str(payload.get("description", "")),
+            candidate_path=payload.get("candidate_path"),
+            search_term=payload.get("search_term"),
+            location_hint=payload.get("location_hint"),
+            source=str(payload.get("source", "langgraph")),
+            parameters=dict(payload.get("parameters") or {}),
+        )
+
+
+    def _actions_from_tool_calls(
+        self,
+        tool_calls: Iterable[Dict[str, Any]],
+        *,
+        user_text: Optional[str] = None,
+    ) -> List[ToolAction]:
+        actions: List[ToolAction] = []
+        for index, call in enumerate(tool_calls):
+            function_payload = call.get("function") if isinstance(call, dict) else None
+            if not isinstance(function_payload, dict):
+                continue
+            name = str(function_payload.get("name") or "").strip()
+            raw_arguments = function_payload.get("arguments", {})
+            if isinstance(raw_arguments, str):
+                try:
+                    arguments = json.loads(raw_arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+            elif isinstance(raw_arguments, dict):
+                arguments = dict(raw_arguments)
+            else:
+                arguments = {}
+
+            if name != "goose_tool_query":
+                continue
+
+            prompt_value = str(arguments.get("prompt") or "").strip()
+            if not prompt_value:
+                continue
+
+            parameters: Dict[str, Any] = {"prompt": prompt_value, "tool_call_index": index}
+            for optional_key in ("mode", "model", "provider", "goose_exe"):
+                value = arguments.get(optional_key)
+                if isinstance(value, str) and value.strip():
+                    parameters[optional_key] = value.strip()
+            stream_value = arguments.get("stream")
+            if isinstance(stream_value, bool):
+                parameters["stream"] = stream_value
+
+            preview = prompt_value.replace("\n", " ")
+            if len(preview) > 60:
+                preview = preview[:57].rstrip() + "…"
+            description = f"Goose query: {preview}"
+            actions.append(
+                ToolAction(
+                    kind="goose_query",
+                    description=description,
+                    source="llm",
+                    parameters=parameters,
+                )
+            )
+        return actions
+
+    def _execute_tool_plan(self, actions: List[ToolAction]) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        for action in actions:
+            if action.kind == "goose_query":
+                results.append(self._execute_goose_tool_query_action(action))
+            else:
+                self._emit_tool_event(f"Unsupported tool action '{action.kind}' ignored.")
+                results.append({"kind": action.kind, "success": False, "message": "unsupported"})
+        return results
+
+    def _execute_goose_tool_query_action(self, action: ToolAction) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "kind": action.kind,
+            "description": action.description,
+            "success": False,
+        }
+        parameters = action.parameters or {}
+        prompt = str(parameters.get("prompt") or "").strip()
+        if not prompt:
+            result["message"] = "Goose query missing prompt."
+            self._emit_tool_event("Goose tool call rejected: missing prompt.")
+            return result
+
+        goose_kwargs: Dict[str, Any] = {}
+        for optional_key in ("mode", "model", "provider", "goose_exe"):
+            value = parameters.get(optional_key)
+            if isinstance(value, str) and value.strip():
+                goose_kwargs[optional_key] = value.strip()
+
+        stream_value = parameters.get("stream")
+        if isinstance(stream_value, bool) and not stream_value:
+            self._emit_tool_event(
+                "Goose tool requested non-streaming output; forcing stream=True for terminal visibility."
+            )
+
+        goose_kwargs["stream"] = True
+
+        try:
+            self._log_turn_event(
+                f"Calling Goose tool with prompt: {self._preview_text(prompt)}"
+            )
+            self._emit_tool_event("Invoking goose_tool_query.")
+            output = goose_query(prompt, **goose_kwargs)
+        except Exception as exc:
+            message = str(exc)
+            result["message"] = message
+            self._emit_tool_event(f"Goose tool failed: {message}")
+            return result
+
+        result.update({
+            "success": True,
+            "output": output,
+            "prompt": prompt,
+        })
+        self._log_turn_event(
+            f"Goose tool completed successfully: {self._preview_text(output)}"
+        )
+        return result
     def _node_plan_tools(self, state: _TurnState) -> _TurnState:
-        # Placeholder for future tool planning.
         if not isinstance(state.get("metrics"), dict):
             state["metrics"] = {}
         if not isinstance(state.get("errors"), list):
             state["errors"] = []
+        actions = self._plan_tool_actions(state)
+        state["tool_plan"] = [self._serialize_tool_action(action) for action in actions]
+        state["tool_plan_summary"] = "none"
+        state.pop("tool_probe_hint", None)
+        state.pop("tool_probe_pending", None)
+        state.pop("tool_probe_force_required", None)
         return state
 
     def _node_call_tools(self, state: _TurnState) -> _TurnState:
-        # Currently there are no blocking tool calls.
+        plan_entries = state.get("tool_plan")
+        if not self.tooling_enabled or not isinstance(plan_entries, list) or not plan_entries:
+            state.pop("tool_probe_pending", None)
+            state.pop("tool_probe_force_required", None)
+            return state
+
+        actions: List[ToolAction] = []
+        for entry in plan_entries:
+            if isinstance(entry, dict):
+                actions.append(self._deserialize_tool_action(entry))
+        if not actions:
+            return state
+
+        self._emit_tool_event("Tool plan ready; awaiting LLM decision.")
         return state
 
-    def _node_llm(self, state: _TurnState) -> _TurnState:
-        augmented = state.get("augmented_text") or state.get("user_text") or ""
+    def _prepare_history_with_context(self, state: _TurnState) -> List[dict]:
         history = list(self.history)
         retrieved = state.get("retrieved") or []
         if retrieved:
@@ -677,17 +854,10 @@ class MemoryOrchestrator:
                 sections.append("Temporal context:\n" + "\n".join(temporal_lines))
             if sections:
                 history.append({"role": "system", "content": "\n\n".join(sections)})
-        content_blocks = state.get("content_blocks")
-        try:
-            response = self.llm_client.query(
-                augmented,
-                history=history,
-                content=content_blocks,
-            )
-        except Exception as exc:
-            state.setdefault("errors", []).append({"node": "llm", "error": str(exc)})
-            response = "I'm having trouble responding right now."
-        raw_response = (response or "")
+        return history
+
+    def _store_llm_response(self, state: _TurnState, raw_response: str) -> _TurnState:
+        state.pop("think_missing_answer", None)
         state["raw_response_text"] = raw_response
         filtered_response = raw_response
         if self.think_manager is not None:
@@ -703,8 +873,244 @@ class MemoryOrchestrator:
                         state["think_placeholder"] = think_result.placeholder_text
                     if think_result.hidden_think:
                         state["hidden_think"] = think_result.hidden_think
+                    if not filtered_response.strip():
+                        state["think_missing_answer"] = True
         state["response_text"] = filtered_response or ""
+        if filtered_response:
+            self._log_turn_event(
+                f"LLM returned response: {self._preview_text(filtered_response)}"
+            )
         return state
+
+    def _normalize_history_for_chat(self, history: List[dict]) -> List[dict]:
+        normalizer = getattr(self.llm_client, "_normalize_history_entry", None)
+        normalized: List[dict] = []
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            if callable(normalizer):
+                normalized.append(normalizer(entry))
+            else:
+                role = entry.get("role", "user")
+                content = entry.get("content", "")
+                normalized.append({"role": role, "content": content})
+        return normalized
+
+    def _build_user_message(self, state: _TurnState, text: str) -> dict:
+        content_blocks = state.get("content_blocks")
+        builder = getattr(self.llm_client, "_build_user_message", None)
+        if content_blocks is not None and callable(builder):
+            try:
+                return builder(content_blocks)
+            except Exception:
+                pass
+        return {"role": "user", "content": text}
+
+    def _node_llm_plain(self, state: _TurnState) -> _TurnState:
+        augmented = state.get("augmented_text") or state.get("user_text") or ""
+        history = self._prepare_history_with_context(state)
+        content_blocks = state.get("content_blocks")
+        self._log_turn_event(
+            f"Sending to LLM without tools: {self._preview_text(str(augmented))}"
+        )
+        try:
+            response = self.llm_client.query(
+                augmented,
+                history=history,
+                content=content_blocks,
+            )
+        except Exception as exc:
+            state.setdefault("errors", []).append({"node": "llm", "error": str(exc)})
+            raw_response = "I'm having trouble responding right now."
+        else:
+            raw_response = response or ""
+        stored_state = self._store_llm_response(state, raw_response)
+        if stored_state.pop("think_missing_answer", False):
+            if stored_state.get("_think_retry_attempted"):
+                apology = "I'm sorry, I wasn't able to produce a final answer. Please try again."
+                stored_state["response_text"] = apology
+                stored_state["raw_response_text"] = apology
+                stored_state.pop("_think_retry_attempted", None)
+                return stored_state
+
+            stored_state["_think_retry_attempted"] = True
+            reminder = (
+                "Your previous response only contained a <think> plan. Provide the final Answer now "
+                "without using <think>."
+            )
+            self._log_turn_event(
+                "LLM response contained only a hidden plan; requesting the visible answer."
+            )
+            history.append({"role": "assistant", "content": raw_response})
+            try:
+                retry_raw = self.llm_client.query(
+                    reminder,
+                    history=history,
+                    content=content_blocks,
+                )
+            except Exception as exc:
+                state.setdefault("errors", []).append({"node": "llm", "error": str(exc)})
+                apology = "I'm sorry, I wasn't able to produce a final answer. Please try again."
+                stored_state["response_text"] = apology
+                stored_state["raw_response_text"] = apology
+                stored_state.pop("_think_retry_attempted", None)
+                return stored_state
+
+            for key in (
+                "response_text",
+                "raw_response_text",
+                "think_hidden",
+                "think_placeholder",
+                "hidden_think",
+            ):
+                stored_state.pop(key, None)
+
+            return self._store_llm_response(state, retry_raw or "")
+
+        stored_state.pop("_think_retry_attempted", None)
+        return stored_state
+
+    def _tool_name_for_action(self, action: ToolAction) -> str:
+        if action.kind == "goose_query":
+            return "goose_tool_query"
+        return action.kind
+
+    def _node_llm_with_tools(self, state: _TurnState) -> Optional[_TurnState]:
+        augmented = state.get("augmented_text") or state.get("user_text") or ""
+        history = self._prepare_history_with_context(state)
+        messages: List[dict] = []
+        system_prompt = getattr(self.llm_client, "system_prompt", None)
+        if system_prompt:
+            messages.append({"role": "system", "content": str(system_prompt)})
+        messages.append({"role": "system", "content": _TOOL_EXECUTION_GUARD})
+        messages.extend(self._normalize_history_for_chat(history))
+
+        user_message = self._build_user_message(state, augmented)
+        messages.append(user_message)
+
+        preview_source = augmented
+        if isinstance(user_message, dict):
+            content = user_message.get("content")
+            if isinstance(content, str) and content.strip():
+                preview_source = content
+            elif isinstance(content, list):
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text_parts.append(str(block.get("text") or ""))
+                if text_parts:
+                    preview_source = " ".join(text_parts)
+        self._log_turn_event(
+            "Sending to LLM with tools (goose_tool_query available): "
+            f"{self._preview_text(str(preview_source))}"
+        )
+
+        loop_results: List[Dict[str, Any]] = []
+        max_iterations = 6
+        for iteration in range(max_iterations):
+            try:
+                response = self.llm_client.chat(
+                    messages,
+                    tools=_GOOSE_TOOL_SCHEMA,
+                    tool_choice="auto",
+                    stream=False,
+                )
+            except Exception as exc:
+                self._emit_tool_event(f"Tool-enabled LLM call failed: {exc}")
+                state.setdefault("errors", []).append({"node": "llm", "error": str(exc)})
+                return None
+
+            message = response.get("message") if isinstance(response, dict) else None
+            if not isinstance(message, dict):
+                break
+
+            tool_calls = message.get("tool_calls")
+            content = str(message.get("content") or "")
+
+            if tool_calls:
+                actions = self._actions_from_tool_calls(tool_calls, user_text=state.get("user_text"))
+                if not actions:
+                    if content:
+                        messages.append({"role": "assistant", "content": content})
+                        return self._store_llm_response(state, content)
+                    break
+
+                assistant_entry = {"role": "assistant", "content": content or "", "tool_calls": tool_calls}
+                messages.append(assistant_entry)
+
+                for action in actions:
+                    tool_name = self._tool_name_for_action(action)
+                    parameters = action.parameters or {}
+                    prompt_text = str(parameters.get("prompt") or "")
+                    if prompt_text:
+                        self._log_turn_event(
+                            f"LLM requested tool '{tool_name}' with prompt: {self._preview_text(prompt_text)}"
+                        )
+
+                results = self._execute_tool_plan(actions)
+                loop_results.extend(results)
+                state.setdefault("tool_results", []).extend(results)
+
+                for tool_call, action, result in zip(tool_calls, actions, results):
+                    tool_name = str(tool_call.get("function", {}).get("name") or self._tool_name_for_action(action))
+                    try:
+                        serialized = json.dumps(result, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        serialized = str(result)
+                    self._log_turn_event(
+                        f"Handing tool output back to LLM for '{tool_name}': {self._preview_text(serialized)}"
+                    )
+                    messages.append({"role": "tool", "name": tool_name, "content": serialized})
+                continue
+
+            messages.append({"role": "assistant", "content": content})
+            stored_state = self._store_llm_response(state, content)
+            if stored_state.pop("think_missing_answer", False):
+                if stored_state.get("_think_retry_attempted"):
+                    apology = "I'm sorry, I wasn't able to produce a final answer. Please try again."
+                    stored_state["response_text"] = apology
+                    stored_state["raw_response_text"] = apology
+                    stored_state.pop("_think_retry_attempted", None)
+                    return stored_state
+
+                stored_state["_think_retry_attempted"] = True
+                reminder = (
+                    "Your previous response only contained a <think> plan. Provide the final Answer now "
+                    "without using <think>."
+                )
+                self._log_turn_event(
+                    "LLM response contained only a hidden plan; requesting the visible answer."
+                )
+                messages.append({"role": "user", "content": reminder})
+                for key in (
+                    "response_text",
+                    "raw_response_text",
+                    "think_hidden",
+                    "think_placeholder",
+                    "hidden_think",
+                ):
+                    stored_state.pop(key, None)
+                continue
+
+            stored_state.pop("_think_retry_attempted", None)
+            return stored_state
+
+        if loop_results:
+            last_success = next((item for item in reversed(loop_results) if item.get("success")), None)
+            if last_success and last_success.get("message"):
+                return self._store_llm_response(state, str(last_success.get("message")))
+        return None
+
+    def _node_llm(self, state: _TurnState) -> _TurnState:
+        if state.get("skip_llm"):
+            if "raw_response_text" not in state:
+                state["raw_response_text"] = state.get("response_text", "")
+            return state
+        if self.tooling_enabled:
+            updated_state = self._node_llm_with_tools(state)
+            if updated_state is not None:
+                return updated_state
+        return self._node_llm_plain(state)
 
     def _node_persist(self, state: _TurnState) -> _TurnState:
         correlation_id = state["correlation_id"]
@@ -717,11 +1123,13 @@ class MemoryOrchestrator:
         user_text = state.get("user_text", "")
         vision_metadata = state.get("vision_metadata")
         attached_image = bool(state.get("vision_attached"))
+        tool_results = state.get("tool_results") if isinstance(state.get("tool_results"), list) else None
         entries = self._build_history_entries(
             user_text,
             scrubbed_response,
             attached_image,
             vision_metadata,
+            tool_results=tool_results,
         )
         self.history.extend(entries)
         vector_documents = [user_text, scrubbed_response]
@@ -746,6 +1154,8 @@ class MemoryOrchestrator:
         response_text: str,
         attached_image: bool,
         vision_metadata: Optional[Dict[str, Any]],
+        *,
+        tool_results: Optional[List[Dict[str, Any]]] = None,
     ) -> List[dict]:
         entries: List[dict] = []
         if attached_image:
@@ -761,8 +1171,80 @@ class MemoryOrchestrator:
             entries.append({"role": "user", "content": entry_content, "metadata": metadata})
         else:
             entries.append({"role": "user", "content": user_text})
+
+        if tool_results:
+            entries.extend(self._build_tool_history_entries(tool_results))
+
         entries.append({"role": "assistant", "content": response_text})
         return entries
+
+    def _build_tool_history_entries(self, tool_results: List[Dict[str, Any]]) -> List[dict]:
+        entries: List[dict] = []
+        for result in tool_results:
+            if not isinstance(result, dict):
+                continue
+
+            kind = str(result.get("kind") or "").strip()
+            tool_name = "goose_tool_query" if kind == "goose_query" else (kind or "tool")
+            output_text = ""
+            if isinstance(result.get("output"), str) and result["output"].strip():
+                output_text = result["output"].strip()
+            elif isinstance(result.get("message"), str) and result["message"].strip():
+                output_text = result["message"].strip()
+            if not output_text:
+                continue
+
+            truncated = self._truncate_tool_output(output_text)
+            metadata: Dict[str, Any] = {"tool_name": tool_name, "success": bool(result.get("success"))}
+            prompt = result.get("prompt")
+            if isinstance(prompt, str) and prompt.strip():
+                metadata["prompt"] = prompt.strip()
+            description = result.get("description")
+            if isinstance(description, str) and description.strip():
+                metadata["description"] = description.strip()
+            if isinstance(result.get("message"), str) and result["message"].strip() and not result.get("success"):
+                metadata.setdefault("error", result["message"].strip())
+            if len(output_text) > TOOL_RESPONSE_CHAR_LIMIT:
+                metadata["truncated"] = True
+
+            entry: Dict[str, Any] = {"role": "tool", "name": tool_name, "content": truncated}
+            if metadata:
+                entry["metadata"] = metadata
+            entries.append(entry)
+        return entries
+
+    @staticmethod
+    def _truncate_tool_output(text: str) -> str:
+        normalized = text.strip()
+        if len(normalized) <= TOOL_RESPONSE_CHAR_LIMIT:
+            return normalized
+        truncated = normalized[:TOOL_RESPONSE_CHAR_LIMIT].rstrip()
+        return f"{truncated}\n…[truncated]"
+
+    def _resolve_vision_payload(
+        self,
+        user_text: str,
+        vision_metadata: Optional[Dict[str, Any]],
+    ) -> tuple[Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]], bool]:
+        if not user_text or not is_image_request(user_text):
+            return None, vision_metadata, False
+
+        record = load_identity_image(self.identity)
+        if record is None:
+            return None, vision_metadata, False
+
+        content_blocks: List[Dict[str, Any]] = [
+            {"type": "text", "text": user_text},
+            {"type": "image", "image": record.image_b64},
+        ]
+        metadata: Dict[str, Any] = dict(vision_metadata or {})
+        metadata["vision_file"] = str(record.path)
+        metadata["vision_updated"] = record.updated_at_iso
+        if record.source:
+            metadata["vision_source"] = record.source
+        metadata["vision_request"] = user_text
+        metadata["vision_attached"] = True
+        return content_blocks, metadata, True
 
     # ------------------------------------------------------------------
     def run_turn(
@@ -774,6 +1256,7 @@ class MemoryOrchestrator:
         vision_metadata: Optional[Dict[str, Any]] = None,
     ) -> TurnResult:
         correlation_id = uuid.uuid4().hex
+        self._log_turn_event(f"User request received: {self._preview_text(user_text)}")
         augmented = augmented_text or user_text
         resolved_blocks = content_blocks
         resolved_metadata: Optional[Dict[str, Any]] = vision_metadata
@@ -858,11 +1341,21 @@ class MemoryOrchestrator:
         think_hidden = bool(result_state.get("think_hidden"))
         think_placeholder = result_state.get("think_placeholder")
         hidden_think = result_state.get("hidden_think")
+        tool_results_state = result_state.get("tool_results")
+        tool_results: Optional[List[Dict[str, Any]]]
+        if isinstance(tool_results_state, list):
+            tool_results = list(tool_results_state)
+        else:
+            tool_results = None
         entries = self._build_history_entries(
             user_text,
             scrubbed_response,
             result_attached,
             result_metadata,
+            tool_results=tool_results,
+        )
+        self._log_turn_event(
+            f"Final answer prepared for chat: {self._preview_text(result_state.get('response_text', ''))}"
         )
         return TurnResult(
             correlation_id=correlation_id,
@@ -899,6 +1392,12 @@ class MemoryOrchestrator:
             "response_text": state.get("response_text"),
             "errors": state.get("errors", []),
         }
+        if state.get("tool_plan"):
+            trace["tool_plan"] = state.get("tool_plan")
+        if state.get("tool_results"):
+            trace["tool_results"] = state.get("tool_results")
+        if state.get("tool_plan_summary"):
+            trace["tool_plan_summary"] = state.get("tool_plan_summary")
         trace["vision_attached"] = bool(state.get("vision_attached"))
         if state.get("vision_metadata"):
             trace["vision_metadata"] = state.get("vision_metadata")

@@ -17,6 +17,7 @@ Personalities for the bot live under `third_party/social_robot/identities/<name>
 - `identity.json` - configuration for the profile (voice, model, prompt settings, optional memory directory).
 - `system_prompt.txt` (or another file referenced by the config) - the text injected as the LLM system prompt when the profile is loaded.
 - Runtime memory lives under `${data_root}/bot_memory/<identity>/`, which CtrlSpeak creates automatically with `conversation/`, `screenshots/`, `chroma/`, and `traces/` subfolders. Packaged builds ignore any legacy `memory/` folders inside the repository tree so all writes land in AppData.
+- Every Chat with Bot launch begins with an empty in-memory chat history. Previous sessions remain archived in AppData (and inside the vector store for retrieval), but they are not replayed to the LLM when a new window opens so each conversation starts clean.
 - Identity-specific defaults live under `${config_root}/identities/<identity>/memory.json`. CtrlSpeak seeds these files with `store_vector_memory: true`, `store_screenshots: true`, `retrieval_top_k: 5`, `retrieval_threshold: 0.75`, `max_vector_items: 5000`, `vector_ttl_days: null`, and `pii_redaction: false` so personas can independently tune retention and privacy.
 
 The loader understands the following `identity.json` keys:
@@ -45,7 +46,7 @@ The loader understands the following `identity.json` keys:
   "require_text_cleaning": false,
   "vision": true,
   "tool": false,
-  "memory_dir": "memory"
+  "memory_dir": "{appdata}/bot_memory/default"
 }
 ```
 
@@ -71,7 +72,7 @@ The optional `tts` object lets you steer Kokoro’s ONNX Runtime session:
 If you omit the block entirely, Kokoro continues to probe GPU providers automatically. When a requested provider is missing (for example because CUDA DLLs are not installed), the runtime logs which providers were skipped or why GPU initialisation failed before falling back to the default CPU session.
 
 > **Note**
-> The `memory_dir` field remains in legacy identity configs for compatibility, but CtrlSpeak always resolves runtime storage through the AppData helpers described above. Repository-relative memory paths are ignored so packaged builds stay read-only.
+> Identity configs now point their `memory_dir` to `"{appdata}/bot_memory/<identity>"`. At runtime CtrlSpeak expands `{appdata}` to the platform-specific data root (for example `%APPDATA%\\CtrlSpeak` on Windows) and refuses to use a directory outside that tree. Repository-relative folders such as `memory/` are ignored so packaged builds stay read-only.
 
 > **Tip**
 > Update `${config_root}/identities/<identity>/memory.json` when you need to disable screenshot storage, change retrieval thresholds, adjust the vector-cap limit, apply a TTL, or enable the PII redactor for a specific persona.
@@ -84,11 +85,11 @@ CtrlSpeak ships with three ready-to-use personas. The matrix below consolidates 
 | --- | --- | --- | --- | --- |
 | Default receptionist | `default` | Welcomes users, answers CtrlSpeak usage questions, and routes requests to the right specialist. | Reads the bundled documentation set before every session and can describe other personas so it acts as a knowledgeable receptionist. | No vision capture and no tool calling; delegates advanced requests to the assistant or Einstein personas. |
 | Assistant | `assistant` | General-purpose helper for day-to-day requests. | Vision-enabled—can capture the screen or clipboard on request, references the documentation corpus, and delivers polished natural-language replies. | Tool calling remains disabled; for complex planning or actions it will escalate to Einstein. |
-| Einstein | `einstein` | Deep-thinking strategist and automation specialist. | Runs with `/think` enabled for deliberate reasoning and is authorized to invoke LangGraph-managed tools (create, search, future automation) when available. Also ingests the shared documentation set at startup. | Vision capture stays disabled so it focuses on analysis and tooling; relies on other personas for pure receptionist duties. |
+| Einstein | `einstein` | Deep-thinking strategist and automation specialist. | Runs with `/think` enabled for deliberate reasoning and can delegate complex file or shell work to Goose via `goose_tool_query`. Einstein crafts a natural-language prompt describing the desired action—read, search, edit, create, or execute—and the LangGraph orchestrator validates the payload before relaying Goose’s transcript back to the model (the full transcript is stored as a hidden `tool` entry in session history so later turns can reference it without surfacing it in the chat window). `[Tools] …` telemetry records every Goose invocation so operators can audit the chain. | Vision capture stays disabled so it focuses on analysis and tooling; relies on other personas for pure receptionist duties. |
 
 - **assistant** – A Jarvis-inspired general helper backed by `gemma3:12b` with deterministic paragraph cleaning enabled.
 - **default** – TrueAI's upbeat front-desk receptionist persona that uses `gemma3:1b`, keeps vision disabled, and focuses on guiding people to the right bot or CtrlSpeak feature.
-- **einstein** – The deep-thinking and tool-planning specialist powered by `qwen3:14b`. CtrlSpeak appends `/think` to every Einstein turn (unless the user says `/no_think`) so Qwen3’s reasoning mode emits `<think>…</think>` plans before the final answer. The identity’s `identity.json` requests GPU-only execution, an 8 192 token context window, and the recommended sampling settings (`temperature` 0.6, `top_p` 0.95, `top_k` 20, `repeat_penalty` 1.1). Einstein also opts into `"hide_think": true`, which enables the `background_agents.manage_think` helper to strip `<think>` plans from the persisted chat history and Kokoro playback, drop the leading “Answer:” label before the visible reply, and immediately print a transient `Thinking...` placeholder in the chat window as soon as the user submits a message. Vision capture is disabled for this persona (`"vision": false`), so “look at my screen/clipboard” shortcuts only work with other identities. Stage the model in Ollama with a Modelfile equivalent to:
+- **einstein** – The deep-thinking and tool-planning specialist powered by `qwen3:14b`. CtrlSpeak appends `/think` to every Einstein turn (unless the user says `/no_think`) so Qwen3’s reasoning mode emits `<think>…</think>` plans before the final answer. The identity’s `identity.json` requests GPU-only execution, an 8 192 token context window, and the recommended sampling settings (`temperature` 0.6, `top_p` 0.95, `top_k` 20, `repeat_penalty` 1.1). Einstein also opts into `"hide_think": true`, which enables the `background_agents.manage_think` helper to strip `<think>` plans from the persisted chat history and Kokoro playback, drop the leading “Answer:” label before the visible reply, and immediately print a transient `Thinking...` placeholder in the chat window as soon as the user submits a message. If Qwen3 forgets to send the spoken answer and only returns the hidden plan, the orchestrator automatically follows up with a reminder and surfaces an apology when the retry still fails. Vision capture is disabled for this persona (`"vision": false`), so “look at my screen/clipboard” shortcuts only work with other identities. Stage the model in Ollama with a Modelfile equivalent to:
 
 ```
 FROM hf.co/Qwen/Qwen3-14B-GGUF:Q4_K_M
@@ -109,9 +110,9 @@ The additional boolean keys control multimodal, cleaning, and future extensibili
 
 - `require_text_cleaning` – When `true`, CtrlSpeak always runs the deterministic plaintext scrub before TTS playback. Identities that set it to `false` skip the scrub unless keywords or other sanitizers trigger.
 - `vision` – Enables image capture tooling documented in [`docs/tooling.md`](tooling.md). When `true`, SocialRobot listens for the spoken “look at my screen” and “look at my clipboard” commands, exposes matching context-menu actions on the floating logo, and routes captured images to the LLM. When `false`, the commands are ignored, the context-menu items are hidden, and no images are taken.
-- `tool` – Reserved flag for forthcoming external tool integrations. It defaults to `false` today but can be toggled once tool calling is implemented.
+- `tool` – Grants access to the Goose automation helper documented in [`docs/tooling.md`](tooling.md#goose-automation-helper-toolsgoose_toolpy). Einstein enables it by default; other personas leave it `false` to avoid exposing the automation agent unnecessarily.
 
-CtrlSpeak now includes three bundled identities: `assistant` (vision enabled, text cleaning enabled), `default` (vision disabled, text cleaning disabled), and `einstein` (vision disabled, text cleaning enabled with Qwen3 reasoning defaults). The configuration flag `tool` remains `false` today for compatibility, but Einstein is the designated tool-calling persona and gains access as soon as LangGraph exposes approved tools.
+CtrlSpeak now includes three bundled identities: `assistant` (vision enabled, text cleaning enabled), `default` (vision disabled, text cleaning disabled), and `einstein` (vision disabled, text cleaning enabled with Qwen3 reasoning defaults). Only Einstein has `tool: true`, giving it exclusive access to the Goose integration.
 
 All face, mouth, and logo assets now live inside the identity directories; the legacy `third_party/social_robot/images/` placeholders have been removed so new personas should bundle their own art alongside `identity.json`. Likewise, shared prompt templates are deprecated—store any reusable system prompts with the identity that consumes them so packaging stays self-contained.
 
@@ -132,7 +133,7 @@ If the planner claims `none` but the user explicitly mentions the documentation,
 
 When the assistant or default persona receives an utterance that sounds like a “how do I use CtrlSpeak?” request (or when retrieval would otherwise return nothing), the LangGraph orchestrator relaxes the similarity check for `category="documentation"` memories and guarantees at least one documentation chunk appears in the retrieved context. Those passages are forwarded to the LLM inside a dedicated `Documentation excerpts` system message so the persona understands the text is canonical guidance and can quote it directly.
 
-Every turn prints a terminal-only status line such as `[Memory] Vector store queried (plan=documentation, results=2, documentation=1, temporal=1).` or `[Memory] Vector store not queried (plan=none).` so operators can confirm both the planner’s decision and whether the vector database contributed context for the pending reply. The GUI and TTS surfaces remain silent.
+Every turn prints a terminal-only status line such as `[Memory] Vector store queried (plan=documentation, results=2, documentation=1, temporal=1).` or `[Memory] Vector store not queried (plan=none).` so operators can confirm both the planner’s decision and whether the vector database contributed context for the pending reply. Goose-enabled personas also emit a concise turn-by-turn trace—user request receipt, the prompt sent to the LLM, any Goose tool prompt dispatched, the tool result returned to the model, and the final answer supplied to chat—so you can follow each automation step without enabling verbose logging. The GUI and TTS surfaces remain silent.
 
 You can switch identities from the command line with:
 

@@ -1,10 +1,14 @@
+import difflib
 import importlib
 import importlib.util
 import sys
+import json
+import types
+import copy
 import threading
 import time
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Dict, Iterable, Optional
 
 import pytest
 
@@ -35,6 +39,18 @@ def _prepare(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
         monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
 
+    if "requests" not in sys.modules:
+        requests_stub = types.SimpleNamespace()
+        requests_stub.exceptions = types.SimpleNamespace(RequestException=RuntimeError)
+
+        def _stubbed_request(*_args, **_kwargs):
+            raise RuntimeError("requests stub invoked")
+
+        requests_stub.get = _stubbed_request
+        requests_stub.post = _stubbed_request
+        sys.modules["requests"] = requests_stub
+        sys.modules["requests.exceptions"] = requests_stub.exceptions
+
     modules = {}
     for name in [
         "utils.config_paths",
@@ -44,15 +60,23 @@ def _prepare(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "utils.image_store",
         "utils.vector_memory",
         "utils.memory_orchestrator",
+        "tools.goose_tool",
     ]:
         modules[name] = importlib.reload(importlib.import_module(name))
     return modules
 
 
 class DummyLLM:
-    def __init__(self, planner_script: Optional[Iterable[str]] = None) -> None:
+    def __init__(
+        self,
+        planner_script: Optional[Iterable[str]] = None,
+        tool_script: Optional[Iterable[Dict[str, Any]]] = None,
+    ) -> None:
         self.calls = []
+        self.tool_calls = []
         self._planner_script = list(planner_script or [])
+        self._tool_script = list(tool_script or [])
+        self.system_prompt = ""
 
     def query(self, user_text: str, history=None, content=None):
         history_copy = list(history or [])
@@ -68,6 +92,17 @@ class DummyLLM:
         if planner_requested and self._planner_script:
             return self._planner_script.pop(0)
         return f"echo:{user_text}"
+
+    def chat(self, messages, *, tools=None, tool_choice=None, stream=None):
+        record = {
+            "messages": copy.deepcopy(list(messages)),
+            "tools": copy.deepcopy(list(tools or [])),
+            "tool_choice": tool_choice,
+        }
+        self.tool_calls.append(record)
+        if self._tool_script:
+            return self._tool_script.pop(0)
+        return {"message": {"role": "assistant", "content": "none", "tool_calls": []}}
 
 
 def test_orchestrator_persists_and_retrieves(tmp_path, monkeypatch):
@@ -121,6 +156,26 @@ def test_orchestrator_persists_and_retrieves(tmp_path, monkeypatch):
 
     assert result1.response_text == "echo:hello world"
     assert result2.response_text == "echo:hello again"
+    if orchestrator.tooling_enabled:
+        assert llm.tool_calls, "expected the LLM chat endpoint to be invoked with tools"
+        chat_payload = llm.tool_calls[0]
+        assert chat_payload.get("tool_choice") == "auto"
+        user_payloads = [
+            str(msg.get("content", ""))
+            for msg in chat_payload.get("messages", [])
+            if isinstance(msg, dict) and msg.get("role") == "user"
+        ]
+        assert user_payloads, "expected the tool-enabled call to include the user prompt"
+        assert any("hello world" in payload.lower() for payload in user_payloads)
+        assert all("/no_think" not in payload.lower() for payload in user_payloads)
+        guard_messages = [
+            msg
+            for msg in chat_payload.get("messages", [])
+            if isinstance(msg, dict)
+            and msg.get("role") == "system"
+            and "goose_tool_query" in str(msg.get("content", ""))
+        ]
+        assert guard_messages, "expected Goose tool instructions to accompany the user prompt"
     assert result1.vector_query_attempted is False
     assert result1.vector_query_result_count == 0
     assert result1.retrieval_plan == {
@@ -160,6 +215,68 @@ _SAMPLE_PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/wwAAoMBgK8mBp0AAAAASUVORK5CYII="
 )
 
+
+def test_orchestrator_starts_with_fresh_session_history(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+    memory_paths = modules["utils.memory_paths"]
+
+    conversation_log = memory_paths.get_bot_conversation_log("HistoryTester")
+    conversation_log.parent.mkdir(parents=True, exist_ok=True)
+    with conversation_log.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"role": "user", "content": "old session question"}) + "\n")
+        handle.write(json.dumps({"role": "assistant", "content": "old session answer"}) + "\n")
+
+    identity_settings = {
+        "store_vector_memory": False,
+        "retrieval_top_k": 2,
+        "retrieval_threshold": 0.5,
+        "max_vector_items": 5,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+    }
+
+    llm = DummyLLM(["none"])
+    metrics_path = tmp_path / "metrics_history.csv"
+    orchestrator = orchestrator_module.MemoryOrchestrator(
+        "HistoryTester",
+        llm,
+        memory_dir=tmp_path,
+        metrics_path=metrics_path,
+        identity_settings=identity_settings,
+    )
+
+    result = orchestrator.run_turn("hello from a new session")
+    time.sleep(0.1)
+    orchestrator.close()
+
+    response_calls = [
+        call
+        for call in llm.calls
+        if not any(
+            isinstance(entry, dict)
+            and entry.get("role") == "system"
+            and isinstance(entry.get("content"), str)
+            and "retrieval planner" in entry.get("content", "").lower()
+            for entry in call["history"]
+        )
+    ]
+    assert response_calls, "expected the LLM to be invoked for a user-facing response"
+    final_call = response_calls[-1]
+    assert "hello from a new session" in final_call["text"]
+    history_entries = final_call["history"]
+    assert all("old session question" not in str(entry.get("content", "")) for entry in history_entries)
+    assert all("old session answer" not in str(entry.get("content", "")) for entry in history_entries)
+
+    assert len(orchestrator.history) == 2
+    assert orchestrator.history[0]["content"] == "hello from a new session"
+    assert orchestrator.history[1]["content"].startswith("echo:hello from a new session")
+
+    log_text = conversation_log.read_text(encoding="utf-8")
+    assert "old session question" in log_text
+    assert "hello from a new session" in log_text
+
+    assert result.history_entries[0]["content"] == "hello from a new session"
 
 def test_orchestrator_attaches_identity_image(tmp_path, monkeypatch):
     modules = _prepare(tmp_path, monkeypatch)
@@ -580,3 +697,264 @@ def test_orchestrator_hides_think_blocks_with_manager(tmp_path, monkeypatch):
     assert conversation_log.exists()
     log_text = conversation_log.read_text(encoding="utf-8")
     assert "<think>" not in log_text
+
+
+def test_orchestrator_recovers_when_llm_only_thinks(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+
+    class PlanOnlyLLM(DummyLLM):
+        def __init__(self):
+            tool_script = [
+                {"message": {"role": "assistant", "content": "<think>Plan</think>", "tool_calls": []}},
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "<think>Plan</think>\nAnswer: Completed.",
+                        "tool_calls": [],
+                    }
+                },
+            ]
+            super().__init__(planner_script=["none"], tool_script=tool_script)
+
+    identity_settings = {
+        "store_vector_memory": False,
+        "retrieval_top_k": 1,
+        "retrieval_threshold": 0.0,
+        "max_vector_items": 1,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+    }
+
+    think_manager = ManageThinkAgent()
+    metrics_path = tmp_path / "metrics_plan_only.csv"
+    llm = PlanOnlyLLM()
+    orchestrator = orchestrator_module.MemoryOrchestrator(
+        "PlanOnlyTester",
+        llm,
+        memory_dir=tmp_path,
+        metrics_path=metrics_path,
+        identity_settings=identity_settings,
+        tooling_enabled=True,
+        think_manager=think_manager,
+    )
+
+    result = orchestrator.run_turn("plan something", augmented_text="plan something /think")
+    orchestrator.close()
+
+    assert result.response_text == "Completed."
+    assert result.think_hidden is True
+    assert len(llm.tool_calls) >= 2
+    reminder_payloads = []
+    for call in llm.tool_calls[1:]:
+        for message in call.get("messages", []):
+            if isinstance(message, dict) and message.get("role") == "user":
+                reminder_payloads.append(str(message.get("content", "")))
+    assert any("Provide the final Answer" in payload for payload in reminder_payloads)
+
+
+def test_orchestrator_leaves_goose_planning_to_llm(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+
+    identity_settings = {
+        "store_vector_memory": False,
+        "retrieval_top_k": 2,
+        "retrieval_threshold": 0.1,
+        "max_vector_items": 5,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+    }
+
+    llm = DummyLLM(["none"])
+    metrics_path = tmp_path / "metrics_goose_hint.csv"
+    orchestrator = orchestrator_module.MemoryOrchestrator(
+        "GooseHintTester",
+        llm,
+        memory_dir=tmp_path,
+        metrics_path=metrics_path,
+        identity_settings=identity_settings,
+        tooling_enabled=True,
+    )
+
+    result = orchestrator.run_turn("please read the README.md file")
+    time.sleep(0.1)
+    orchestrator.close()
+
+    trace_payload = json.loads(result.trace_path.read_text(encoding="utf-8"))
+    assert trace_payload.get("tool_plan_summary") == "none"
+    assert not trace_payload.get("tool_plan"), "tool planning should be left to the LLM"
+    assert llm.tool_calls, "expected the LLM to receive the tool-enabled prompt"
+
+
+def _make_goose_tool_call(prompt: str, **kwargs) -> Dict[str, Any]:
+    payload = {"prompt": prompt}
+    payload.update(kwargs)
+    return {
+        "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {
+                        "name": "goose_tool_query",
+                        "arguments": json.dumps(payload),
+                    },
+                }
+            ],
+        }
+    }
+
+
+def test_orchestrator_executes_goose_tool(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+
+    captured_calls: list[Dict[str, Any]] = []
+
+    def fake_goose_query(prompt: str, **kwargs):
+        captured_calls.append({"prompt": prompt, "kwargs": kwargs})
+        return '{"final": "done"}'
+
+    monkeypatch.setattr(orchestrator_module, "goose_query", fake_goose_query)
+
+    identity_settings = {
+        "store_vector_memory": False,
+        "retrieval_top_k": 1,
+        "retrieval_threshold": 0.0,
+        "max_vector_items": 5,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+    }
+
+    llm = DummyLLM(tool_script=[
+        _make_goose_tool_call("list all python files"),
+        {"message": {"role": "assistant", "content": "Task complete."}},
+    ])
+
+    metrics_path = tmp_path / "metrics_goose_success.csv"
+    orchestrator = orchestrator_module.MemoryOrchestrator(
+        "GooseExecTester",
+        llm,
+        memory_dir=tmp_path,
+        metrics_path=metrics_path,
+        identity_settings=identity_settings,
+        tooling_enabled=True,
+    )
+
+    result = orchestrator.run_turn("list all python files")
+    time.sleep(0.1)
+    orchestrator.close()
+
+    assert captured_calls, "expected goose_query to be invoked"
+    assert captured_calls[0]["prompt"] == "list all python files"
+    assert captured_calls[0]["kwargs"].get("stream") is True
+
+    trace_payload = json.loads(result.trace_path.read_text(encoding="utf-8"))
+    tool_results = trace_payload.get("tool_results", [])
+    assert tool_results and tool_results[0]["success"] is True
+    assert tool_results[0]["output"] == '{"final": "done"}'
+
+    history_entries = result.history_entries
+    assert [entry.get("role") for entry in history_entries] == [
+        "user",
+        "tool",
+        "assistant",
+    ]
+    tool_entry = history_entries[1]
+    assert tool_entry.get("name") == "goose_tool_query"
+    assert tool_entry.get("content") == '{"final": "done"}'
+    assert tool_entry.get("metadata", {}).get("success") is True
+
+
+def test_orchestrator_reports_goose_failure(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+
+    def failing_goose_query(prompt: str, **kwargs):
+        raise RuntimeError("simulated goose failure")
+
+    monkeypatch.setattr(orchestrator_module, "goose_query", failing_goose_query)
+
+    identity_settings = {
+        "store_vector_memory": False,
+        "retrieval_top_k": 1,
+        "retrieval_threshold": 0.0,
+        "max_vector_items": 5,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+    }
+
+    llm = DummyLLM(tool_script=[
+        _make_goose_tool_call("read docs/tooling.md"),
+        {"message": {"role": "assistant", "content": "Goose error handled."}},
+    ])
+
+    metrics_path = tmp_path / "metrics_goose_failure.csv"
+    orchestrator = orchestrator_module.MemoryOrchestrator(
+        "GooseFailureTester",
+        llm,
+        memory_dir=tmp_path,
+        metrics_path=metrics_path,
+        identity_settings=identity_settings,
+        tooling_enabled=True,
+    )
+
+    result = orchestrator.run_turn("read docs/tooling.md")
+    time.sleep(0.1)
+    orchestrator.close()
+
+    trace_payload = json.loads(result.trace_path.read_text(encoding="utf-8"))
+    tool_results = trace_payload.get("tool_results", [])
+    assert tool_results and tool_results[0]["success"] is False
+    assert "simulated goose failure" in tool_results[0]["message"]
+
+    history_entries = result.history_entries
+    assert any(entry.get("role") == "tool" for entry in history_entries)
+    failure_entry = next(entry for entry in history_entries if entry.get("role") == "tool")
+    assert "simulated goose failure" in failure_entry.get("content", "")
+    assert failure_entry.get("metadata", {}).get("success") is False
+
+
+def test_orchestrator_passes_stream_flag(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+
+    captured_calls: list[Dict[str, Any]] = []
+
+    def fake_goose_query(prompt: str, **kwargs):
+        captured_calls.append({"prompt": prompt, "kwargs": kwargs})
+        return '{"final": "done"}'
+
+    monkeypatch.setattr(orchestrator_module, "goose_query", fake_goose_query)
+
+    identity_settings = {
+        "store_vector_memory": False,
+        "retrieval_top_k": 1,
+        "retrieval_threshold": 0.0,
+        "max_vector_items": 5,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+    }
+
+    llm = DummyLLM(tool_script=[
+        _make_goose_tool_call("tail logs", stream=False),
+        {"message": {"role": "assistant", "content": "Task complete."}},
+    ])
+
+    orchestrator = orchestrator_module.MemoryOrchestrator(
+        "GooseStreamTester",
+        llm,
+        memory_dir=tmp_path,
+        metrics_path=tmp_path / "metrics_goose_stream.csv",
+        identity_settings=identity_settings,
+        tooling_enabled=True,
+    )
+
+    orchestrator.run_turn("tail logs")
+    time.sleep(0.1)
+    orchestrator.close()
+
+    assert captured_calls and captured_calls[0]["kwargs"].get("stream") is True
