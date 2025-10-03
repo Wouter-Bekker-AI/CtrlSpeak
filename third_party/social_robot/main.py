@@ -13,6 +13,7 @@ import warnings
 from pathlib import Path
 from typing import Optional, List, Dict, Pattern
 
+
 from audio.stt import FasterWhisperSTT
 from audio.remote_stt import RemoteSTT
 from audio.tts import KokoroTTS
@@ -1291,7 +1292,7 @@ def main():
         print("-> Raw LLM reply:", raw_response)
 
         if think_hidden and think_placeholder and not placeholder_displayed:
-            chat_window.append_bot_message(think_placeholder)
+            chat_window.append_status_message("Bot (thinking)", think_placeholder)
             placeholder_displayed = True
 
         final_response = llm_response
