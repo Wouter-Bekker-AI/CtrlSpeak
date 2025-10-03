@@ -42,10 +42,6 @@ from utils.config_paths import (
 logger = get_logger(__name__)
 
 
-_CLIPBOARD_WARN_COOLDOWN_SECONDS = 5.0
-_last_clipboard_warning: float = 0.0
-
-
 def _bootstrap_runtime_environment() -> None:
     """
     Ensure third-party services can establish HTTPS connections when running
@@ -155,7 +151,6 @@ if TYPE_CHECKING:
 # Win32 text insertion / clipboard
 from utils.winio import (
     insert_text_into_focus, set_force_sendinput, is_console_window,
-    set_clipboard_text,
 )
 
 # LAN discovery (single source of truth for ServerInfo)
@@ -269,25 +264,19 @@ def write_error_log(context: str, snippet: str) -> None:
         logger.exception("Failed to write error log entry")
 
 
-def copy_to_clipboard(text: str) -> None:
-    global _last_clipboard_warning
-    try:
-        if not set_clipboard_text(text):
-            now = time.monotonic()
-            if now - _last_clipboard_warning >= _CLIPBOARD_WARN_COOLDOWN_SECONDS:
-                logger.warning(
-                    "Failed to stage clipboard text; the Windows clipboard is busy or unavailable."
-                )
-                _last_clipboard_warning = now
-    except Exception:
-        logger.exception("Failed to copy text to clipboard")
-
 def notify_error(context: str, details: str) -> None:
     snippet = (details or "").strip() or "Unknown error"
     message = f"{context}\n\nDetails:\n{snippet}"
     write_error_log(context, snippet)
-    copy_to_clipboard(message)
-    notify(message, title="CtrlSpeak Error")
+    logger.error("%s\n\nDetails:\n%s", context, snippet)
+    try:
+        print(f"CtrlSpeak Error:\n{message}")
+    except Exception:
+        logger.exception("Failed to print error details to terminal")
+    notify(
+        "An error occurred. Please review the terminal output or CtrlSpeak-error.log and contact support.",
+        title="CtrlSpeak Error",
+    )
 
 
 def format_exception_details(exc: BaseException | None) -> str:
