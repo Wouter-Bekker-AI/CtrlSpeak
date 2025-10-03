@@ -29,6 +29,6 @@
   "hide_think": true,
   "require_text_cleaning": true,
   "vision": false,
-  "tool": false,
-  "memory_dir": "memory"
+  "tool": true,
+  "memory_dir": "{appdata}/bot_memory/einstein"
 }

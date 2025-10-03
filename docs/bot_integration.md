@@ -45,7 +45,7 @@ The loader understands the following `identity.json` keys:
   "require_text_cleaning": false,
   "vision": true,
   "tool": false,
-  "memory_dir": "memory"
+  "memory_dir": "{appdata}/bot_memory/default"
 }
 ```
 
@@ -71,7 +71,7 @@ The optional `tts` object lets you steer Kokoro’s ONNX Runtime session:
 If you omit the block entirely, Kokoro continues to probe GPU providers automatically. When a requested provider is missing (for example because CUDA DLLs are not installed), the runtime logs which providers were skipped or why GPU initialisation failed before falling back to the default CPU session.
 
 > **Note**
-> The `memory_dir` field remains in legacy identity configs for compatibility, but CtrlSpeak always resolves runtime storage through the AppData helpers described above. Repository-relative memory paths are ignored so packaged builds stay read-only.
+> Identity configs now point their `memory_dir` to `"{appdata}/bot_memory/<identity>"`. At runtime CtrlSpeak expands `{appdata}` to the platform-specific data root (for example `%APPDATA%\\CtrlSpeak` on Windows) and refuses to use a directory outside that tree. Repository-relative folders such as `memory/` are ignored so packaged builds stay read-only.
 
 > **Tip**
 > Update `${config_root}/identities/<identity>/memory.json` when you need to disable screenshot storage, change retrieval thresholds, adjust the vector-cap limit, apply a TTL, or enable the PII redactor for a specific persona.
@@ -84,7 +84,7 @@ CtrlSpeak ships with three ready-to-use personas. The matrix below consolidates 
 | --- | --- | --- | --- | --- |
 | Default receptionist | `default` | Welcomes users, answers CtrlSpeak usage questions, and routes requests to the right specialist. | Reads the bundled documentation set before every session and can describe other personas so it acts as a knowledgeable receptionist. | No vision capture and no tool calling; delegates advanced requests to the assistant or Einstein personas. |
 | Assistant | `assistant` | General-purpose helper for day-to-day requests. | Vision-enabled—can capture the screen or clipboard on request, references the documentation corpus, and delivers polished natural-language replies. | Tool calling remains disabled; for complex planning or actions it will escalate to Einstein. |
-| Einstein | `einstein` | Deep-thinking strategist and automation specialist. | Runs with `/think` enabled for deliberate reasoning and is authorized to invoke LangGraph-managed tools (create, search, future automation) when available. Also ingests the shared documentation set at startup. | Vision capture stays disabled so it focuses on analysis and tooling; relies on other personas for pure receptionist duties. |
+| Einstein | `einstein` | Deep-thinking strategist and automation specialist. | Runs with `/think` enabled for deliberate reasoning and can invoke the workspace tooling (`tools.workspace.*`) to search, list directories, patch, validate, and format files across the project *and* the operator’s home directories (Desktop, Documents, `%APPDATA%`, etc.). Einstein must call `workspace.get_system_info()` before relying on OS-specific behaviour. When heuristics cannot resolve a request, it now asks Qwen’s tool router whether to call `workspace_read_file`, `workspace_list_directory`, or `workspace_apply_text_patch`; each tool result is fed back to the model until it responds with a final answer so multi-step plans (read → patch, list → read, etc.) stay fully automated. `[Tools] …` logs show every step (`stat_file`, `search_files`, `list_directory`, `dry_run_text_patch`, etc.) so operators can audit the chain. | Vision capture stays disabled so it focuses on analysis and tooling; relies on other personas for pure receptionist duties. |
 
 - **assistant** – A Jarvis-inspired general helper backed by `gemma3:12b` with deterministic paragraph cleaning enabled.
 - **default** – TrueAI's upbeat front-desk receptionist persona that uses `gemma3:1b`, keeps vision disabled, and focuses on guiding people to the right bot or CtrlSpeak feature.
@@ -109,9 +109,9 @@ The additional boolean keys control multimodal, cleaning, and future extensibili
 
 - `require_text_cleaning` – When `true`, CtrlSpeak always runs the deterministic plaintext scrub before TTS playback. Identities that set it to `false` skip the scrub unless keywords or other sanitizers trigger.
 - `vision` – Enables image capture tooling documented in [`docs/tooling.md`](tooling.md). When `true`, SocialRobot listens for the spoken “look at my screen” and “look at my clipboard” commands, exposes matching context-menu actions on the floating logo, and routes captured images to the LLM. When `false`, the commands are ignored, the context-menu items are hidden, and no images are taken.
-- `tool` – Reserved flag for forthcoming external tool integrations. It defaults to `false` today but can be toggled once tool calling is implemented.
+- `tool` – Grants access to the workspace tooling documented in [`docs/tooling.md`](tooling.md#workspace-editing-toolkit-toolsworkspacepy). Einstein enables it by default; other personas leave it `false` to avoid exposing edit primitives unnecessarily.
 
-CtrlSpeak now includes three bundled identities: `assistant` (vision enabled, text cleaning enabled), `default` (vision disabled, text cleaning disabled), and `einstein` (vision disabled, text cleaning enabled with Qwen3 reasoning defaults). The configuration flag `tool` remains `false` today for compatibility, but Einstein is the designated tool-calling persona and gains access as soon as LangGraph exposes approved tools.
+CtrlSpeak now includes three bundled identities: `assistant` (vision enabled, text cleaning enabled), `default` (vision disabled, text cleaning disabled), and `einstein` (vision disabled, text cleaning enabled with Qwen3 reasoning defaults). Only Einstein has `tool: true`, giving it exclusive access to the workspace editing toolkit.
 
 All face, mouth, and logo assets now live inside the identity directories; the legacy `third_party/social_robot/images/` placeholders have been removed so new personas should bundle their own art alongside `identity.json`. Likewise, shared prompt templates are deprecated—store any reusable system prompts with the identity that consumes them so packaging stays self-contained.
 

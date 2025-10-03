@@ -14,11 +14,91 @@ ctrlspeak/
 │   ├── __init__.py
 │   ├── keywords.py
 │   ├── message_management.py
-│   └── vision.py
+│   ├── vision.py
+│   └── workspace.py
 ```
 
 - `tools/__init__.py` exposes the modules that make up the shared tooling surface. Import helpers via `from tools import vision` (or `keywords`) so the package can evolve without breaking downstream code.
 - Additional tooling (for example, browser automation or document parsing) should live beside `vision.py` inside this directory. Each module must document its public API in this file before it is merged.
+- `tools/workspace.py` exposes the editing toolkit reserved for Einstein. It enforces sandboxed file access, SHA-256 locking, JSON patching, and post-edit validation.
+
+## Workspace editing toolkit (`tools/workspace.py`)
+
+The workspace toolkit gives Einstein deterministic access to the repository when it needs to inspect or edit files. Every function returns a JSON-serialisable dictionary that includes an `ok` flag and a list of structured errors so tool calls can be audited easily. The toolkit is sandboxed to the repository root (or a caller-supplied override via `set_workspace_root` when running tests) and refuses any path that escapes that boundary.
+
+### Discovery and inspection
+
+| Function | Purpose |
+| --- | --- |
+| `get_system_info()` | Reports the host operating system, release, Python version, and convenience booleans (`is_windows`, `is_linux`, `is_macos`) so Einstein can plan platform-aware actions before touching the workspace. |
+| `search_files(query: str, glob: str \| None = None, *, limit: int = 200)` | Returns relative paths whose names match `query`. An optional `glob` (for example `"**/*.py"`) narrows the search; results are truncated to `limit` entries. |
+| `list_directory(path: str, *, pattern: str \| None = None, extensions: Iterable[str] \| None = None, recursive: bool = False, limit: int \| None = 200)` | Enumerates files inside `path`, optionally filtering by glob-style patterns or file extensions. When `recursive` is `True` the search walks subdirectories; results are truncated to `limit` entries and report whether the listing was shortened. |
+| `stat_file(path: str)` | Reports existence, size (in bytes), and modification time (epoch seconds) for a target file. |
+| `read_file(path: str, *, mode: Literal["text","json","yaml","toml","bytes"] = "text")` | Reads a file and returns both the decoded content and its SHA-256 digest. Structured modes (`json`, `yaml`, `toml`) parse the payload so Einstein can reason about object keys before planning a patch. |
+| `analyze_python(path: str)` | Parses a Python module into an AST and returns the imported modules, top-level functions, classes, and a sorted `symbols` set. Useful for planning insertions without rewriting the file blindly. |
+
+`search_files` and the other path-based helpers accept both POSIX (`/`) and Windows (`\`) separators. The toolkit now registers the user's home directory, drive anchors, and the standard Windows AppData folders in addition to the project workspace, so Einstein can inspect requests such as `Desktop\linux commands.txt` or `%APPDATA%\CtrlSpeak\logs\ctrlspeak.log` without tripping path guards. Callers can extend or replace this allow-list at runtime when further directories must be reachable.
+
+### Editing primitives
+
+| Function | Purpose |
+| --- | --- |
+| `dry_run_json_patch(path, patch, *, expect_sha256=None, schema_path=None)` | Applies an RFC 6902 patch in memory and returns the patched object, rendered JSON text, and the new SHA-256 digest. Rejects stale hashes and honours optional JSON Schema validation when `schema_path` is provided. |
+| `apply_json_patch(path, patch, *, expect_sha256=None, schema_path=None)` | Writes the JSON patch to disk atomically after performing the same checks as the dry run. Always call the dry run first so Einstein can preview the change. |
+| `dry_run_text_patch(path, unified_diff, *, expect_sha256=None)` | Applies a unified diff (as produced by `difflib.unified_diff`) to UTF-8 text in memory. Verifies diff context lines match the current file and returns the patched text and new digest. |
+| `apply_text_patch(path, unified_diff, *, expect_sha256=None)` | Writes the text diff atomically. On failure it surfaces the same error payload returned by the dry run. |
+
+All mutating calls require the latest SHA-256 digest via `expect_sha256` so optimistic locking can detect concurrent edits. The helpers raise a `sha_mismatch` error code when the digest is stale, prompting Einstein to re-read the file before retrying.
+
+### Tool routing and LLM coordination
+
+- Every turn begins with a **probe** call to Qwen’s tool-enabled chat endpoint. The orchestrator appends `/no_think` to the user text so Qwen responds with a terse decision, and the reply is inspected only for `tool_calls`.
+- When the heuristics detect a read or directory request, they create a `ToolAction` with `source="langgraph"` and mark the probe as required. The ensuing Ollama payload sets `tool_choice="required"`, forcing Qwen to emit exactly one tool call before any natural-language reply.
+- If no heuristic fires, LangGraph still issues the `/no_think` probe but keeps `tool_choice="auto"` so Qwen can choose a normal answer without touching the filesystem.
+- The trigger phrases that drive these heuristics live alongside `_detect_file_read_request` and `_detect_directory_listing_request` in [`utils/memory_orchestrator.py`](../utils/memory_orchestrator.py). Expect variants such as “what is in …”, “content of …”, “show me …”, “read …”, and “list all the text files on my Desktop”; updating the code keeps the phrase list and documentation in sync.
+- Once Qwen returns a tool call, the orchestrator executes the helper, logs the `[Tools]` telemetry, and feeds the JSON result back as a `role="tool"` message. Qwen can chain additional tools (read → patch, list → read, etc.) before emitting the final spoken answer.
+- LangGraph no longer invokes workspace tools directly. Heuristic detections simply steer the probe, while every real filesystem operation now originates from Qwen’s `tool_calls`. Trace entries continue to label the origin as `source=langgraph` or `source=llm` for observability.
+- The probe and tool loop surface three workspace functions:
+  - `workspace_read_file(path, location_hint?, description?)` — plan a deterministic `stat_file` → optional `search_files` → `read_file` chain.
+  - `workspace_apply_text_patch(path, diff, expect_sha256?, summary?)` — supply a minimal unified diff (with the latest digest when available) so the orchestrator can dry-run and apply the change safely.
+  - `workspace_list_directory(path, pattern?, extensions?, recursive?, limit?, description?)` — enumerate directory contents for queries such as “list all the text files on my Desktop”.
+- Tool probes stay silent in the chat UI; only the final Qwen reply reaches the user. The terminal output records each probe payload, tool execution, and retry so operators can follow along.
+- `workspace_apply_text_patch` reuses `dry_run_text_patch` and `apply_text_patch` internally. Failed dry-runs surface contextual errors (`sha_mismatch`, diff context mismatch, malformed diff headers), while successful patches report the new SHA-256 digest.
+- When the user references “that file” or repeats a filename, the orchestrator shares the most recent file snapshot (path, SHA-256, truncated content) with Qwen during the probe so pronoun-driven edits stay grounded in the latest read.
+- `search_files` walks every allowed root (workspace, home directory, Desktop/Documents, `%APPDATA%`, drive anchors, and any roots registered via `register_allowed_root`) so tool calls can target both repository files and host-level paths.
+- While the workflow remains under observation, every Ollama request that includes a `tools` payload is echoed to the terminal (`-> Tool-enabled request payload (testing only): …`). Remove or gate this log once the integration is fully stable.
+
+### Sandbox boundaries
+
+| Function | Purpose |
+| --- | --- |
+| `register_allowed_root(path)` | Adds a new filesystem root that Einstein may inspect. The default allow-list already includes the project workspace, the active user's home directory, drive anchors, and (on Windows) `%APPDATA%`, `%LOCALAPPDATA%`, and `%USERPROFILE%`, but this helper lets you add bespoke paths such as mounted network shares. |
+| `list_allowed_roots()` | Returns the complete set of active roots so operators can verify which directories are visible to the toolkit. |
+| `list_additional_roots()` | Lists only the non-workspace roots that have been explicitly registered. |
+| `set_additional_allowed_roots(paths)` | Replaces the additional-root allow-list. Tests use this to sandbox operations to a temporary directory before restoring the defaults. |
+
+### Validation and formatting
+
+| Function | Purpose |
+| --- | --- |
+| `validate_json(path, *, schema_path=None)` | Parses JSON and, when `schema_path` is provided, validates it with `jsonschema`. Returns `ok: True` when the payload is well-formed (and schema-compliant). |
+| `validate_yaml(path)` | Parses YAML via PyYAML’s `safe_load`. Fails gracefully when PyYAML is not installed. |
+| `validate_python(path, *, mode="fast" \| "strict")` | Runs `py_compile`. In `strict` mode it also invokes `ruff check --select E9,F63,F7,F82` when Ruff is available, returning a `lint_failed` error if syntax or runtime errors are detected. |
+| `format_file(path)` | Formats Python sources with Black when the dependency is available. Returns `changed: False` when no formatter ran or when Black reported no changes. |
+
+### Usage workflow
+
+1. **Locate the target:** `search_files` and `stat_file` help Einstein confirm the file name and guard against typos.
+2. **Inspect the current state:** `read_file` (optionally with `mode="json"`/`"yaml"`) or `analyze_python` builds an accurate picture before drafting edits.
+3. **Plan with patches:** Generate the minimal RFC 6902 or unified diff necessary for the change. Always call the matching `dry_run_*` variant with the last known SHA-256 digest.
+4. **Validate before writing:** Only call `apply_*` when the dry run succeeds. Immediately follow the write with `validate_json`/`validate_python`/`validate_yaml` as appropriate, then `format_file` to keep style consistent.
+5. **Audit the response:** Every tool response includes the computed `new_sha256` so Einstein can feed it into the next mutation or confirm that no changes were needed.
+
+When writing tests for new tooling behaviours, call `set_workspace_root(tmp_path)` to sandbox operations to the pytest temporary directory and avoid touching the real repository.
+
+> **Python compatibility note:** The toolkit prefers the standard-library `tomllib` module introduced in Python 3.11 when parsing TOML files. On Python 3.10 and earlier, install [`tomli`](https://pypi.org/project/tomli/) so the same APIs remain available.
+
+> **Runtime observability:** The toolkit prints `[Tools] …` status messages for every discovery and edit action (for example, `stat_file`, `search_files`, `read_file`, and path expansions such as `[Tools] Expanded candidate path …`). These logs appear in the CtrlSpeak terminal so operators can follow Einstein’s plan without the interim chatter leaking into the user-facing chat transcript.
 
 ## Vision tooling (`tools/vision.py`)
 

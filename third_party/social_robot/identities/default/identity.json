@@ -26,5 +26,5 @@
   "require_text_cleaning": false,
   "vision": false,
   "tool": false,
-  "memory_dir": "memory"
+  "memory_dir": "{appdata}/bot_memory/default"
 }

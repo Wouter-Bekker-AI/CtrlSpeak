@@ -247,4 +247,85 @@ class OllamaClient:
         return stream_generator()
 
 
+    def chat(
+        self,
+        messages: List[dict],
+        *,
+        stream: Optional[bool] = None,
+        tools: Optional[List[dict]] = None,
+        tool_choice: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        use_stream = self.stream if stream is None else stream
+        if use_stream:
+            raise ValueError("Streaming is not supported for chat() tool routing calls.")
+
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": use_stream,
+        }
+        options = self._compose_options()
+        if options:
+            payload["options"] = options
+        if tools:
+            payload["tools"] = tools
+        if tool_choice:
+            payload["tool_choice"] = tool_choice
+
+        if tools:
+            try:
+                debug_payload = json.dumps(payload, indent=2, ensure_ascii=False)
+            except (TypeError, ValueError):
+                debug_payload = str(payload)
+            print("-> Tool-enabled request payload (testing only):\n", debug_payload)
+
+        if self._hardware_mode == "gpu_only":
+            preload_payload = {"model": self.model, "messages": [], "stream": False}
+            if options:
+                preload_payload["options"] = options
+            try:
+                preload_response = requests.post(self.url, json=preload_payload, timeout=60)
+                preload_response.raise_for_status()
+            except Exception as exc:
+                self._fallback_response("", False, exc)
+            try:
+                self._ensure_gpu_only()
+            except OllamaUnavailableError:
+                self.unload()
+                raise
+            except Exception as exc:
+                self.unload()
+                raise OllamaUnavailableError(str(exc)) from exc
+
+        probe_text = ""
+        for entry in reversed(messages):
+            if isinstance(entry, dict) and entry.get("role") == "user":
+                probe_text = str(entry.get("content") or "")
+                break
+        print("-> Sending tool-routing probe to Ollama:\n", probe_text)
+
+        try:
+            response = requests.post(self.url, json=payload, timeout=120)
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            error_detail = ""
+            if exc.response is not None:
+                try:
+                    error_detail = exc.response.text.strip()
+                except Exception:
+                    error_detail = ""
+            if error_detail:
+                error_message = f"{exc} - {error_detail}"
+                exc = requests.HTTPError(error_message, response=exc.response, request=exc.request)
+            self._fallback_response(probe_text, use_stream, exc)
+        except Exception as exc:
+            self._fallback_response(probe_text, use_stream, exc)
+
+        data = response.json()
+        message = data.get("message") if isinstance(data, dict) else None
+        if isinstance(message, dict):
+            return {"message": message, "raw": data}
+        return {"message": {}, "raw": data}
+
+
 __all__ = ["OllamaClient", "OllamaUnavailableError"]

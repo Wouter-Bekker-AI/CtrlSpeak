@@ -1,10 +1,13 @@
+import difflib
 import importlib
 import importlib.util
 import sys
+import types
+import copy
 import threading
 import time
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Dict, Iterable, Optional
 
 import pytest
 
@@ -50,9 +53,16 @@ def _prepare(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 class DummyLLM:
-    def __init__(self, planner_script: Optional[Iterable[str]] = None) -> None:
+    def __init__(
+        self,
+        planner_script: Optional[Iterable[str]] = None,
+        tool_script: Optional[Iterable[Dict[str, Any]]] = None,
+    ) -> None:
         self.calls = []
+        self.tool_calls = []
         self._planner_script = list(planner_script or [])
+        self._tool_script = list(tool_script or [])
+        self.system_prompt = ""
 
     def query(self, user_text: str, history=None, content=None):
         history_copy = list(history or [])
@@ -68,6 +78,17 @@ class DummyLLM:
         if planner_requested and self._planner_script:
             return self._planner_script.pop(0)
         return f"echo:{user_text}"
+
+    def chat(self, messages, *, tools=None, tool_choice=None, stream=None):
+        record = {
+            "messages": copy.deepcopy(list(messages)),
+            "tools": copy.deepcopy(list(tools or [])),
+            "tool_choice": tool_choice,
+        }
+        self.tool_calls.append(record)
+        if self._tool_script:
+            return self._tool_script.pop(0)
+        return {"message": {"role": "assistant", "content": "none", "tool_calls": []}}
 
 
 def test_orchestrator_persists_and_retrieves(tmp_path, monkeypatch):
@@ -121,6 +142,16 @@ def test_orchestrator_persists_and_retrieves(tmp_path, monkeypatch):
 
     assert result1.response_text == "echo:hello world"
     assert result2.response_text == "echo:hello again"
+    if orchestrator.tooling_enabled:
+        assert llm.tool_calls, "expected the tool router to be consulted"
+        probe_payload = llm.tool_calls[0]
+        assert probe_payload.get("tool_choice") == "auto"
+        assert any(
+            isinstance(msg, dict)
+            and msg.get("role") == "user"
+            and "/no_think" in str(msg.get("content", ""))
+            for msg in probe_payload.get("messages", [])
+        )
     assert result1.vector_query_attempted is False
     assert result1.vector_query_result_count == 0
     assert result1.retrieval_plan == {
@@ -580,3 +611,559 @@ def test_orchestrator_hides_think_blocks_with_manager(tmp_path, monkeypatch):
     assert conversation_log.exists()
     log_text = conversation_log.read_text(encoding="utf-8")
     assert "<think>" not in log_text
+
+
+def test_orchestrator_reads_file_via_workspace_tools(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+
+    workspace_module = importlib.reload(importlib.import_module("tools.workspace"))
+    original_root = workspace_module.WORKSPACE_ROOT
+    workspace_module.set_workspace_root(tmp_path)
+
+    desktop = tmp_path / "Desktop"
+    desktop.mkdir()
+    target = desktop / "linux commands.txt"
+    target.write_text("ls -la\npwd\n", encoding="utf-8")
+
+    preflight = workspace_module.search_files("linux commands.txt")
+    assert preflight.get("paths"), "workspace search should locate the staged file"
+    orchestrator_view = orchestrator_module.workspace.search_files("linux commands.txt")
+    assert orchestrator_view.get("paths"), "orchestrator workspace view should locate the staged file"
+
+    identity_settings = {
+        "store_vector_memory": False,
+        "retrieval_top_k": 1,
+        "retrieval_threshold": 0.0,
+        "max_vector_items": 5,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+    }
+
+    tool_events: list[str] = []
+
+    try:
+        tool_script = [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "workspace_read_file",
+                                "arguments": {
+                                    "path": "linux commands.txt",
+                                    "location_hint": "Desktop",
+                                },
+                            }
+                        }
+                    ],
+                }
+            },
+            {"message": {"role": "assistant", "content": "Answer: ls -la\npwd"}},
+        ]
+        llm = DummyLLM(tool_script=tool_script)
+        metrics_path = tmp_path / "metrics_tools.csv"
+        orchestrator = orchestrator_module.MemoryOrchestrator(
+            "Einstein",
+            llm,
+            memory_dir=tmp_path,
+            metrics_path=metrics_path,
+            identity_settings=identity_settings,
+            tooling_enabled=True,
+            tool_logger=tool_events.append,
+        )
+
+        user_prompt = "Hi please tell me what is in the linux commands.txt file on my Desktop"
+        result = orchestrator.run_turn(user_prompt)
+        time.sleep(0.1)
+        orchestrator.close()
+    finally:
+        workspace_module.set_workspace_root(original_root)
+
+    user_calls = [call for call in llm.calls if call.get("text") == user_prompt]
+    assert not user_calls, "LLM should not receive the user prompt when tooling satisfies the request"
+    assert llm.tool_calls and llm.tool_calls[0].get("tool_choice") == "required"
+    assert "ls -la" in result.response_text, f"tool events: {tool_events}"
+    assert any("search_files" in entry for entry in tool_events)
+    assert any("read_file" in entry for entry in tool_events)
+
+
+def test_orchestrator_reads_external_desktop_file(tmp_path, tmp_path_factory, monkeypatch):
+    fake_home = tmp_path_factory.mktemp("fake_home")
+    desktop = fake_home / "Desktop"
+    desktop.mkdir()
+    target = desktop / "linux commands.txt"
+    target.write_text("dir\n", encoding="utf-8")
+
+    if "requests" not in sys.modules:
+        requests_stub = types.SimpleNamespace()
+        requests_stub.exceptions = types.SimpleNamespace(RequestException=RuntimeError)
+        requests_stub.get = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("requests stub invoked"))
+        requests_stub.post = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("requests stub invoked"))
+        sys.modules["requests"] = requests_stub
+        sys.modules["requests.exceptions"] = requests_stub.exceptions
+
+    monkeypatch.setattr(
+        Path,
+        "home",
+        classmethod(lambda cls: fake_home),
+    )
+
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+
+    workspace_module = importlib.reload(importlib.import_module("tools.workspace"))
+    original_root = workspace_module.WORKSPACE_ROOT
+    original_extras = workspace_module.list_additional_roots()
+    workspace_module.set_workspace_root(tmp_path)
+    workspace_module.set_additional_allowed_roots(original_extras)
+
+    identity_settings = {
+        "store_vector_memory": False,
+        "retrieval_top_k": 1,
+        "retrieval_threshold": 0.0,
+        "max_vector_items": 5,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+    }
+
+    tool_events: list[str] = []
+
+    try:
+        workspace_module.register_allowed_root(fake_home)
+        workspace_module.register_allowed_root(desktop)
+
+        tool_script = [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "workspace_read_file",
+                                "arguments": {
+                                    "path": "linux commands.txt",
+                                    "location_hint": "Desktop",
+                                },
+                            }
+                        }
+                    ],
+                }
+            },
+            {"message": {"role": "assistant", "content": "Answer: dir"}},
+        ]
+        llm = DummyLLM(tool_script=tool_script)
+        metrics_path = tmp_path / "metrics_external.csv"
+        orchestrator = orchestrator_module.MemoryOrchestrator(
+            "Einstein",
+            llm,
+            memory_dir=tmp_path,
+            metrics_path=metrics_path,
+            identity_settings=identity_settings,
+            tooling_enabled=True,
+            tool_logger=tool_events.append,
+        )
+
+        user_prompt = "Please tell me the content of linux commands.txt on my Desktop."
+        result = orchestrator.run_turn(user_prompt)
+        time.sleep(0.1)
+        orchestrator.close()
+    finally:
+        workspace_module.set_workspace_root(original_root)
+        workspace_module.set_additional_allowed_roots(original_extras)
+
+    assert "dir" in result.response_text
+    assert not any(call.get("text") == user_prompt for call in llm.calls)
+    assert llm.tool_calls and llm.tool_calls[0].get("tool_choice") == "required"
+    assert any("read_file" in entry for entry in tool_events)
+    assert any("Expanded candidate path" in entry for entry in tool_events)
+
+
+def test_tool_plan_apply_text_patch(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+    workspace_module = importlib.reload(importlib.import_module("tools.workspace"))
+
+    workspace_module.set_workspace_root(tmp_path)
+    target = tmp_path / "notes.txt"
+    target.write_text("alpha\n", encoding="utf-8")
+    original_sha = workspace_module.read_file("notes.txt")["sha256"]
+
+    diff = "\n".join(
+        difflib.unified_diff(
+            ["alpha\n"],
+            ["alpha\n", "beta\n"],
+            fromfile="a/notes.txt",
+            tofile="b/notes.txt",
+            lineterm="",
+        )
+    ) + "\n"
+
+    llm = DummyLLM(["none"])
+    orchestrator = orchestrator_module.MemoryOrchestrator(
+        "PatchTester",
+        llm,
+        memory_dir=tmp_path,
+        metrics_path=tmp_path / "metrics_patch.csv",
+        identity_settings={
+            "store_vector_memory": False,
+            "store_screenshots": False,
+            "retrieval_top_k": 2,
+            "retrieval_threshold": 0.0,
+            "max_vector_items": 5,
+            "vector_ttl_days": None,
+            "pii_redaction": False,
+        },
+        tooling_enabled=True,
+    )
+
+    action = orchestrator_module.ToolAction(
+        kind="apply_text_patch",
+        description="Append beta line",
+        candidate_path="notes.txt",
+        source="llm",
+        parameters={"diff": diff, "expect_sha256": original_sha},
+    )
+
+    results = orchestrator._execute_tool_plan([action])
+    orchestrator.close()
+    workspace_module.set_workspace_root(tmp_path)
+
+    assert results and results[0]["success"]
+    updated = target.read_text(encoding="utf-8")
+    assert updated == "alpha\nbeta\n"
+
+
+def test_llm_tool_flow_applies_patch(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+    workspace_module = importlib.reload(importlib.import_module("tools.workspace"))
+
+    original_root = workspace_module.WORKSPACE_ROOT
+    original_extras = workspace_module.list_additional_roots()
+    workspace_module.set_workspace_root(tmp_path)
+    workspace_module.set_additional_allowed_roots([])
+
+    try:
+        target = tmp_path / "notes.txt"
+        target.write_text("alpha\n", encoding="utf-8")
+        current_sha = workspace_module.read_file("notes.txt")["sha256"]
+
+        diff = "\n".join(
+            difflib.unified_diff(
+                ["alpha\n"],
+                ["alpha\n", "beta\n"],
+                fromfile="a/notes.txt",
+                tofile="b/notes.txt",
+                lineterm="",
+            )
+        ) + "\n"
+
+        tool_script = [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "workspace_apply_text_patch",
+                                "arguments": {
+                                    "path": "notes.txt",
+                                    "diff": diff,
+                                    "expect_sha256": current_sha,
+                                },
+                            }
+                        }
+                    ],
+                }
+            },
+            {"message": {"role": "assistant", "content": "Answer: Done."}},
+        ]
+
+        llm = DummyLLM(tool_script=tool_script)
+        orchestrator = orchestrator_module.MemoryOrchestrator(
+            "Einstein",
+            llm,
+            memory_dir=tmp_path,
+            metrics_path=tmp_path / "metrics_tool_flow.csv",
+            identity_settings={
+                "store_vector_memory": False,
+                "store_screenshots": False,
+                "retrieval_top_k": 2,
+                "retrieval_threshold": 0.0,
+                "max_vector_items": 5,
+                "vector_ttl_days": None,
+                "pii_redaction": False,
+            },
+            tooling_enabled=True,
+        )
+
+        result = orchestrator.run_turn("please append beta to notes.txt")
+        orchestrator.close()
+
+        assert "beta" in target.read_text(encoding="utf-8")
+        assert result.response_text == "Answer: Done."
+        assert len(llm.tool_calls) >= 2, "expected LLM to be invoked again after tool execution"
+        first_payload = llm.tool_calls[0]
+        assert first_payload.get("tool_choice") == "auto"
+        first_messages = first_payload.get("messages", [])
+        assert any(
+            isinstance(msg, dict)
+            and msg.get("role") == "user"
+            and "/no_think" in str(msg.get("content", ""))
+            for msg in first_messages
+        )
+    finally:
+        workspace_module.set_workspace_root(original_root)
+        workspace_module.set_additional_allowed_roots(original_extras)
+
+
+def test_tool_probe_includes_recent_snapshot(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+    workspace_module = importlib.reload(importlib.import_module("tools.workspace"))
+
+    original_root = workspace_module.WORKSPACE_ROOT
+    original_extras = workspace_module.list_additional_roots()
+    workspace_module.set_workspace_root(tmp_path)
+    workspace_module.set_additional_allowed_roots(original_extras)
+
+    try:
+        file_path = tmp_path / "notes.txt"
+        file_path.write_text("alpha\n", encoding="utf-8")
+
+        llm = DummyLLM()
+        orchestrator = orchestrator_module.MemoryOrchestrator(
+            "SnapshotTester",
+            llm,
+            memory_dir=tmp_path,
+            metrics_path=tmp_path / "metrics_snapshot.csv",
+            identity_settings={
+                "store_vector_memory": False,
+                "store_screenshots": False,
+                "retrieval_top_k": 2,
+                "retrieval_threshold": 0.0,
+                "max_vector_items": 5,
+                "vector_ttl_days": None,
+                "pii_redaction": False,
+            },
+            tooling_enabled=True,
+        )
+
+        action = orchestrator_module.ToolAction(
+            kind="read_file",
+            description="Inspect notes",
+            candidate_path="notes.txt",
+            search_term="notes.txt",
+            location_hint=None,
+            source="langgraph",
+            parameters={},
+        )
+
+        orchestrator._execute_tool_plan([action])
+
+        state = {"user_text": "please append beta to that file"}
+        orchestrator._probe_llm_for_tool_actions(state)
+
+        orchestrator.close()
+
+        assert llm.tool_calls, "expected tool probe to contact the LLM"
+        payload = llm.tool_calls[-1]
+        messages = payload.get("messages", [])
+        assert payload.get("tool_choice") == "required"
+        assert any(
+            isinstance(msg, dict)
+            and "Most recent workspace file snapshots" in str(msg.get("content", ""))
+            for msg in messages
+        )
+        assert any(
+            isinstance(msg, dict)
+            and msg.get("role") == "user"
+            and "/no_think" in str(msg.get("content", ""))
+            for msg in messages
+        )
+    finally:
+        workspace_module.set_workspace_root(original_root)
+        workspace_module.set_additional_allowed_roots(original_extras)
+
+
+def test_llm_tool_call_reuses_heuristic_location_hint(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+    workspace_module = importlib.reload(importlib.import_module("tools.workspace"))
+
+    original_root = workspace_module.WORKSPACE_ROOT
+    original_extras = workspace_module.list_additional_roots()
+    workspace_module.set_workspace_root(tmp_path)
+    workspace_module.set_additional_allowed_roots(original_extras)
+
+    fake_home = tmp_path / "home"
+    desktop = fake_home / "Desktop"
+    desktop.mkdir(parents=True)
+    target = desktop / "casings.txt"
+    target.write_text("hello\n", encoding="utf-8")
+
+    tool_events: list[str] = []
+
+    monkeypatch.setattr(orchestrator_module.Path, "home", staticmethod(lambda: fake_home))
+    workspace_module.register_allowed_root(desktop)
+
+    orchestrator = None
+
+    try:
+        llm = DummyLLM()
+        orchestrator = orchestrator_module.MemoryOrchestrator(
+            "Einstein",
+            llm,
+            memory_dir=tmp_path,
+            metrics_path=tmp_path / "metrics_llm_location.csv",
+            identity_settings={
+                "store_vector_memory": False,
+                "store_screenshots": False,
+                "retrieval_top_k": 2,
+                "retrieval_threshold": 0.0,
+                "max_vector_items": 5,
+                "vector_ttl_days": None,
+                "pii_redaction": False,
+            },
+            tooling_enabled=True,
+            tool_logger=tool_events.append,
+        )
+
+        tool_calls = [
+            {
+                "function": {
+                    "name": "workspace_read_file",
+                    "arguments": {"path": "casings.txt"},
+                }
+            }
+        ]
+        actions = orchestrator._actions_from_tool_calls(
+            tool_calls,
+            user_text="please show me casings.txt on my Desktop",
+        )
+
+        assert actions, "expected tool actions to be generated"
+        action = actions[0]
+        assert action.location_hint, "location hint should be inherited from heuristics"
+
+        results = orchestrator._execute_tool_plan(actions)
+        assert results and results[0]["success"], "read should succeed once path is expanded"
+        assert any("Expanded candidate path" in event for event in tool_events)
+    finally:
+        if orchestrator is not None:
+            orchestrator.close()
+        workspace_module.set_workspace_root(original_root)
+        workspace_module.set_additional_allowed_roots(original_extras)
+
+
+def test_tool_router_context_prefers_most_recent_file_for_pronouns(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+    workspace_module = importlib.reload(importlib.import_module("tools.workspace"))
+
+    original_root = workspace_module.WORKSPACE_ROOT
+    original_extras = workspace_module.list_additional_roots()
+    workspace_module.set_workspace_root(tmp_path)
+    workspace_module.set_additional_allowed_roots([])
+
+    (tmp_path / "first.txt").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "second.txt").write_text("bravo\n", encoding="utf-8")
+
+    identity_settings = {
+        "store_vector_memory": False,
+        "store_screenshots": False,
+        "retrieval_top_k": 2,
+        "retrieval_threshold": 0.0,
+        "max_vector_items": 5,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+    }
+
+    orchestrator = None
+    try:
+        orchestrator = orchestrator_module.MemoryOrchestrator(
+            "Einstein",
+            DummyLLM(),
+            memory_dir=tmp_path,
+            metrics_path=tmp_path / "metrics_recent.csv",
+            identity_settings=identity_settings,
+            tooling_enabled=True,
+        )
+
+        read_first = orchestrator_module.ToolAction(
+            kind="read_file",
+            description="Inspect first",
+            candidate_path="first.txt",
+            search_term="first.txt",
+        )
+        read_second = orchestrator_module.ToolAction(
+            kind="read_file",
+            description="Inspect second",
+            candidate_path="second.txt",
+            search_term="second.txt",
+        )
+
+        orchestrator._execute_tool_plan([read_first])
+        orchestrator._execute_tool_plan([read_second])
+
+        context = orchestrator._build_tool_router_context("please append beta to that file")
+        assert context is not None
+        assert "second.txt" in context
+        assert "first.txt" not in context
+    finally:
+        if orchestrator is not None:
+            orchestrator.close()
+        workspace_module.set_workspace_root(original_root)
+        workspace_module.set_additional_allowed_roots(original_extras)
+
+
+def test_directory_listing_heuristic_detects_desktop_request(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+    workspace_module = importlib.reload(importlib.import_module("tools.workspace"))
+
+    original_root = workspace_module.WORKSPACE_ROOT
+    original_extras = workspace_module.list_additional_roots()
+    workspace_module.set_workspace_root(tmp_path)
+    workspace_module.set_additional_allowed_roots([])
+
+    identity_settings = {
+        "store_vector_memory": False,
+        "store_screenshots": False,
+        "retrieval_top_k": 2,
+        "retrieval_threshold": 0.0,
+        "max_vector_items": 5,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+    }
+
+    orchestrator = None
+    try:
+        orchestrator = orchestrator_module.MemoryOrchestrator(
+            "Einstein",
+            DummyLLM(),
+            memory_dir=tmp_path,
+            metrics_path=tmp_path / "metrics_listdir.csv",
+            identity_settings=identity_settings,
+            tooling_enabled=True,
+        )
+
+        actions = orchestrator._plan_tool_actions(
+            {"user_text": "list all the text files on my Desktop"}
+        )
+        assert actions, "expected heuristics to return a list_directory action"
+        action = actions[0]
+        assert action.kind == "list_directory"
+        assert action.source == "langgraph"
+        assert action.parameters.get("extensions") == ["txt"]
+        assert action.candidate_path
+    finally:
+        if orchestrator is not None:
+            orchestrator.close()
+        workspace_module.set_workspace_root(original_root)
+        workspace_module.set_additional_allowed_roots(original_extras)

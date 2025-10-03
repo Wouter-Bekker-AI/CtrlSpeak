@@ -41,7 +41,7 @@ from background_agents.manage_think import ManageThinkAgent, load_manage_think_a
 from background_agents.transcript_cleanup_agent import normalize_transcript
 from tools import keywords, vision
 from tools.message_management import force_plaintext, requires_force_plaintext
-from utils.config_paths import get_logger
+from utils.config_paths import get_data_dir, get_logger
 from utils.image_store import (
     IdentityImageRecord,
     is_image_request,
@@ -52,6 +52,7 @@ from utils.io_atomic import AtomicWriteError, atomic_append_lines
 from utils.memory_lock import IdentityLock, IdentityLockError, probe_lock_path
 from utils.memory_orchestrator import MemoryOrchestrator
 from utils.memory_settings import load_identity_settings
+from utils.memory_paths import get_bot_memory_dir
 
 
 logger = get_logger(__name__)
@@ -240,6 +241,39 @@ def _coerce_int(value, *, context: str) -> Optional[int]:
     return None
 
 
+def _prepare_memory_dir(identity_name: str, configured: Optional[str]) -> Path:
+    default_dir = get_bot_memory_dir(identity_name)
+    if not configured:
+        return default_dir
+    normalized = str(configured).strip()
+    if not normalized:
+        return default_dir
+    replacements = {
+        "{appdata}": str(get_data_dir()),
+        "{data_root}": str(get_data_dir()),
+        "{identity}": identity_name,
+    }
+    expanded = normalized
+    for token, replacement in replacements.items():
+        expanded = expanded.replace(token, replacement)
+    expanded = os.path.expandvars(expanded)
+    candidate = Path(expanded).expanduser()
+    try:
+        resolved = candidate.resolve()
+    except Exception as exc:
+        print(f"-> Failed to resolve memory directory {candidate}: {exc}")
+        return default_dir
+    data_root = get_data_dir().resolve()
+    try:
+        resolved.relative_to(data_root)
+    except ValueError:
+        print(f"-> Memory directory {resolved} must reside under {data_root}; using default.")
+        return default_dir
+    for sub in ("conversation", "screenshots", "chroma", "traces"):
+        (resolved / sub).mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
 def _parse_json_list(raw: Optional[str], *, context: str) -> Optional[List[object]]:
     if not raw:
         return None
@@ -296,17 +330,17 @@ def resolve_identity(args) -> tuple[IdentityProfile, dict]:
     if not system_prompt:
         system_prompt = DEFAULT_SYSTEM_PROMPT
 
-    memory_dir = args.memory_dir or os.getenv("CTRLSPK_BOT_MEMORY_ROOT")
+    memory_setting = (
+        args.memory_dir
+        or os.getenv("CTRLSPK_BOT_MEMORY_ROOT")
+        or config.get("memory_dir")
+    )
     memory_path: Optional[Path] = None
-    if memory_dir:
-        memory_path = Path(memory_dir)
-        try:
-            memory_path = memory_path.expanduser().resolve()
-            for sub in ("conversation", "screenshots", "chroma", "traces"):
-                (memory_path / sub).mkdir(parents=True, exist_ok=True)
-        except Exception as exc:
-            print(f"-> Failed to ensure memory directory {memory_path}: {exc}")
-            memory_path = None
+    try:
+        memory_path = _prepare_memory_dir(identity_name, memory_setting)
+    except Exception as exc:
+        print(f"-> Failed to prepare memory directory: {exc}")
+        memory_path = None
 
     raw_options = config.get("ollama_options")
     ollama_options: Dict[str, object] = {}
@@ -538,6 +572,10 @@ def main():
     identity_settings = load_identity_settings(profile.name)
 
     use_orchestrator = os.getenv("CTRLSPK_USE_LANGGRAPH_MEMORY_ORCHESTRATOR") == "1"
+    forced_tool_orchestrator = False
+    if profile.tool_enabled and not use_orchestrator:
+        use_orchestrator = True
+        forced_tool_orchestrator = True
     metrics_env = os.getenv("CTRLSPK_METRICS_PATH")
     if metrics_env:
         metrics_path = Path(metrics_env).expanduser()
@@ -568,10 +606,14 @@ def main():
                 metrics_path=metrics_path,
                 identity_settings=identity_settings,
                 think_manager=think_agent if profile.hide_think else None,
+                tooling_enabled=profile.tool_enabled,
             )
             _memory_orchestrator = orchestrator
             atexit.register(_shutdown_orchestrator)
-            print("-> LangGraph memory orchestrator enabled.")
+            if forced_tool_orchestrator:
+                print("-> LangGraph memory orchestrator enabled for tooling support.")
+            else:
+                print("-> LangGraph memory orchestrator enabled.")
         except Exception as exc:
             print(f"-> Failed to initialize LangGraph orchestrator: {exc}")
             logger.exception("Failed to initialize LangGraph orchestrator")
