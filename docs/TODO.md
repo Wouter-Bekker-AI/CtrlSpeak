@@ -27,4 +27,5 @@ This living backlog tracks follow-up work the developer wants to schedule for Ct
 - Package and distribute the application through an app store or hosted download site to simplify delivery and onboarding.
 - Provide a sandboxed Python execution service (e.g., Pyodide or Firejail-backed runner) so Einstein can generate and execute short scripts safely when answering complex questions.
 - Expose a user-facing tool registry that lets operators define custom Create/Add tools (with schema validation and permission scopes) that Einstein can discover at runtime.
+- Add a "Send Bug Report" action that packages recent entries from `CtrlSpeak-error.log` and submits them to a configurable support endpoint.
 
