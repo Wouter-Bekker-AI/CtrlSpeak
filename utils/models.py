@@ -13,6 +13,7 @@ import requests
 import platform
 import hashlib
 import importlib
+import warnings
 from datetime import datetime
 from pathlib import Path
 from queue import Empty
@@ -398,7 +399,14 @@ def _import_ctranslate2():
     global _ctranslate2_runtime
     if _ctranslate2_runtime is None:
         configure_cuda_paths()
-        import ctranslate2 as _ctranslate2_module  # noqa: WPS433 - intentional local import
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"pkg_resources is deprecated as an API\..*",
+                category=UserWarning,
+                module="ctranslate2",
+            )
+            import ctranslate2 as _ctranslate2_module  # noqa: WPS433 - intentional local import
 
         _ctranslate2_runtime = _ctranslate2_module
     return _ctranslate2_runtime
@@ -2310,6 +2318,8 @@ def transcribe_local(file_path: str, play_feedback: bool = True, allow_client: b
                 except Exception:
                     logger.exception("Failed to schedule management refresh after local transcription")
         return text or None
+    except ValueError:
+        return None
     except Exception as exc:
         notify_error("Transcription failed", format_exception_details(exc))
         return None

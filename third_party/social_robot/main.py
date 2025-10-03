@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import atexit
+import warnings
 from pathlib import Path
 from typing import Optional, List, Dict, Pattern
 
@@ -16,6 +17,14 @@ from audio.stt import FasterWhisperSTT
 from audio.remote_stt import RemoteSTT
 from audio.tts import KokoroTTS
 from audio.vad import VADListener, VADConfig
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+warnings.filterwarnings(
+    "ignore",
+    message=r"pkg_resources is deprecated as an API\..*",
+    category=UserWarning,
+    module="ctranslate2",
+)
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -124,7 +133,14 @@ except Exception:
 def _detect_whisper_device() -> str:
     """Detects the best available device for ctranslate2 (CUDA or CPU)."""
     try:
-        import ctranslate2
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"pkg_resources is deprecated as an API\..*",
+                category=UserWarning,
+                module="ctranslate2",
+            )
+            import ctranslate2
         if ctranslate2.get_cuda_device_count() > 0:
             return "cuda"
     except Exception:

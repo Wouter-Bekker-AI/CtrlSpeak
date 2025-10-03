@@ -132,7 +132,7 @@ When deploying the combined Client + Server build to a dedicated host, run the f
    ```powershell
    Start-Process -FilePath "$env:USERPROFILE\Desktop\CtrlSpeak-full.exe" -ArgumentList '--auto-setup','client_server' -Wait
    ```
-3. Allow the discovery and API ports through Windows Firewall (adjust the profile if you need different scopes):
+3. Allow the discovery and API ports through Windows Firewall (adjust the profile if you need different scopes). CtrlSpeak starts on TCP **65432** by default, but if Windows blocks that port the app automatically selects the next available port and updates the saved settings—mirror the new port in your firewall rules when that happens:
    ```powershell
    netsh advfirewall firewall add rule name="CtrlSpeak API" dir=in action=allow protocol=TCP localport=65432 profile=private
    netsh advfirewall firewall add rule name="CtrlSpeak API (Public)" dir=in action=allow protocol=TCP localport=65432 profile=public
@@ -144,7 +144,7 @@ When deploying the combined Client + Server build to a dedicated host, run the f
 4. Launch CtrlSpeak normally (double-click the EXE) and confirm the **Manage CtrlSpeak** window reports:
    - Mode: `client_server`
    - Server thread: `Running`
-   - Serving: `<server-IP>:65432`
+   - Serving: `<server-IP>:<port>` (65432 by default; the value reflects any automatic fallback)
 
 After updates you can re-run `--auto-setup client_server` to refresh the installation silently.
 

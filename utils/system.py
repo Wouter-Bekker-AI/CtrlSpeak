@@ -5,6 +5,7 @@ from datetime import datetime
 
 import atexit
 import argparse
+import errno
 import http.client
 import json
 import os
@@ -14,6 +15,7 @@ import tempfile
 import threading
 import time
 import wave
+import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Queue
@@ -48,6 +50,14 @@ def _bootstrap_runtime_environment() -> None:
     from a PyInstaller bundle by pointing to the embedded certifi bundle and by
     keeping all Hugging Face caches inside the CtrlSpeak config directory.
     """
+    os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+    warnings.filterwarnings(
+        "ignore",
+        message=r"pkg_resources is deprecated as an API\..*",
+        category=UserWarning,
+        module="ctranslate2",
+    )
+
     try:
         cfg = get_data_dir()
         hf_root = cfg / "hf-cache"
@@ -1074,6 +1084,13 @@ def handle_transcription_keyword(text: str) -> tuple[bool, str]:
     return True, ""
 
 
+
+class CtrlSpeakHTTPServer(ThreadingHTTPServer):
+    """HTTP server that permits quick reuse of the listening socket."""
+
+    allow_reuse_address = True
+
+
 class TranscriptionRequestHandler(BaseHTTPRequestHandler):
     server_version = "CtrlSpeakServer/1.0"
 
@@ -1145,11 +1162,40 @@ class TranscriptionRequestHandler(BaseHTTPRequestHandler):
 
 # threads/events for server discovery helpers
 server_thread: Optional[threading.Thread] = None
-server_httpd: Optional[ThreadingHTTPServer] = None
+server_httpd: Optional[CtrlSpeakHTTPServer] = None
 broadcast_stop_event = threading.Event()
 discovery_broadcaster: Optional[threading.Thread] = None
 discovery_query_listener: Optional[threading.Thread] = None
 discovery_query_stop_event = threading.Event()
+
+
+def _candidate_server_ports(requested_port: int) -> List[int]:
+    """Return the preferred port followed by fallbacks."""
+
+    candidates: List[int] = [requested_port]
+    for candidate in range(65433, 65443):
+        if candidate != requested_port:
+            candidates.append(candidate)
+    candidates.append(0)  # allow the OS to choose an ephemeral port as a last resort
+    return candidates
+
+
+def _is_permission_error(exc: OSError) -> bool:
+    win_error = getattr(exc, "winerror", None)
+    return win_error == 10013 or exc.errno in {errno.EACCES, 10013}
+
+
+def _is_address_in_use_error(exc: OSError) -> bool:
+    win_error = getattr(exc, "winerror", None)
+    return win_error == 10048 or exc.errno in {errno.EADDRINUSE, 10048}
+
+
+def _describe_port_failure(exc: OSError) -> str:
+    if _is_permission_error(exc):
+        return "Windows blocked access to the port (error 10013). Check firewall and antivirus rules or run CtrlSpeak as administrator."
+    if _is_address_in_use_error(exc):
+        return "Another application is already bound to this port. Close the conflicting program or choose a different port."
+    return exc.strerror or str(exc)
 
 def start_server() -> None:
     global server_thread, server_httpd, discovery_broadcaster, discovery_query_listener, discovery_query_stop_event, last_connected_server
@@ -1162,7 +1208,8 @@ def start_server() -> None:
     with settings_lock:
         port = int(settings.get("server_port", 65432))
         discovery_port = int(settings.get("discovery_port", 54330))
-    logger.info("Starting CtrlSpeak server on port %s (discovery %s)", port, discovery_port)
+    requested_port = port
+    logger.info("Starting CtrlSpeak server on port %s (discovery %s)", requested_port, discovery_port)
     # Ensure transcriber is initialized before starting the server
     from utils.models import initialize_transcriber
     if initialize_transcriber() is None:
@@ -1170,11 +1217,51 @@ def start_server() -> None:
         notify_error("Server startup failed", "Failed to initialize transcription engine.")
         return
 
-    try:
-        server_httpd = ThreadingHTTPServer(("0.0.0.0", port), TranscriptionRequestHandler)
-    except OSError as exc:
-        logger.error("Server startup failed on port %s: %s", port, exc)
-        notify_error("Server startup failed", str(exc)); server_httpd = None; return
+    bind_errors: List[tuple[int, OSError]] = []
+    httpd: Optional[CtrlSpeakHTTPServer] = None
+    for candidate in _candidate_server_ports(requested_port):
+        try:
+            httpd = CtrlSpeakHTTPServer(("0.0.0.0", candidate), TranscriptionRequestHandler)
+        except OSError as exc:
+            bind_errors.append((candidate if candidate != 0 else requested_port, exc))
+            continue
+        else:
+            port = httpd.server_port
+            break
+
+    if httpd is None:
+        if bind_errors:
+            _, first_error = bind_errors[0]
+            message = _describe_port_failure(first_error)
+            logger.error(
+                "Server startup failed on port %s after trying %s candidates: %s",
+                requested_port,
+                len(bind_errors),
+                message,
+            )
+            notify_error("Server startup failed", f"Unable to bind to port {requested_port}: {message}")
+        else:
+            logger.error("Server startup failed: unable to bind HTTP server to any port")
+            notify_error("Server startup failed", "Unable to bind HTTP server to any port.")
+        server_httpd = None
+        return
+
+    server_httpd = httpd
+    if port != requested_port:
+        cause_description = _describe_port_failure(bind_errors[0][1]) if bind_errors else "port unavailable"
+        logger.warning(
+            "Port %s unavailable (%s); CtrlSpeak server switched to port %s",
+            requested_port,
+            cause_description,
+            port,
+        )
+        with settings_lock:
+            settings["server_port"] = port
+            save_settings()
+        notify(
+            f"Server port changed to {port} because {cause_description}",
+            title="CtrlSpeak server port updated",
+        )
     def serve():
         try:
             server_httpd.serve_forever()

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import math
+import os
 import queue
 import threading
 import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
 from pathlib import Path
+
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import pygame
 
