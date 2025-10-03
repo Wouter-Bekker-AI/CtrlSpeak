@@ -15,6 +15,11 @@ import pyaudio
 import requests
 from kokoro_onnx import Kokoro, SAMPLE_RATE
 
+try:
+    from utils.models import configure_cuda_paths
+except Exception:
+    configure_cuda_paths = None
+
 MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
 VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
 MODEL_SHA256 = "7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5"
@@ -205,6 +210,13 @@ class KokoroTTS:
             elif self._onnx_device_id is not None:
                 options.setdefault("device_id", self._onnx_device_id)
             providers = [(provider_name, options)] if options else [provider_name]
+
+        if configure_cuda_paths is not None:
+            try:
+                configure_cuda_paths()
+            except Exception as exc:
+                print("-> Kokoro TTS warning: failed to configure CUDA DLL paths; continuing with defaults.")
+                print(f"   Reason: {exc}")
 
         try:
             import onnxruntime as ort

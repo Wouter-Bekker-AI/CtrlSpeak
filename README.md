@@ -166,7 +166,7 @@ python main.py --automation-flow
 The command performs a staged health-check entirely inside `data_root`:
 
 1. Ensure the default Whisper model is present under `${data_root}/models` (downloading it when missing).
-2. Reuse or install the NVIDIA CUDA runtime stack (nvidia-cuda-runtime-cu12, nvidia-cublas-cu12, nvidia-cudnn-cu12) so the DLLs live under `${data_root}/cuda/12.3` when GPU testing is required.
+2. Reuse or install the NVIDIA CUDA runtime stack (nvidia-cuda-runtime-cu12, nvidia-cublas-cu12, nvidia-cufft-cu12, nvidia-cudnn-cu12) so the DLLs live under `${data_root}/cuda/12.3` when GPU testing is required.
 3. Transcribe `assets/test.wav` on the CPU.
 4. Transcribe the same clip on the GPU using the DLLs staged in `${data_root}/cuda/12.3`.
 5. Simulate each text-injection strategy (direct insert, SendInput paste, clipboard paste, PyAutoGUI typing) and write a consolidated report to `${data_root}/automation/artifacts`.

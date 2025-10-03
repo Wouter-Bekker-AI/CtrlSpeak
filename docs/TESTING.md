@@ -8,7 +8,7 @@ The automation flow is an end-to-end regression harness implemented in `utils/au
 
 ### What it does
 1. **Model staging** - Ensures the default Whisper `small` model is present under `${data_root}/models`, downloading it when missing.
-2. **CUDA reuse/installation** - Copies any existing CUDA wheel assets from the active Python environment into `${data_root}/cuda/12.3`. If the runtime is still not ready it installs the NVIDIA wheels (`nvidia-cuda-runtime-cu12`, `nvidia-cublas-cu12`, `nvidia-cudnn-cu12`) and re-validates them.
+2. **CUDA reuse/installation** - Copies any existing CUDA wheel assets from the active Python environment into `${data_root}/cuda/12.3`. If the runtime is still not ready it installs the NVIDIA wheels (`nvidia-cuda-runtime-cu12`, `nvidia-cublas-cu12`, `nvidia-cufft-cu12`, `nvidia-cudnn-cu12`) and re-validates them.
 3. **CPU transcription check** - Forces the device preference to CPU and transcribes the bundled `assets/test.wav` clip, logging the recognized text.
 4. **GPU transcription check** - Switches to CUDA (if available) and repeats the transcription to confirm GPU inference works end-to-end.
 5. **Artifact export** - Writes a consolidated transcript report to `${data_root}/automation/artifacts/automation_run_YYYYMMDD-HHMMSS.txt` including the canonical transcript and simulated text-injection outputs.
