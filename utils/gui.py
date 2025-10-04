@@ -1784,7 +1784,7 @@ class ManagementWindow:
             if not identities:
                 self._bot_empty_label = ttk.Label(
                     frame,
-                    text="No assistants detected.",
+                    text="No personas detected.",
                     style="Caption.TLabel",
                 )
                 self._bot_empty_label.pack(anchor=tk.W)
@@ -1821,7 +1821,7 @@ class ManagementWindow:
     def _select_identity_and_start_bot(self) -> None:
         from pathlib import Path
 
-        identities_dir = Path(__file__).resolve().parent.parent / "third_party" / "social_robot" / "identities"
+        identities_dir = Path(__file__).resolve().parent.parent / "third_party" / "social_robot" / "personas"
         identities = [d.name for d in identities_dir.iterdir() if d.is_dir()] if identities_dir.exists() else []
 
         if not identities:
@@ -1858,7 +1858,7 @@ class ManagementWindow:
         from pathlib import Path
         import os
 
-        identities_dir = Path(__file__).resolve().parent.parent / "third_party" / "social_robot" / "identities"
+        identities_dir = Path(__file__).resolve().parent.parent / "third_party" / "social_robot" / "personas"
         identities = [d.name for d in identities_dir.iterdir() if d.is_dir()] if identities_dir.exists() else []
 
         if not identities:

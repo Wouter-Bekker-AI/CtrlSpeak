@@ -39,7 +39,7 @@ if not TEST_WAV.is_file():
     raise SystemExit(f"Test WAV not found: {TEST_WAV}")
 
 print("Server is ready. Running remote bot test...")
-response_text = run_bot_test(str(TEST_WAV), stt_url=TRANSCRIBE_URL, identity="assistant")
+response_text = run_bot_test(str(TEST_WAV), stt_url=TRANSCRIBE_URL, identity="vision")
 print(f"Bot's LLM Response: {response_text}")
 
 print("Requesting server shutdown via /kill...")

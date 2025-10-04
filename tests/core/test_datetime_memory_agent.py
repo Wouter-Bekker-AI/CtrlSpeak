@@ -49,9 +49,9 @@ def test_refresh_datetime_memory_populates_and_skips_within_cooldown(tmp_path, m
 
     vector_memory = modules["utils.vector_memory"]
 
-    assert dt_agent.refresh_datetime_memory("assistant") is True
+    assert dt_agent.refresh_datetime_memory("vision") is True
 
-    store = vector_memory.VectorMemoryStore("assistant")
+    store = vector_memory.VectorMemoryStore("vision")
     payload = store.collection.get(include=["metadatas", "documents"])
     documents = payload.get("documents") or []
     metadata = payload.get("metadatas") or []
@@ -62,11 +62,11 @@ def test_refresh_datetime_memory_populates_and_skips_within_cooldown(tmp_path, m
     assert meta["category"] == "temporal_context"
     assert meta["utc_offset"].startswith("UTC+")
 
-    tracker_path = dt_agent._tracker_path("assistant")  # noqa: SLF001 - internal helper for tests
+    tracker_path = dt_agent._tracker_path("vision")  # noqa: SLF001 - internal helper for tests
     tracker = json.loads(tracker_path.read_text(encoding="utf-8"))
     assert tracker["snapshot_hash"] == meta["snapshot_hash"]
 
-    assert dt_agent.refresh_datetime_memory("assistant") is True
+    assert dt_agent.refresh_datetime_memory("vision") is True
     captured = capsys.readouterr()
     assert "already current" in captured.out
     assert store.collection.count() == 1
@@ -79,9 +79,9 @@ def test_refresh_datetime_memory_detects_changes_and_force(tmp_path, monkeypatch
 
     vector_memory = modules["utils.vector_memory"]
 
-    assert dt_agent.refresh_datetime_memory("assistant") is True
+    assert dt_agent.refresh_datetime_memory("vision") is True
 
-    tracker_path = dt_agent._tracker_path("assistant")
+    tracker_path = dt_agent._tracker_path("vision")
     baseline = json.loads(tracker_path.read_text(encoding="utf-8"))
 
     new_utc = utc_now + timedelta(hours=25)
@@ -89,20 +89,20 @@ def test_refresh_datetime_memory_detects_changes_and_force(tmp_path, monkeypatch
     monkeypatch.setattr(dt_agent, "_utc_now", lambda: new_utc)
     monkeypatch.setattr(dt_agent, "_local_now", lambda: new_local)
 
-    assert dt_agent.refresh_datetime_memory("assistant") is True
+    assert dt_agent.refresh_datetime_memory("vision") is True
     captured = capsys.readouterr()
     assert "injecting temporal context" in captured.out.lower()
 
     updated = json.loads(tracker_path.read_text(encoding="utf-8"))
     assert updated["snapshot_hash"] != baseline["snapshot_hash"]
 
-    store = vector_memory.VectorMemoryStore("assistant")
+    store = vector_memory.VectorMemoryStore("vision")
     payload = store.collection.get(include=["metadatas"])
     metadata = payload.get("metadatas") or []
     assert metadata
     hashes = {meta.get("snapshot_hash") for meta in metadata if isinstance(meta, dict)}
     assert updated["snapshot_hash"] in hashes
 
-    assert dt_agent.refresh_datetime_memory("assistant", force=True, reason="test") is True
+    assert dt_agent.refresh_datetime_memory("vision", force=True, reason="test") is True
     forced = capsys.readouterr()
     assert "forced refresh" in forced.out.lower()

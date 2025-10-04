@@ -22,7 +22,7 @@ def _check_writable(path: Path) -> bool:
         return False
 
 
-def run_health_check(identity: str = "default") -> Dict[str, object]:
+def run_health_check(identity: str = "reception") -> Dict[str, object]:
     data_root = get_data_dir()
     config_root = get_config_dir()
     logs_root = get_logs_dir()

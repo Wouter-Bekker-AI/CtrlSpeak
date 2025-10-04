@@ -16,7 +16,7 @@ pytestmark = pytest.mark.core_headless
 
 @pytest.fixture(autouse=True)
 def configure_conversation_keywords():
-    keywords.configure_identity_keywords(["assistant", "default"])
+    keywords.configure_identity_keywords(["vision", "reception"])
     yield
     keywords.configure_identity_keywords([])
 
@@ -51,16 +51,16 @@ def test_hotkey_start_launches_requested_identity(bot_module):
 
     bot_module.start_bot = _start_bot
 
-    handled = system.handle_transcribed_text_from_hotkey("Chat with Assistant")
+    handled = system.handle_transcribed_text_from_hotkey("Chat with Vision")
 
     assert handled is True
-    assert calls == [("start", "assistant")]
+    assert calls == [("start", "vision")]
 
 
 def test_hotkey_start_ignores_active_identity(bot_module):
     calls: list[tuple[str, str | None]] = []
 
-    bot_module.get_active_identity = lambda: "assistant"
+    bot_module.get_active_identity = lambda: "vision"
     bot_module.stop_bot = lambda: calls.append(("stop", None))
 
     def _start_bot(**_kwargs):
@@ -69,7 +69,7 @@ def test_hotkey_start_ignores_active_identity(bot_module):
 
     bot_module.start_bot = _start_bot
 
-    handled = system.handle_transcribed_text_from_hotkey("chat with assistant")
+    handled = system.handle_transcribed_text_from_hotkey("chat with vision")
 
     assert handled is True
     assert calls == []
@@ -78,7 +78,7 @@ def test_hotkey_start_ignores_active_identity(bot_module):
 def test_hotkey_switches_identity_after_stopping_current(bot_module):
     sequence: list[str] = []
 
-    bot_module.get_active_identity = lambda: "assistant"
+    bot_module.get_active_identity = lambda: "vision"
     bot_module.stop_bot = lambda: sequence.append("stop")
 
     def _start_bot(*, identity: str | None = None, **_kwargs) -> bool:
@@ -87,50 +87,50 @@ def test_hotkey_switches_identity_after_stopping_current(bot_module):
 
     bot_module.start_bot = _start_bot
 
-    handled = system.handle_transcribed_text_from_hotkey("chat with default")
+    handled = system.handle_transcribed_text_from_hotkey("chat with reception")
 
     assert handled is True
-    assert sequence == ["stop", "start:default"]
+    assert sequence == ["stop", "start:reception"]
 
 
 def test_hotkey_goodbye_stops_active_identity(bot_module):
     stop_calls: list[str] = []
     start_calls: list[str] = []
 
-    bot_module.get_active_identity = lambda: "assistant"
+    bot_module.get_active_identity = lambda: "vision"
     bot_module.stop_bot = lambda: stop_calls.append("stop")
     bot_module.start_bot = lambda **_kwargs: start_calls.append(_kwargs.get("identity")) or True
 
-    handled = system.handle_transcribed_text_from_hotkey("goodbye assistant")
+    handled = system.handle_transcribed_text_from_hotkey("goodbye vision")
 
     assert handled is True
     assert stop_calls == ["stop"]
     assert start_calls == []
-    assert bot_module.goodbye_calls == ["assistant"]
+    assert bot_module.goodbye_calls == ["vision"]
 
 
 def test_hotkey_goodbye_handles_punctuation(bot_module):
     stop_calls: list[str] = []
 
-    bot_module.get_active_identity = lambda: "assistant"
+    bot_module.get_active_identity = lambda: "vision"
     bot_module.stop_bot = lambda: stop_calls.append("stop")
 
-    handled = system.handle_transcribed_text_from_hotkey("goodbye, assistant!")
+    handled = system.handle_transcribed_text_from_hotkey("goodbye, vision!")
 
     assert handled is True
     assert stop_calls == ["stop"]
-    assert bot_module.goodbye_calls == ["assistant"]
+    assert bot_module.goodbye_calls == ["vision"]
 
 
 def test_hotkey_goodbye_for_other_identity_is_ignored(bot_module):
     stop_calls: list[str] = []
     start_calls: list[str] = []
 
-    bot_module.get_active_identity = lambda: "assistant"
+    bot_module.get_active_identity = lambda: "vision"
     bot_module.stop_bot = lambda: stop_calls.append("stop")
     bot_module.start_bot = lambda **_kwargs: start_calls.append(_kwargs.get("identity")) or True
 
-    handled = system.handle_transcribed_text_from_hotkey("goodbye default")
+    handled = system.handle_transcribed_text_from_hotkey("goodbye reception")
 
     assert handled is True
     assert stop_calls == []
@@ -165,10 +165,10 @@ def test_hotkey_supports_fuzzy_chat(bot_module):
 
     bot_module.start_bot = _start_bot
 
-    handled = system.handle_transcribed_text_from_hotkey("please chat was assistant right now")
+    handled = system.handle_transcribed_text_from_hotkey("please chat was vision right now")
 
     assert handled is True
-    assert start_calls == ["assistant"]
+    assert start_calls == ["vision"]
     assert bot_module.goodbye_calls == []
 
 
@@ -186,7 +186,7 @@ def test_hotkey_normalizes_defunct_identity(bot_module):
     handled = system.handle_transcribed_text_from_hotkey("chat with defunct")
 
     assert handled is True
-    assert start_calls == ["default"]
+    assert start_calls == ["reception"]
     assert bot_module.goodbye_calls == []
 
 
@@ -212,7 +212,7 @@ def test_hotkey_quit_ignored_during_conversation(monkeypatch, bot_module):
     calls: list[str] = []
     goodbye_calls: list[int] = []
 
-    bot_module.get_active_identity = lambda: "assistant"
+    bot_module.get_active_identity = lambda: "vision"
 
     def _request(reason: str = "unspecified") -> None:
         calls.append(reason)
@@ -242,12 +242,12 @@ def test_hotkey_update_documentation_uses_active_identity(monkeypatch, bot_modul
         "background_agents.datetime_memory_agent",
         types.SimpleNamespace(refresh_datetime_memory=lambda *args, **kwargs: True),
     )
-    bot_module.get_active_identity = lambda: "default"
+    bot_module.get_active_identity = lambda: "reception"
 
     handled = system.handle_transcribed_text_from_hotkey("update documentation")
 
     assert handled is True
-    assert calls == [("default", True, "hotkey")]
+    assert calls == [("reception", True, "hotkey")]
 
 
 def test_hotkey_update_datetime_uses_active_identity(monkeypatch, bot_module):
@@ -267,9 +267,9 @@ def test_hotkey_update_datetime_uses_active_identity(monkeypatch, bot_module):
         "background_agents.document_memory_agent",
         types.SimpleNamespace(refresh_document_memory=lambda *args, **kwargs: True),
     )
-    bot_module.get_active_identity = lambda: "assistant"
+    bot_module.get_active_identity = lambda: "vision"
 
     handled = system.handle_transcribed_text_from_hotkey("please update date time now")
 
     assert handled is True
-    assert calls == [("assistant", True, "hotkey")]
+    assert calls == [("vision", True, "hotkey")]

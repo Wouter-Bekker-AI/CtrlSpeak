@@ -76,15 +76,19 @@ def test_iter_keyword_matches_multiple():
 
 
 def test_configure_identity_keywords_registers_conversation_triggers():
-    keywords.configure_identity_keywords(["assistant", "default", "einstein"])
+    keywords.configure_identity_keywords(["vision", "reception", "einstein"])
 
-    start_match = keywords.detect_conversation_start_keyword("please chat with assistant right now")
+    start_match = keywords.detect_conversation_start_keyword("please chat with vision right now")
     assert start_match is not None
-    assert start_match.keyword.payload == "assistant"
+    assert start_match.keyword.payload == "vision"
 
-    end_match = keywords.detect_conversation_end_keyword("goodbye default")
+    reception_match = keywords.detect_conversation_start_keyword("chat with receptionist for me")
+    assert reception_match is not None
+    assert reception_match.keyword.payload == "reception"
+
+    end_match = keywords.detect_conversation_end_keyword("goodbye reception")
     assert end_match is not None
-    assert end_match.keyword.payload == "default"
+    assert end_match.keyword.payload == "reception"
 
     einstein_match = keywords.detect_conversation_start_keyword("chat with einstein for me")
     assert einstein_match is not None
@@ -94,23 +98,23 @@ def test_configure_identity_keywords_registers_conversation_triggers():
 
 
 def test_configure_identity_keywords_handles_duplicates_and_spacing():
-    keywords.configure_identity_keywords(["Assistant", "assistant", "my_helper_bot"])
+    keywords.configure_identity_keywords(["Vision", "vision", "my_helper_bot"])
 
     start_match = keywords.detect_conversation_start_keyword("chat with my helper bot")
     assert start_match is not None
     assert start_match.keyword.payload == "my_helper_bot"
 
-    assert keywords.detect_conversation_end_keyword("goodbye assistant") is not None
+    assert keywords.detect_conversation_end_keyword("goodbye vision") is not None
 
     keywords.configure_identity_keywords([])
 
 
 def test_conversation_keywords_support_fuzzy_variants():
-    keywords.configure_identity_keywords(["assistant"])
+    keywords.configure_identity_keywords(["reception"])
     try:
-        assert keywords.detect_conversation_end_keyword("goodbye, assistant") is not None
-        start_match = keywords.detect_conversation_start_keyword("please chat was assistant today")
+        assert keywords.detect_conversation_end_keyword("goodbye, receptionist") is not None
+        start_match = keywords.detect_conversation_start_keyword("please chat was receptionist today")
         assert start_match is not None
-        assert start_match.keyword.payload == "assistant"
+        assert start_match.keyword.payload == "reception"
     finally:
         keywords.configure_identity_keywords([])

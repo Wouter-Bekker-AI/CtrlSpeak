@@ -1,7 +1,7 @@
 look at my clipboard
 look at my screen
-chat with assistant
-chat with default
+chat with vision
+chat with reception
 chat with einstein
-goodbye assistant
-goodbye default
+goodbye vision
+goodbye reception

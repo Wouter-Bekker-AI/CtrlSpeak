@@ -116,6 +116,11 @@ _CONVERSATION_END_KEYWORDS: tuple[Keyword, ...] = ()
 ALL_KEYWORDS: tuple[Keyword, ...] = VISION_KEYWORDS + MEMORY_KEYWORDS + SYSTEM_KEYWORDS
 
 
+_IDENTITY_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "reception": ("receptionist",),
+}
+
+
 def _identity_tokens(name: str) -> list[str]:
     return [token for token in re.split(r"[_\s]+", name.strip()) if token]
 
@@ -136,31 +141,50 @@ def _build_identity_keywords(identities: Sequence[str]) -> tuple[tuple[Keyword, 
         identity_tokens = _identity_tokens(normalized_payload)
         if not identity_tokens:
             continue
-        pattern_tokens = r"\s+".join(re.escape(token) for token in identity_tokens)
-        fuzzy_identity = " ".join(token.lower() for token in identity_tokens)
+
+        identity_lower = normalized_payload.lower()
+        synonym_tokens: list[list[str]] = []
+        for synonym in _IDENTITY_SYNONYMS.get(identity_lower, ()):  # type: ignore[arg-type]
+            tokens = _identity_tokens(synonym)
+            if tokens:
+                synonym_tokens.append(tokens)
+
+        pattern_variants = [r"\s+".join(re.escape(token) for token in identity_tokens)]
+        pattern_variants.extend(
+            r"\s+".join(re.escape(token) for token in tokens) for tokens in synonym_tokens
+        )
+
+        fuzzy_variants = [" ".join(token.lower() for token in identity_tokens)]
+        fuzzy_variants.extend(" ".join(token.lower() for token in tokens) for tokens in synonym_tokens)
+
+        combined_pattern = "|".join(pattern_variants)
+        start_fuzzy_targets = tuple(f"chat with {variant}" for variant in fuzzy_variants)
 
         start_keywords.append(
             Keyword(
-                name=f"chat_with_{normalized_payload.lower()}",
+                name=f"chat_with_{identity_lower}",
                 pattern=re.compile(
-                    rf"\bchat with\s+(?P<identity>{pattern_tokens})\b",
+                    rf"\bchat with\s+(?P<identity>(?:{combined_pattern}))\b",
                     re.IGNORECASE,
                 ),
                 category="conversation_start",
                 payload=normalized_payload,
-                fuzzy_targets=(f"chat with {fuzzy_identity}",),
+                fuzzy_targets=start_fuzzy_targets,
             )
         )
+
+        end_fuzzy_targets = tuple(f"goodbye {variant}" for variant in fuzzy_variants)
+
         end_keywords.append(
             Keyword(
-                name=f"goodbye_{normalized_payload.lower()}",
+                name=f"goodbye_{identity_lower}",
                 pattern=re.compile(
-                    rf"\bgoodbye\s+(?P<identity>{pattern_tokens})\b",
+                    rf"\bgoodbye\s+(?P<identity>(?:{combined_pattern}))\b",
                     re.IGNORECASE,
                 ),
                 category="conversation_end",
                 payload=normalized_payload,
-                fuzzy_targets=(f"goodbye {fuzzy_identity}",),
+                fuzzy_targets=end_fuzzy_targets,
             )
         )
 

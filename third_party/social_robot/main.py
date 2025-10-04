@@ -68,8 +68,8 @@ from utils.memory_paths import get_bot_memory_dir, get_bot_profile_export_path
 
 logger = get_logger(__name__)
 
-IDENTITIES_ROOT = Path(__file__).resolve().parent / "identities"
-DEFAULT_IDENTITY_NAME = "default"
+PERSONAS_ROOT = Path(__file__).resolve().parent / "personas"
+DEFAULT_IDENTITY_NAME = "reception"
 DEFAULT_SYSTEM_PROMPT = "You are a cheerful robotic companion speaking concisely."
 
 CONVERSATION_MAX_BYTES = 10 * 1024 * 1024
@@ -205,14 +205,14 @@ class IdentityProfile:
 def _resolve_identities_root(arg_value: Optional[str]) -> Path:
     if arg_value:
         return Path(arg_value).expanduser().resolve()
-    return IDENTITIES_ROOT
+    return PERSONAS_ROOT
 
 
 def _list_identity_names(root: Path) -> list[str]:
     try:
         return sorted(p.name for p in root.iterdir() if p.is_dir())
     except Exception as exc:
-        print(f"-> Failed to enumerate identities under {root}: {exc}")
+        print(f"-> Failed to enumerate personas under {root}: {exc}")
         return []
 
 def _load_identity_config(root: Path, name: str) -> tuple[dict, Path]:

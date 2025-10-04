@@ -24,9 +24,9 @@ _DEFAULT_CHARS_PER_CHUNK = 1200
 def _sanitize_identity(identity: str) -> str:
     normalized = (identity or "").strip()
     if not normalized:
-        return "default"
+        return "reception"
     allowed = [ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in normalized]
-    return ("".join(allowed) or "default")[:255]
+    return ("".join(allowed) or "reception")[:255]
 
 
 def _tracker_path(identity: str) -> Path:

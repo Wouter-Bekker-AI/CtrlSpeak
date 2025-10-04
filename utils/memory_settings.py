@@ -27,9 +27,9 @@ DEFAULT_IDENTITY_SETTINGS: Dict[str, Any] = {
 def _sanitize(identity: str) -> str:
     cleaned = (identity or "").strip()
     if not cleaned:
-        return "default"
+        return "reception"
     sanitized = "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in cleaned)
-    return sanitized[:255] or "default"
+    return sanitized[:255] or "reception"
 
 
 def get_identity_settings_dir(identity: str) -> Path:
