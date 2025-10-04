@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 
 class ChatWindow(QWidget):
-    """Simple chat UI for SocialRobot text-first conversations."""
+    """Simple chat UI for SocialRobot voice-first conversations."""
 
     send_text = Signal(str)
     voice_mode_requested = Signal(bool)

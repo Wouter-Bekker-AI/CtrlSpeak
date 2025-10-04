@@ -673,7 +673,7 @@ def main():
     identity_display = _identity_display(profile.name)
 
     chat_window = ChatWindow(identity_display, icon_path=ICON_PATH)
-    chat_window.set_voice_mode(False)
+    chat_window.set_voice_mode(True)
     chat_window.show()
 
     animator_thread: Optional[threading.Thread] = None
@@ -777,6 +777,27 @@ def main():
 
     chat_window.export_profile_requested.connect(_export_profile_snapshot)
 
+    def on_speech_detected(raw_bytes: bytes) -> None:
+        nonlocal vad_listener
+        if vad_listener is None:
+            return
+
+        try:
+            recognized_text = stt_model.run_stt(
+                raw_bytes,
+                sample_rate=vad_listener.sample_rate,
+            )
+        except Exception as exc:
+            # print("STT error:", exc)
+            recognized_text = ""
+
+        with processing_lock:
+            _handle_user_request(
+                recognized_text,
+                source="voice",
+                input_medium="voice",
+            )
+
     def _enable_voice_mode() -> None:
         nonlocal vad_listener, vad_thread, vad_suppressed
         if voice_mode_active.is_set():
@@ -868,6 +889,8 @@ def main():
     chat_window.send_text.connect(_on_text_submitted)
     chat_window.voice_mode_requested.connect(_on_voice_mode_requested)
     chat_window.closed.connect(lambda: shutdown_requested.set())
+
+    _enable_voice_mode()
 
     def _resolve_identity_name(candidate: str) -> Optional[str]:
         if not candidate:
@@ -1440,27 +1463,6 @@ def main():
 
         tts_thread = threading.Thread(target=play_tts_in_thread, daemon=True)
         tts_thread.start()
-
-    def on_speech_detected(raw_bytes: bytes) -> None:
-        nonlocal vad_listener
-        if vad_listener is None:
-            return
-
-        try:
-            recognized_text = stt_model.run_stt(
-                raw_bytes,
-                sample_rate=vad_listener.sample_rate,
-            )
-        except Exception as exc:
-            # print("STT error:", exc)
-            recognized_text = ""
-
-        with processing_lock:
-            _handle_user_request(
-                recognized_text,
-                source="voice",
-                input_medium="voice",
-            )
 
     def _trigger_look_at_screen() -> None:
         if not profile.vision_enabled:
