@@ -26,6 +26,7 @@ class ChatWindow(QWidget):
 
     send_text = Signal(str)
     voice_mode_requested = Signal(bool)
+    export_profile_requested = Signal()
     closed = Signal()
 
     _append_html = Signal(str)
@@ -82,6 +83,13 @@ class ChatWindow(QWidget):
         self._mode_button.setAccessibleName("Toggle microphone mode")
         self._mode_button.clicked.connect(self._on_mode_button_clicked)
         header.addWidget(self._mode_button)
+
+        self._export_button = QPushButton("Export profile")
+        self._export_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._export_button.setToolTip("Save the remembered profile details to disk")
+        self._export_button.setAccessibleName("Export profile snapshot")
+        self._export_button.clicked.connect(self.export_profile_requested.emit)
+        header.addWidget(self._export_button)
 
         layout.addLayout(header)
 

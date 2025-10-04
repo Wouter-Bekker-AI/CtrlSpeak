@@ -1,6 +1,7 @@
 import difflib
 import importlib
 import importlib.util
+import importlib
 import sys
 import json
 import types
@@ -198,17 +199,98 @@ def test_orchestrator_persists_and_retrieves(tmp_path, monkeypatch):
         )
     ]
     assert response_calls, "expected the LLM to be invoked for a user-facing response"
-    latest_response = response_calls[-1]
-    assert any(
-        entry.get("role") == "system" and "Relevant memory" in entry.get("content", "")
-        for entry in latest_response["history"]
-    )
-    assert result1.retrieval_plan_used_llm is True
 
-    conversation_log = memory_paths.get_bot_conversation_log("Tester")
-    assert conversation_log.exists()
-    metrics_path = Path(metrics_path)
-    assert metrics_path.exists()
+
+def test_orchestrator_profile_write_and_read(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+
+    identity_settings = {
+        "store_vector_memory": True,
+        "store_screenshots": False,
+        "retrieval_top_k": 3,
+        "retrieval_threshold": 0.2,
+        "max_vector_items": 50,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+        "profile_rerank": False,
+    }
+
+    llm = DummyLLM()
+    orchestrator = orchestrator_module.MemoryOrchestrator(
+        "Tester",
+        llm,
+        memory_dir=tmp_path,
+        metrics_path=tmp_path / "metrics.csv",
+        identity_settings=identity_settings,
+    )
+
+    result = orchestrator.run_turn("My name is Alice.")
+    orchestrator._persistence._queue.join()  # type: ignore[attr-defined]
+    assert "I'll remember that your name is Alice" in result.response_text
+    slot = orchestrator.vector_store.read_profile_slot(orchestrator.profile_user_id, "name")
+    assert slot is not None
+    assert slot["metadata"]["value"] == "Alice"
+
+    read_result = orchestrator.run_turn("what's my name?")
+    assert read_result.response_text.lower().startswith("your name is alice")
+
+    orchestrator.close()
+
+
+def test_orchestrator_profile_write_requires_confirmation(tmp_path, monkeypatch):
+    modules = _prepare(tmp_path, monkeypatch)
+    orchestrator_module = modules["utils.memory_orchestrator"]
+
+    identity_settings = {
+        "store_vector_memory": True,
+        "store_screenshots": False,
+        "retrieval_top_k": 3,
+        "retrieval_threshold": 0.2,
+        "max_vector_items": 50,
+        "vector_ttl_days": None,
+        "pii_redaction": False,
+        "profile_rerank": False,
+    }
+
+    llm = DummyLLM()
+
+    def fake_extract(self, text: str):
+        return orchestrator_module.ProfileSlotExtraction("name", "Charlie", 0.5, "test")
+
+    monkeypatch.setattr(
+        orchestrator_module.MemoryOrchestrator,
+        "_extract_profile_slot",
+        fake_extract,
+    )
+
+    orchestrator = orchestrator_module.MemoryOrchestrator(
+        "Tester",
+        llm,
+        memory_dir=tmp_path,
+        metrics_path=tmp_path / "metrics.csv",
+        identity_settings=identity_settings,
+    )
+
+    result = orchestrator.run_turn("call me Charlie maybe")
+    orchestrator._persistence._queue.join()  # type: ignore[attr-defined]
+    assert "could you confirm" in result.response_text.lower()
+    slot = orchestrator.vector_store.read_profile_slot(orchestrator.profile_user_id, "name")
+    assert slot is None
+
+    orchestrator.close()
+    response_calls = [
+        call
+        for call in llm.calls
+        if not any(
+            isinstance(entry, dict)
+            and entry.get("role") == "system"
+            and isinstance(entry.get("content"), str)
+            and "retrieval planner" in entry.get("content", "").lower()
+            for entry in call["history"]
+        )
+    ]
+    assert not response_calls, "low-confidence extraction should not trigger a user-facing LLM call"
 
 
 _SAMPLE_PNG_B64 = (

@@ -95,6 +95,106 @@ _CHAT_HISTORY_INTENT_PHRASES = (
 
 
 
+
+PROFILE_CONFIDENCE_THRESHOLD = 0.7
+PROFILE_ATTRIBUTES = {"name", "age", "favorite_sport"}
+_PROFILE_WRITE_PATTERNS = (
+    ("name", re.compile(r"\bmy name is\s+(?P<value>[A-Za-z][A-Za-z\s'\-]{0,60})", re.IGNORECASE)),
+    ("name", re.compile(r"\bi am called\s+(?P<value>[A-Za-z][A-Za-z\s'\-]{0,60})", re.IGNORECASE)),
+    (
+        "age",
+        re.compile(
+            r"\b(?:i am|i'm|my age is)\s+(?P<value>\d{1,3})(?:\s*(?:years? old|yo|yrs? old)\b)?",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "favorite_sport",
+        re.compile(
+            r"\bmy\s+(?:favorite|favourite)\s+sport\s+is\s+(?P<value>[A-Za-z][A-Za-z\s'\-]{0,60})",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
+_PROFILE_READ_PATTERNS = (
+    ("name", re.compile(r"\bwhat(?:'s| is)\s+my\s+name\b", re.IGNORECASE)),
+    ("name", re.compile(r"\bwho\s+am\s+i\b", re.IGNORECASE)),
+    ("age", re.compile(r"\bhow\s+old\s+am\s+i\b", re.IGNORECASE)),
+    ("age", re.compile(r"\bwhat(?:'s| is)\s+my\s+age\b", re.IGNORECASE)),
+    (
+        "favorite_sport",
+        re.compile(
+            r"\bwhat(?:'s| is)\s+my\s+(?:favorite|favourite)\s+sport\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "favorite_sport",
+        re.compile(r"\bdo\s+you\s+remember\s+my\s+(?:favorite|favourite)\s+sport\b", re.IGNORECASE),
+    ),
+)
+
+_PROFILE_GENERAL_PATTERNS = (
+    re.compile(r"\bwhat\s+do\s+you\s+know\s+about\s+me\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+do\s+you\s+remember\s+about\s+me\b", re.IGNORECASE),
+    re.compile(r"\btell\s+me\s+about\s+myself\b", re.IGNORECASE),
+)
+
+_PROFILE_QUERY_TEXT = {
+    "name": "user.name?",
+    "age": "user.age?",
+    "favorite_sport": "user.favorite_sport?",
+    None: "user.profile?",
+}
+
+
+@dataclass
+class ProfileSlotExtraction:
+    attribute: str
+    value: str
+    confidence: float
+    source: str
+
+
+def _clean_profile_value(text: str) -> str:
+    return text.strip().strip(".?!")
+
+
+def _normalize_profile_value(attribute: str, value: str) -> str:
+    cleaned = _clean_profile_value(value)
+    if attribute == "age":
+        digits = re.findall(r"\d+", cleaned)
+        if digits:
+            return digits[0]
+    return cleaned
+
+
+def _regex_profile_extraction(text: str) -> Optional[ProfileSlotExtraction]:
+    for attribute, pattern in _PROFILE_WRITE_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        value = match.groupdict().get("value", "").strip()
+        if not value:
+            continue
+        normalized = _normalize_profile_value(attribute, value)
+        if not normalized:
+            continue
+        return ProfileSlotExtraction(attribute, normalized, 0.95, "regex")
+    return None
+
+
+def _detect_profile_question(text: str) -> Optional[str]:
+    for attribute, pattern in _PROFILE_READ_PATTERNS:
+        if pattern.search(text):
+            return attribute
+    for pattern in _PROFILE_GENERAL_PATTERNS:
+        if pattern.search(text):
+            return None
+    return None
+
+
 def _chat_query_variants(query_text: str) -> list[str]:
     lowered = query_text.lower()
     variants: list[str] = []
@@ -263,6 +363,15 @@ class _TurnState(TypedDict, total=False):
     think_hidden: bool
     think_placeholder: str
     hidden_think: str
+    profile_action: str
+    profile_attribute: str
+    profile_value: str
+    profile_confidence: float
+    profile_source: str
+    profile_confirmation_required: bool
+    profile_updates: List[Dict[str, Any]]
+    profile_results: List[Dict[str, Any]]
+    profile_response: str
 
 
 @dataclass
@@ -294,12 +403,14 @@ class PersistenceTask:
         vector_documents: List[str],
         vector_metadata: List[Dict[str, Any]],
         settings: Dict[str, Any],
+        profile_updates: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         self.correlation_id = correlation_id
         self.entries = entries
         self.vector_documents = vector_documents
         self.vector_metadata = vector_metadata
         self.settings = settings
+        self.profile_updates = list(profile_updates or [])
         self.retries = 0
 
 
@@ -385,17 +496,22 @@ class MemoryPersistenceWorker:
 
     def _flush_vector_store(self, task: PersistenceTask) -> int:
         settings = task.settings
+        evicted = 0
+        for update in task.profile_updates:
+            try:
+                self.vector_store.upsert_profile_slot(**update)
+            except Exception as exc:
+                logger.debug("Profile upsert failed: %s", exc)
         if not settings.get("store_vector_memory", True):
-            return 0
+            return evicted
         documents = task.vector_documents
         if not documents:
-            return 0
+            return evicted
         ttl_days = settings.get("vector_ttl_days")
         try:
             ttl_value = None if ttl_days is None else float(ttl_days)
         except Exception:
             ttl_value = None
-        evicted = 0
         try:
             evicted += self.vector_store.purge_expired()
         except Exception:
@@ -450,6 +566,8 @@ class MemoryOrchestrator:
         self.history: List[dict] = []
         self.tooling_enabled = bool(tooling_enabled)
         self._custom_tool_logger: Optional[Callable[[str], None]] = tool_logger
+        self.profile_user_id = str(self.identity_settings.get("profile_user_id") or "default_user")
+        self.profile_rerank_enabled = bool(self.identity_settings.get("profile_rerank", False))
         self._graph = self._build_graph()
         self._persistence = MemoryPersistenceWorker(
             identity,
@@ -526,6 +644,54 @@ class MemoryOrchestrator:
         """Tool selection is delegated entirely to the LLM."""
         return []
 
+    def _extract_profile_slot(self, text: str) -> Optional[ProfileSlotExtraction]:
+        extraction = _regex_profile_extraction(text)
+        if extraction is not None:
+            return extraction
+        return self._llm_profile_slot(text)
+
+    def _llm_profile_slot(self, text: str) -> Optional[ProfileSlotExtraction]:
+        prompt = (
+            "Extract a user profile fact from the statement if one is clearly provided. "
+            "Allowed attributes: name, age, favorite_sport. Respond with strict JSON "
+            "of the form {\"attribute\": <attribute or null>, \"value\": <value or null>, "
+            "\"confidence\": <0-1 number>}. Return an empty object when no fact is present."
+            f"\nStatement: {text}"
+        )
+        try:
+            response = self.llm_client.query(
+                prompt,
+                history=[{"role": "system", "content": "You produce minimal JSON."}],
+            )
+        except Exception as exc:
+            logger.debug("Profile slot LLM extraction failed: %s", exc)
+            return None
+        payload = str(response).strip()
+        start = payload.find("{")
+        end = payload.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            payload = payload[start : end + 1]
+        try:
+            data = json.loads(payload)
+        except Exception:
+            logger.debug("Profile slot LLM response not valid JSON: %s", payload)
+            return None
+        if not isinstance(data, dict):
+            return None
+        attribute = str(data.get("attribute") or "").strip().lower()
+        value = str(data.get("value") or "").strip()
+        if attribute not in PROFILE_ATTRIBUTES or not value:
+            return None
+        normalized = _normalize_profile_value(attribute, value)
+        if not normalized:
+            return None
+        try:
+            confidence = float(data.get("confidence", 0.0))
+        except Exception:
+            confidence = 0.0
+        confidence = max(0.0, min(confidence, 1.0))
+        return ProfileSlotExtraction(attribute, normalized, confidence, "llm")
+
     def _default_retrieval_plan(self, text: str) -> Dict[str, bool]:
         lowered = text.lower()
         plan = {"documentation": False, "chat_history": False, "date": False}
@@ -595,12 +761,39 @@ class MemoryOrchestrator:
 
     def _node_assess_context(self, state: _TurnState) -> _TurnState:
         query_text = state.get("augmented_text") or state.get("user_text") or ""
+        cleaned_query = force_plaintext(query_text)
+        state["profile_action"] = "none"
+        state["profile_attribute"] = ""
+        state["profile_value"] = ""
+        state["profile_confidence"] = 0.0
+        state["profile_source"] = ""
+        state["profile_confirmation_required"] = False
+        state["profile_updates"] = []
+        state["profile_results"] = []
+        state["profile_response"] = ""
         plan: Dict[str, bool] = {"documentation": False, "chat_history": False, "date": False}
         summary = "none"
         planned = False
         planner_invoked = False
 
-        if query_text.strip():
+        if cleaned_query.strip():
+            extraction = self._extract_profile_slot(cleaned_query)
+            if extraction:
+                state["profile_action"] = "write"
+                state["profile_attribute"] = extraction.attribute
+                state["profile_value"] = extraction.value
+                state["profile_confidence"] = extraction.confidence
+                state["profile_source"] = extraction.source
+                if extraction.confidence < PROFILE_CONFIDENCE_THRESHOLD:
+                    state["profile_confirmation_required"] = True
+            else:
+                question_attribute = _detect_profile_question(cleaned_query)
+                if question_attribute is not None:
+                    state["profile_action"] = "read"
+                    state["profile_attribute"] = question_attribute or ""
+                    state["profile_confidence"] = 1.0
+                    state["profile_source"] = "question"
+
             heuristic_plan = self._default_retrieval_plan(query_text)
             for key, value in heuristic_plan.items():
                 if value:
@@ -632,7 +825,64 @@ class MemoryOrchestrator:
         state["retrieval_plan_used_llm"] = planner_invoked
         return state
 
+    def _handle_profile_read(self, state: _TurnState, query_text: str) -> _TurnState:
+        attribute_key = state.get("profile_attribute") or ""
+        attribute = attribute_key or None
+        canonical_query = _PROFILE_QUERY_TEXT.get(attribute, "user.profile?")
+        results = self.vector_store.query_profile(
+            canonical_query,
+            self.profile_user_id,
+            attribute=attribute,
+            k=3,
+            rerank=self.profile_rerank_enabled,
+        )
+        state["vector_query_attempted"] = True
+        state["vector_query_result_count"] = len(results)
+        state["vector_query_documentation_count"] = 0
+        state["vector_query_temporal_count"] = 0
+        state["retrieved"] = [
+            {"content": item.content, "metadata": item.metadata, "similarity": item.similarity}
+            for item in results
+        ]
+        state["profile_results"] = list(state["retrieved"])
+        friendly_attribute = attribute_key.replace("_", " ") if attribute_key else "profile"
+        if not results:
+            if attribute_key:
+                response = (
+                    f"I don't have your {friendly_attribute} yet. Let me know and I'll remember it."
+                )
+            else:
+                response = (
+                    "I don't have any saved profile details yet. Tell me things like your name, age, or favorite sport and I'll remember them."
+                )
+        else:
+            if attribute_key:
+                top = results[0]
+                value = top.metadata.get("value") or top.metadata.get("Value") or top.content
+                response = f"Your {friendly_attribute} is {value}."
+            else:
+                lines = []
+                for item in results:
+                    meta = item.metadata or {}
+                    attr = str(meta.get("attribute") or "").strip()
+                    value = str(meta.get("value") or "").strip()
+                    if attr in PROFILE_ATTRIBUTES and value:
+                        lines.append(f"- {attr.replace('_', ' ')}: {value}")
+                if lines:
+                    response = "Here is what I have saved about you:\n" + "\n".join(lines)
+                else:
+                    response = "I have a few profile facts saved for you."
+        state["profile_response"] = response
+        state["response_text"] = response
+        state["raw_response_text"] = response
+        state["skip_llm"] = True
+        state.setdefault("metrics", {})
+        return state
+
     def _node_retrieve(self, state: _TurnState) -> _TurnState:
+        if state.get("profile_action") == "read":
+            query_text = state.get("augmented_text") or state.get("user_text") or ""
+            return self._handle_profile_read(state, query_text)
         threshold = float(self.identity_settings.get("retrieval_threshold", 0.75))
         top_k = int(self.identity_settings.get("retrieval_top_k", 5))
         query_text = state.get("augmented_text") or state.get("user_text") or ""
@@ -1225,6 +1475,20 @@ class MemoryOrchestrator:
         return None
 
     def _node_llm(self, state: _TurnState) -> _TurnState:
+        if state.get("profile_action") == "write":
+            attribute = (state.get("profile_attribute") or "").strip()
+            value = (state.get("profile_value") or "").strip()
+            if attribute and value:
+                friendly = attribute.replace("_", " ")
+                if state.get("profile_confirmation_required"):
+                    response = f"I heard your {friendly} might be {value}. Could you confirm?"
+                else:
+                    response = f"Got it! I'll remember that your {friendly} is {value}."
+                state["profile_response"] = response
+                state["response_text"] = response
+                state["raw_response_text"] = response
+                state["skip_llm"] = True
+                return state
         if state.get("skip_llm"):
             if "raw_response_text" not in state:
                 state["raw_response_text"] = state.get("response_text", "")
@@ -1261,6 +1525,23 @@ class MemoryOrchestrator:
         self.history.extend(entries)
         vector_documents = []
         vector_metadata = []
+        profile_updates: List[Dict[str, Any]] = []
+        if (
+            state.get("profile_action") == "write"
+            and not state.get("profile_confirmation_required")
+        ):
+            attribute = (state.get("profile_attribute") or "").strip()
+            value = (state.get("profile_value") or "").strip()
+            if attribute and value:
+                profile_updates.append(
+                    {
+                        "user_id": self.profile_user_id,
+                        "attribute": attribute,
+                        "value": value,
+                        "source": state.get("profile_source") or "user_statement",
+                    }
+                )
+        state["profile_updates"] = profile_updates
 
         user_entry = strip_emoji(user_text) if user_text else ""
         if user_entry:
@@ -1281,6 +1562,7 @@ class MemoryOrchestrator:
             vector_documents=vector_documents,
             vector_metadata=vector_metadata,
             settings=self.identity_settings,
+            profile_updates=profile_updates,
         )
         self._persistence.enqueue(task)
         return state

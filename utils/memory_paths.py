@@ -15,6 +15,7 @@ _CHROMA_DIR = "chroma"
 _TRACES_DIR = "traces"
 _LOCKS_DIR = ".locks"
 _CONVERSATION_LOG = "conversation.jsonl"
+_PROFILE_EXPORT = "profile_snapshot.json"
 
 
 def _sanitize_identity(identity: str) -> str:
@@ -56,3 +57,7 @@ def get_identity_lock_path(identity: str) -> Path:
     root = get_data_dir() / _LOCKS_DIR
     root.mkdir(parents=True, exist_ok=True)
     return root / f"{_sanitize_identity(identity)}.lock"
+
+
+def get_bot_profile_export_path(identity: str) -> Path:
+    return get_bot_memory_dir(identity) / _PROFILE_EXPORT

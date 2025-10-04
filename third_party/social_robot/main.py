@@ -10,6 +10,7 @@ import tempfile
 import threading
 import atexit
 import warnings
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Pattern
 
@@ -58,11 +59,11 @@ from utils.image_store import (
     load_identity_image,
     write_identity_image_from_base64,
 )
-from utils.io_atomic import AtomicWriteError, atomic_append_lines
+from utils.io_atomic import AtomicWriteError, atomic_append_lines, atomic_write_text
 from utils.memory_lock import IdentityLock, IdentityLockError, probe_lock_path
 from utils.memory_orchestrator import MemoryOrchestrator
 from utils.memory_settings import load_identity_settings
-from utils.memory_paths import get_bot_memory_dir
+from utils.memory_paths import get_bot_memory_dir, get_bot_profile_export_path
 
 
 logger = get_logger(__name__)
@@ -737,6 +738,43 @@ def main():
     def _suspend_animator() -> None:
         if isinstance(animator, LogoAnimator):
             animator.hide_widget()
+
+    def _export_profile_snapshot() -> None:
+        orchestrator = _memory_orchestrator
+        if orchestrator is None:
+            chat_window.append_status_message("Memory", "Profile export unavailable; memory offline.")
+            return
+        try:
+            slots = orchestrator.vector_store.read_all_profile(orchestrator.profile_user_id)
+        except Exception:
+            logger.exception("Failed to read profile slots for export")
+            chat_window.append_status_message("Memory", "Failed to read profile slots.")
+            return
+        payload = {
+            "identity": profile.name,
+            "user_id": orchestrator.profile_user_id,
+            "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "slots": [
+                {
+                    "attribute": (entry.get("metadata") or {}).get("attribute"),
+                    "value": (entry.get("metadata") or {}).get("value"),
+                    "status": (entry.get("metadata") or {}).get("status", "current"),
+                }
+                for entry in slots
+                if isinstance(entry, dict)
+            ],
+        }
+        export_path = get_bot_profile_export_path(profile.name)
+        try:
+            export_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(export_path, json.dumps(payload, indent=2, ensure_ascii=False))
+        except Exception:
+            logger.exception("Failed to write profile snapshot")
+            chat_window.append_status_message("Memory", "Failed to export profile snapshot.")
+            return
+        chat_window.append_status_message("Memory", f"Profile exported to {export_path}")
+
+    chat_window.export_profile_requested.connect(_export_profile_snapshot)
 
     def _enable_voice_mode() -> None:
         nonlocal vad_listener, vad_thread
