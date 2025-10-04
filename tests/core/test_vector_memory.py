@@ -63,7 +63,7 @@ def test_vector_memory_retrieval_threshold(tmp_path, monkeypatch):
     modules = _prepare(tmp_path, monkeypatch)
     vector_memory = modules["utils.vector_memory"]
 
-    store = vector_memory.VectorMemoryStore("Assistant")
+    store = vector_memory.VectorMemoryStore("Vision")
     store.add_memories(["hello world"], metadata=[{"role": "user"}])
 
     no_hits = store.retrieve("something unrelated", top_k=5, threshold=0.95)
@@ -77,9 +77,9 @@ def test_vector_memory_documentation_fallback(tmp_path, monkeypatch):
     modules = _prepare(tmp_path, monkeypatch)
     vector_memory = modules["utils.vector_memory"]
 
-    store = vector_memory.VectorMemoryStore("Assistant")
+    store = vector_memory.VectorMemoryStore("Vision")
     store.add_memories(
-        ["Press Chat with Bot in the management window to launch the assistant."],
+        ["Press Chat with Bot in the management window to launch Vision."],
         metadata=[
             {
                 "category": "documentation",
@@ -107,7 +107,7 @@ def test_vector_memory_retrieve_scoped_queries(tmp_path, monkeypatch):
     modules = _prepare(tmp_path, monkeypatch)
     vector_memory = modules["utils.vector_memory"]
 
-    store = vector_memory.VectorMemoryStore("Assistant")
+    store = vector_memory.VectorMemoryStore("Vision")
 
     monkeypatch.setattr(store, "count", lambda: 5)
 
@@ -118,7 +118,7 @@ def test_vector_memory_retrieve_scoped_queries(tmp_path, monkeypatch):
         if where is None:
             return {
                 "documents": [[
-                    "Launch the assistant from the management window.",
+                    "Launch Vision from the management window.",
                     "Documentation filler entry.",
                 ]],
                 "metadatas": [[

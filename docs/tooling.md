@@ -95,7 +95,7 @@ The keyword registry keeps voice and command triggers in one place so assistants
 
 | Function | Purpose |
 | --- | --- |
-| `configure_identity_keywords(identities: Iterable[str]) -> None` | Populates conversation keywords (for example, “chat with assistant”) using the available identity folder names. Must be called whenever the identity roster changes so voice triggers stay in sync. |
+| `configure_identity_keywords(identities: Iterable[str]) -> None` | Populates conversation keywords (for example, “chat with vision”) using the available identity folder names. Must be called whenever the identity roster changes so voice triggers stay in sync. |
 | `detect_vision_keyword(text: str) -> Optional[KeywordMatch]` | Returns the first vision keyword matched in `text`, or `None` when no trigger is present. |
 | `detect_conversation_start_keyword(text: str) -> Optional[KeywordMatch]` | Detects `chat with <identity>` requests and returns the matching keyword metadata. |
 | `detect_conversation_end_keyword(text: str) -> Optional[KeywordMatch]` | Detects `goodbye <identity>` requests for the active conversation. |
@@ -118,7 +118,7 @@ if match:
         handle_screen()
 ```
 
-SocialRobot consumes this module to decide whether the user asked for a screenshot or clipboard capture and to switch between identities when the user says “chat with assistant/default.” The CtrlSpeak transcription server inspects the same registry before forwarding speech to SocialRobot so both “chat with …” and “goodbye …” requests are handled in the parent process. This keeps shutdowns and relaunches consistent with the tray and hotkey controls. When you add new keywords, update the relevant identity system prompts (so assistants know which phrases to suggest) and refresh any UX documentation that references the trigger vocabulary.
+SocialRobot consumes this module to decide whether the user asked for a screenshot or clipboard capture and to switch between identities when the user says “chat with Vision/Reception.” The CtrlSpeak transcription server inspects the same registry before forwarding speech to SocialRobot so both “chat with …” and “goodbye …” requests are handled in the parent process. This keeps shutdowns and relaunches consistent with the tray and hotkey controls. When you add new keywords, update the relevant identity system prompts (so assistants know which phrases to suggest) and refresh any UX documentation that references the trigger vocabulary.
 
 ### Keyword reference
 
@@ -128,11 +128,11 @@ The application responds to the following spoken or typed keywords. Each phrase 
 | --- | --- | --- |
 | `look at my screen` | Vision | Capture the user’s current desktop, store it as the identity’s latest image, and play the camera shutter sound. |
 | `look at my clipboard` (including close variants like “look at my slipboard”) | Vision | Read the latest image from the system clipboard, replace the identity’s stored image, and play the camera shutter sound. |
-| `update documentation` (also accepts “refresh documentation”) | Memory maintenance | Force a documentation-ingestion pass for the active identity (assistant, Einstein, or default), bypassing the 24-hour cooldown. |
+| `update documentation` (also accepts “refresh documentation”) | Memory maintenance | Force a documentation-ingestion pass for the active identity (Vision, Einstein, or Reception), bypassing the 24-hour cooldown. |
 | `update datetime` (accepts “update date time” or “refresh date time”) | Memory maintenance | Force the active identity to store the latest local date, timezone, and locale snapshot in vector memory, bypassing the 24-hour cooldown. |
 | `chat with <identity>` | Conversation start | Relaunch the bot using the requested identity via the transcription server (ignored if that identity is already active). |
 | `goodbye <identity>` | Conversation end | Play a farewell in the active persona’s voice and then shut down the conversation from the CtrlSpeak main process. |
-| `quit control speak` | System | From the Lobby stage, speaks “goodbye” with the default receptionist voice before shutting down CtrlSpeak (ignored while a conversation is active). |
+| `quit control speak` | System | From the Lobby stage, speaks “goodbye” with the Reception persona’s voice before shutting down CtrlSpeak (ignored while a conversation is active). |
 
 > **Note:** SocialRobot’s text chat window no longer treats typed “goodbye <identity>” phrases as keywords. Those messages are delivered to the bot verbatim; only spoken requests (or ones injected through the stdin control channel) trigger the shutdown helpers.
 
@@ -140,12 +140,12 @@ The application responds to the following spoken or typed keywords. Each phrase 
 
 `configure_identity_keywords()` keeps the voice trigger list synchronized with the identity folders. Once configured, the helpers recognize:
 
-- `chat with <identity>` – immediately relaunches SocialRobot with the requested identity via the transcription server (no action is taken when the user asks for the already-active persona). Close variants like “chat was assistant” are recognised automatically.
-- `goodbye <identity>` – immediately ends the current conversation, first speaking a “goodbye” line with the active persona’s voice before the CtrlSpeak main process shuts the bot down. Light punctuation (for example, “goodbye, assistant”) remains valid.
+- `chat with <identity>` – immediately relaunches SocialRobot with the requested identity via the transcription server (no action is taken when the user asks for the already-active persona). Close variants like “chat was vision” or “chat was receptionist” are recognised automatically.
+- `goodbye <identity>` – immediately ends the current conversation, first speaking a “goodbye” line with the active persona’s voice before the CtrlSpeak main process shuts the bot down. Light punctuation (for example, “goodbye, vision” or “goodbye receptionist”) remains valid.
 
-The `<identity>` placeholder uses the directory names under `third_party/social_robot/identities/`. Call `configure_identity_keywords()` whenever you add or remove identities (for example, during application startup) to keep the registry current.
+The `<identity>` placeholder uses the directory names under `third_party/social_robot/personas/`. Call `configure_identity_keywords()` whenever you add or remove identities (for example, during application startup) to keep the registry current.
 
-The same registry now powers the push-to-talk workflow: when the user holds the right Ctrl hotkey, CtrlSpeak transcribes the utterance and checks it against these keywords before typing anything. Phrases like “chat with assistant” launch the corresponding bot immediately, “chat with default” first stops any existing session before starting the default identity, and “goodbye <identity>” routes through the same shutdown helper used by the tray menu. Because the text insertion path never runs for handled keywords, make sure any new phrases you add here have matching automation hooks so the hotkey and transcription server remain in sync with voice-triggered behaviour.
+The same registry now powers the push-to-talk workflow: when the user holds the right Ctrl hotkey, CtrlSpeak transcribes the utterance and checks it against these keywords before typing anything. Phrases like “chat with vision” launch the corresponding bot immediately, “chat with reception” first stops any existing session before starting the Reception persona, and “goodbye <identity>” routes through the same shutdown helper used by the tray menu. Because the text insertion path never runs for handled keywords, make sure any new phrases you add here have matching automation hooks so the hotkey and transcription server remain in sync with voice-triggered behaviour.
 
 ## Transcript cleanup background agent (`background_agents/transcript_cleanup_agent/`)
 
@@ -215,7 +215,7 @@ Maintaining `docs/tooling.md` keeps CtrlSpeak’s tooling surface discoverable a
 
 ## Documentation ingestion helper (`background_agents/document_memory_agent.py`)
 
-CtrlSpeak preloads Markdown documentation into vector memory so the assistant, Einstein, and default identities always have the latest reference material before a conversation starts. The `refresh_document_memory(identity, *, force=False, reason=None)` helper orchestrates the workflow:
+CtrlSpeak preloads Markdown documentation into vector memory so the Vision, Einstein, and Reception identities always have the latest reference material before a conversation starts. The `refresh_document_memory(identity, *, force=False, reason=None)` helper orchestrates the workflow:
 
 - Gathers `README.md` plus the curated user-facing documents `docs/bot_integration.md`, `docs/tooling.md`, and `docs/user_flow.md`, hashing the combined content to detect changes between runs.
 - Chunks each source into ~1.2 kB segments, tagging metadata with `category="documentation"`, the relative `source` path, a `chunk` counter, and the shared `doc_hash`.
@@ -224,7 +224,7 @@ CtrlSpeak preloads Markdown documentation into vector memory so the assistant, E
 - Records the latest refresh timestamp and `doc_hash` in `${data_root}/doc_memory/<identity>.json`, enforcing a 24-hour cooldown unless the hash changes or a forced refresh is requested.
 - Emits status messages only to the terminal (never the chat UI) so operators know when the background pass runs and how many chunks landed in the store.
 
-Use this helper when gating assistant, Einstein, or default start-up or responding to the `update documentation` keyword. The tracker file under AppData keeps repeated launches quick when the docs have not changed.
+Use this helper when gating Vision, Einstein, or Reception start-up or responding to the `update documentation` keyword. The tracker file under AppData keeps repeated launches quick when the docs have not changed.
 
 Before any retrieval runs, the LangGraph orchestrator applies lightweight heuristics to the user text to decide which context buckets are required. The heuristics cover documentation (instruction manuals and CtrlSpeak usage notes), chat history (personal conversation memories), and temporal context (current date/time). When they trigger, the resulting plan is used immediately without calling the LLM. Only when the heuristics return an empty plan does the orchestrator ask the planner prompt to choose between `documentation`, `chat_history`, `date`, or `none`; the final decision ORs the heuristic guess with any LLM suggestion so guidance-driven requests still bias toward documentation even if the model stays silent. For Einstein, that fallback planner prompt automatically appends `/no_think` so Qwen3 returns a terse bucket selection without emitting a `<think>` block. A `none` outcome skips the vector store entirely, while any other choice constrains retrieval to the requested categories so documentation and temporal snippets are injected only when relevant. Retrieved snippets surface inside a system message headed `Documentation excerpts`, signalling to the bundled personas that those passages come from the official docs and should be quoted verbatim when guiding users. Each turn also prints a `[Memory]` line that now records the requested plan, whether the heuristics or the LLM produced it (`method=heuristic` or `method=llm`), and how many documentation and temporal-context chunks contributed, giving operators immediate feedback that the ingest pipeline is feeding the conversation.
 
@@ -232,7 +232,7 @@ The documentation embeddings (and all other vector memories) use the determinist
 
 ## Date/time context helper (`background_agents/datetime_memory_agent.py`)
 
-Alongside documentation, CtrlSpeak primes each identity with a snapshot of the host’s current date, timezone, and locale data so the assistant can answer questions like “what day is it?” without re-querying the operating system. `refresh_datetime_memory(identity, *, force=False, reason=None)` orchestrates the workflow:
+Alongside documentation, CtrlSpeak primes each identity with a snapshot of the host’s current date, timezone, and locale data so Vision can answer questions like “what day is it?” without re-querying the operating system. `refresh_datetime_memory(identity, *, force=False, reason=None)` orchestrates the workflow:
 
 - Collects the local date (`YYYY-MM-DD` plus weekday and month names), the timezone abbreviation and UTC offset, and any locale or country code detectable from the OS environment.
 - Serialises the snapshot into a single vector-memory chunk tagged with `category="temporal_context"`, `kind="current_date"`, and a `snapshot_hash` so duplicates can be detected.
@@ -240,4 +240,4 @@ Alongside documentation, CtrlSpeak primes each identity with a snapshot of the h
 - Records the refresh timestamp and `snapshot_hash` under `${data_root}/datetime_memory/<identity>.json`, enforcing a 24-hour cooldown unless the data changes or a forced refresh is requested.
 - Emits terminal-only status updates such as “Date/time injection complete…” while keeping the GUI silent.
 
-The helper runs automatically for the assistant, Einstein, and default personas during startup, meaning a session never opens before both documentation and temporal context are current. Operators can force the refresh at any time via the `update datetime` keyword (including the fuzzy variant “update date time”) from the hotkey workflow or within an active SocialRobot session. Any user question that references the current date, time, day, or timezone automatically lowers the retrieval threshold for the temporal chunk, prompting the orchestrator to attach a `Temporal context` system message that contains the stored snapshot so the personas can answer directly.
+The helper runs automatically for the Vision, Einstein, and Reception personas during startup, meaning a session never opens before both documentation and temporal context are current. Operators can force the refresh at any time via the `update datetime` keyword (including the fuzzy variant “update date time”) from the hotkey workflow or within an active SocialRobot session. Any user question that references the current date, time, day, or timezone automatically lowers the retrieval threshold for the temporal chunk, prompting the orchestrator to attach a `Temporal context` system message that contains the stored snapshot so the personas can answer directly.

@@ -47,9 +47,9 @@ def test_refresh_document_memory_populates_and_skips_within_cooldown(tmp_path, m
     modules, doc_agent, _ = _prepare_environment(tmp_path, monkeypatch)
     vector_memory = modules["utils.vector_memory"]
 
-    assert doc_agent.refresh_document_memory("assistant") is True
+    assert doc_agent.refresh_document_memory("vision") is True
 
-    store = vector_memory.VectorMemoryStore("assistant")
+    store = vector_memory.VectorMemoryStore("vision")
     payload = store.collection.get(include=["metadatas", "documents"])
     raw_documents = payload.get("documents") or []
     raw_metadata = payload.get("metadatas") or []
@@ -63,12 +63,12 @@ def test_refresh_document_memory_populates_and_skips_within_cooldown(tmp_path, m
     assert len(documents) == len(metadata)
     assert {entry.get("category") for entry in metadata} == {"documentation"}
 
-    tracker_path = doc_agent._tracker_path("assistant")  # noqa: SLF001 - internal helper for tests
+    tracker_path = doc_agent._tracker_path("vision")  # noqa: SLF001 - internal helper for tests
     tracker_data = json.loads(tracker_path.read_text(encoding="utf-8"))
     assert tracker_data["doc_hash"] == metadata[0]["doc_hash"]
 
     doc_count = store.collection.count()
-    assert doc_agent.refresh_document_memory("assistant") is True
+    assert doc_agent.refresh_document_memory("vision") is True
     captured = capsys.readouterr()
     assert "already current" in captured.out
     assert store.collection.count() == doc_count
@@ -78,8 +78,8 @@ def test_refresh_document_memory_detects_changes_and_force(tmp_path, monkeypatch
     modules, doc_agent, app_base = _prepare_environment(tmp_path, monkeypatch)
     vector_memory = modules["utils.vector_memory"]
 
-    assert doc_agent.refresh_document_memory("assistant") is True
-    tracker_path = doc_agent._tracker_path("assistant")
+    assert doc_agent.refresh_document_memory("vision") is True
+    tracker_path = doc_agent._tracker_path("vision")
     baseline = json.loads(tracker_path.read_text(encoding="utf-8"))
     initial_hash = baseline["doc_hash"]
 
@@ -89,14 +89,14 @@ def test_refresh_document_memory_detects_changes_and_force(tmp_path, monkeypatch
         encoding="utf-8",
     )
 
-    assert doc_agent.refresh_document_memory("assistant") is True
+    assert doc_agent.refresh_document_memory("vision") is True
     captured = capsys.readouterr()
     assert "injecting documentation" in captured.out.lower()
 
     updated = json.loads(tracker_path.read_text(encoding="utf-8"))
     assert updated["doc_hash"] != initial_hash
 
-    store = vector_memory.VectorMemoryStore("assistant")
+    store = vector_memory.VectorMemoryStore("vision")
     payload = store.collection.get(include=["metadatas"])
     metadata = [
         meta
@@ -106,6 +106,6 @@ def test_refresh_document_memory_detects_changes_and_force(tmp_path, monkeypatch
     assert metadata, "expected documentation metadata after update"
     assert {entry.get("doc_hash") for entry in metadata} == {updated["doc_hash"]}
 
-    assert doc_agent.refresh_document_memory("assistant", force=True, reason="test") is True
+    assert doc_agent.refresh_document_memory("vision", force=True, reason="test") is True
     forced = capsys.readouterr()
     assert "forced refresh" in forced.out.lower()

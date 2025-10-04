@@ -39,7 +39,7 @@ def test_transcript_cleanup_agent_rewrites_common_variant():
 def test_normalize_transcript_corrects_chat_with_defunct():
     result = normalize_transcript("could you chat with defunct this instant")
 
-    assert result.text == "could you chat with default this instant"
+    assert result.text == "could you chat with reception this instant"
     assert any(
         correction.reason.startswith("variant:") or correction.reason.startswith("fuzzy:")
         for correction in result.corrections

@@ -280,7 +280,7 @@ def _resolve_identity_tts_settings(
 
 
 def _speak_lobby_goodbye() -> None:
-    """Play a goodbye message using the default identity's voice."""
+    """Play a goodbye message using the reception persona's voice."""
 
     try:
         from third_party.social_robot.audio.tts import KokoroTTS
@@ -289,7 +289,7 @@ def _speak_lobby_goodbye() -> None:
         return
 
     voice_name, kwargs = _resolve_identity_tts_settings(
-        "default", fallback_voice="af_heart", log_context="lobby goodbye"
+        "reception", fallback_voice="af_heart", log_context="lobby goodbye"
     )
 
     try:
@@ -891,7 +891,7 @@ def handle_transcribed_text_from_hotkey(text: str) -> bool:
 
     maintenance_match = keywords.detect_memory_refresh_keyword(normalized)
     if maintenance_match:
-        target_identity = bot_integration.get_active_identity() or "assistant"
+        target_identity = bot_integration.get_active_identity() or "vision"
         payload = maintenance_match.keyword.payload.lower()
         if payload == "datetime":
             prefix = "[DateTimeMemory]"
@@ -1764,7 +1764,7 @@ def parse_cli_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--automation-flow", action="store_true", help="Run the automated end-to-end regression workflow")
     parser.add_argument("--start-server-only", action="store_true", help="Start the CtrlSpeak server and keep it running (for programmatic testing).")
     parser.add_argument("--health", action="store_true", help="Run CtrlSpeak health diagnostics and exit")
-    parser.add_argument("--health-identity", default="default", help="Identity to probe during health diagnostics")
+    parser.add_argument("--health-identity", default="reception", help="Identity to probe during health diagnostics")
     args, _ = parser.parse_known_args(argv[1:])
     return args
 
