@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """LangGraph-based memory orchestrator for SocialRobot."""
 from __future__ import annotations
 
@@ -276,7 +276,7 @@ TOOL_RESPONSE_CHAR_LIMIT = 4000
 
 _TOOL_EXECUTION_GUARD = (
     "You have access to the goose_tool_query function. Use it for any filesystem or execution task by describing the request in natural language. "
-    "Return a tool call whenever the user asks you to inspect, modify, search, list, or run files. Do not fabricate resultsÃ¢â‚¬â€let the tool perform the work."
+    "Return a tool call whenever the user asks you to inspect, modify, search, list, or run files. Do not fabricate results—let the tool perform the work."
 )
 
 _GOOSE_TOOL_SCHEMA: List[Dict[str, Any]] = [
@@ -638,7 +638,7 @@ class MemoryOrchestrator:
         cleaned = value.replace("\n", " ").strip()
         if len(cleaned) <= limit:
             return cleaned
-        return cleaned[: limit - 1].rstrip() + "â€¦"
+        return cleaned[: limit - 1].rstrip() + "…"
 
     def _plan_tool_actions(self, state: _TurnState) -> List[ToolAction]:
         """Tool selection is delegated entirely to the LLM."""
@@ -1100,7 +1100,7 @@ class MemoryOrchestrator:
 
             preview = prompt_value.replace("\n", " ")
             if len(preview) > 60:
-                preview = preview[:57].rstrip() + "â€¦"
+                preview = preview[:57].rstrip() + "…"
             description = f"Goose query: {preview}"
             actions.append(
                 ToolAction(
@@ -1639,7 +1639,7 @@ class MemoryOrchestrator:
         if len(normalized) <= TOOL_RESPONSE_CHAR_LIMIT:
             return normalized
         truncated = normalized[:TOOL_RESPONSE_CHAR_LIMIT].rstrip()
-        return f"{truncated}\nâ€¦[truncated]"
+        return f"{truncated}\n…[truncated]"
 
     def _resolve_vision_payload(
         self,
