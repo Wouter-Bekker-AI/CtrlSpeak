@@ -5,6 +5,7 @@ from datetime import datetime
 
 import atexit
 import argparse
+import errno
 import http.client
 import json
 import os
@@ -14,6 +15,7 @@ import tempfile
 import threading
 import time
 import wave
+import warnings
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Queue
@@ -42,16 +44,20 @@ from utils.config_paths import (
 logger = get_logger(__name__)
 
 
-_CLIPBOARD_WARN_COOLDOWN_SECONDS = 5.0
-_last_clipboard_warning: float = 0.0
-
-
 def _bootstrap_runtime_environment() -> None:
     """
     Ensure third-party services can establish HTTPS connections when running
     from a PyInstaller bundle by pointing to the embedded certifi bundle and by
     keeping all Hugging Face caches inside the CtrlSpeak config directory.
     """
+    os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+    warnings.filterwarnings(
+        "ignore",
+        message=r"pkg_resources is deprecated as an API\..*",
+        category=UserWarning,
+        module="ctranslate2",
+    )
+
     try:
         cfg = get_data_dir()
         hf_root = cfg / "hf-cache"
@@ -109,6 +115,9 @@ PROCESSING_SAMPLE_RATE = 44100
 
 INSTANCE_PORT = int(os.environ.get("CTRLSPEAK_SINGLE_INSTANCE_PORT", "54329"))
 
+LOBBY_STAGE = "lobby"
+CONVERSATION_STAGE = "conversation"
+
 # ---------------- Build flags ----------------
 def detect_client_only_build() -> bool:
     try:
@@ -128,6 +137,7 @@ listener: Optional[keyboard.Listener] = None
 recording_file_path: Optional[Path] = None
 listener_lock = threading.Lock()
 client_enabled = True
+bot_vad_suspended_for_hotkey = False
 
 instance_lock_handle: Optional[object] = None
 processing_sound_thread: Optional[threading.Thread] = None
@@ -136,6 +146,8 @@ processing_sound_data: Optional[bytes] = None
 processing_sound_settings: Optional[Dict[str, int]] = None
 _ready_sound_lock = threading.Lock()
 _ready_sound_played = False
+
+_shutdown_requested = threading.Event()
 
 recording_temp_dir_name = "temp"
 AUTO_MODE = False
@@ -155,7 +167,6 @@ if TYPE_CHECKING:
 # Win32 text insertion / clipboard
 from utils.winio import (
     insert_text_into_focus, set_force_sendinput, is_console_window,
-    set_clipboard_text,
 )
 
 # LAN discovery (single source of truth for ServerInfo)
@@ -173,11 +184,13 @@ from utils.net_discovery import (
 # Re-export for callers that import from utils.system
 __all__ = [
     "APP_VERSION", "SPLASH_DURATION_MS", "CLIENT_ONLY_BUILD",
+    "LOBBY_STAGE", "CONVERSATION_STAGE",
     "settings", "settings_lock", "load_settings", "save_settings",
     "get_data_dir", "get_config_dir", "get_config_file_path", "get_temp_dir",
     "create_recording_file_path", "cleanup_recording_file", "resource_path",
     "insert_text_into_focus", "set_force_sendinput", "is_console_window",
-    "ServerInfo", "format_exception_details",
+    "ServerInfo", "format_exception_details", "get_interaction_stage",
+    "request_application_shutdown",
 ]
 
 # Keep a single shared discovery listener and last_connected_server here
@@ -200,6 +213,114 @@ def notify(message: str, title: str = "CtrlSpeak") -> None:
             logger.exception("Failed to print fallback notification '%s'", title)
 
 
+def get_interaction_stage() -> str:
+    """Return the current high-level interaction stage."""
+
+    try:
+        from utils import bot_integration
+    except Exception:
+        logger.exception("Failed to import bot integration while resolving interaction stage")
+        return LOBBY_STAGE
+
+    try:
+        active_identity = bot_integration.get_active_identity()
+    except Exception:
+        logger.exception("Failed to query active identity while resolving interaction stage")
+        return LOBBY_STAGE
+
+    return CONVERSATION_STAGE if active_identity else LOBBY_STAGE
+
+
+def _resolve_identity_tts_settings(
+    identity: Optional[str], *, fallback_voice: str, log_context: str
+) -> tuple[str, dict[str, object]]:
+    """Return the Kokoro voice and keyword arguments for an identity."""
+
+    resolved_voice = fallback_voice
+    kwargs: dict[str, object] = {}
+
+    try:
+        from utils import bot_integration
+    except Exception:
+        logger.exception(
+            "Failed to import bot integration while resolving TTS for %s",
+            log_context,
+        )
+        return resolved_voice, kwargs
+
+    try:
+        voice, preferences = bot_integration.get_identity_tts_preferences(identity)
+    except Exception:
+        logger.exception(
+            "Failed to resolve TTS preferences for identity '%s' (%s)",
+            identity or "<unspecified>",
+            log_context,
+        )
+        voice, preferences = None, {}
+
+    if not isinstance(preferences, dict):
+        preferences = {}
+
+    resolved_voice = (voice or fallback_voice).strip() or fallback_voice
+
+    provider = preferences.get("onnx_provider")
+    if isinstance(provider, str) and provider.strip():
+        kwargs["onnx_provider"] = provider.strip()
+    device_id = preferences.get("onnx_device_id")
+    if isinstance(device_id, int):
+        kwargs["onnx_device_id"] = device_id
+    provider_options = preferences.get("onnx_provider_options")
+    if isinstance(provider_options, dict) and provider_options:
+        kwargs["onnx_provider_options"] = provider_options
+    custom_providers = preferences.get("onnx_providers")
+    if isinstance(custom_providers, list) and custom_providers:
+        kwargs["onnx_providers"] = custom_providers
+
+    return resolved_voice, kwargs
+
+
+def _speak_lobby_goodbye() -> None:
+    """Play a goodbye message using the default identity's voice."""
+
+    try:
+        from third_party.social_robot.audio.tts import KokoroTTS
+    except Exception:
+        logger.exception("Failed to import dependencies for lobby goodbye playback")
+        return
+
+    voice_name, kwargs = _resolve_identity_tts_settings(
+        "default", fallback_voice="af_heart", log_context="lobby goodbye"
+    )
+
+    try:
+        tts = KokoroTTS(voice=voice_name, **kwargs)
+        audio = tts.synthesize("goodbye")
+        tts.play_audio_with_amplitude(audio, amplitude_callback=None)
+    except Exception:
+        logger.exception("Failed to play lobby goodbye message")
+
+
+def _speak_conversation_goodbye(identity: str) -> None:
+    """Play a goodbye message using the active identity's voice."""
+
+    try:
+        from third_party.social_robot.audio.tts import KokoroTTS
+    except Exception:
+        logger.exception(
+            "Failed to import dependencies for conversation goodbye playback"
+        )
+        return
+
+    voice_name, kwargs = _resolve_identity_tts_settings(
+        identity, fallback_voice="af_heart", log_context=f"conversation goodbye for {identity}"
+    )
+
+    try:
+        tts = KokoroTTS(voice=voice_name, **kwargs)
+        audio = tts.synthesize("goodbye")
+        tts.play_audio_with_amplitude(audio, amplitude_callback=None)
+    except Exception:
+        logger.exception("Failed to play conversation goodbye for '%s'", identity)
 
 
 def ui_show_lockout_window(message: str, cancel_callback: Optional[Callable[[], None]] = None) -> None:
@@ -269,25 +390,19 @@ def write_error_log(context: str, snippet: str) -> None:
         logger.exception("Failed to write error log entry")
 
 
-def copy_to_clipboard(text: str) -> None:
-    global _last_clipboard_warning
-    try:
-        if not set_clipboard_text(text):
-            now = time.monotonic()
-            if now - _last_clipboard_warning >= _CLIPBOARD_WARN_COOLDOWN_SECONDS:
-                logger.warning(
-                    "Failed to stage clipboard text; the Windows clipboard is busy or unavailable."
-                )
-                _last_clipboard_warning = now
-    except Exception:
-        logger.exception("Failed to copy text to clipboard")
-
 def notify_error(context: str, details: str) -> None:
     snippet = (details or "").strip() or "Unknown error"
     message = f"{context}\n\nDetails:\n{snippet}"
     write_error_log(context, snippet)
-    copy_to_clipboard(message)
-    notify(message, title="CtrlSpeak Error")
+    logger.error("%s\n\nDetails:\n%s", context, snippet)
+    try:
+        print(f"CtrlSpeak Error:\n{message}")
+    except Exception:
+        logger.exception("Failed to print error details to terminal")
+    notify(
+        "An error occurred. Please review the terminal output or CtrlSpeak-error.log and contact support.",
+        title="CtrlSpeak Error",
+    )
 
 
 def format_exception_details(exc: BaseException | None) -> str:
@@ -674,22 +789,67 @@ def _client_hotkey_available() -> bool:
     return False
 
 
+def _pause_bot_vad_for_hotkey() -> None:
+    global bot_vad_suspended_for_hotkey
+    if bot_vad_suspended_for_hotkey:
+        return
+    try:
+        from utils import bot_integration
+    except Exception:
+        logger.exception("Failed to import bot integration while pausing bot VAD")
+        return
+    try:
+        paused = bot_integration.pause_bot_vad_listener()
+    except AttributeError:
+        logger.debug("Bot integration does not expose pause_bot_vad_listener; skipping pause request")
+        return
+    except Exception:
+        logger.exception("Failed to pause bot VAD listener for hotkey recording")
+        return
+    if paused:
+        bot_vad_suspended_for_hotkey = True
+
+
+def _resume_bot_vad_for_hotkey() -> None:
+    global bot_vad_suspended_for_hotkey
+    if not bot_vad_suspended_for_hotkey:
+        return
+    try:
+        from utils import bot_integration
+    except Exception:
+        logger.exception("Failed to import bot integration while resuming bot VAD")
+        bot_vad_suspended_for_hotkey = False
+        return
+    try:
+        bot_integration.resume_bot_vad_listener()
+    except AttributeError:
+        logger.debug("Bot integration does not expose resume_bot_vad_listener; skipping resume request")
+    except Exception:
+        logger.exception("Failed to resume bot VAD listener after hotkey recording")
+    finally:
+        bot_vad_suspended_for_hotkey = False
+
+
 def on_press(key):
     global recording, recording_thread, recording_file_path
+    if key != keyboard.Key.ctrl_r:
+        return
+    _pause_bot_vad_for_hotkey()
     if not client_enabled:
         return
-    if key == keyboard.Key.ctrl_r and not recording:
-        if not _client_hotkey_available():
-            return
-        recording = True
-        recording_file_path = create_recording_file_path()
-        recording_thread = threading.Thread(target=record_audio, args=(recording_file_path,), daemon=True)
-        recording_thread.start()
-        try:
-            from utils.gui import show_waveform_overlay
-            enqueue_management_task(show_waveform_overlay, lambda: get_recent_waveform(500))
-        except Exception:
-            logger.exception("Failed to show waveform overlay while recording")
+    if recording:
+        return
+    if not _client_hotkey_available():
+        return
+    recording = True
+    recording_file_path = create_recording_file_path()
+    recording_thread = threading.Thread(target=record_audio, args=(recording_file_path,), daemon=True)
+    recording_thread.start()
+    try:
+        from utils.gui import show_waveform_overlay
+        enqueue_management_task(show_waveform_overlay, lambda: get_recent_waveform(500))
+    except Exception:
+        logger.exception("Failed to show waveform overlay while recording")
 
 
 def handle_transcribed_text_from_hotkey(text: str) -> bool:
@@ -727,6 +887,8 @@ def handle_transcribed_text_from_hotkey(text: str) -> bool:
         logger.exception("Failed to import keyword handlers for hotkey processing")
         return False
 
+    stage = get_interaction_stage()
+
     maintenance_match = keywords.detect_memory_refresh_keyword(normalized)
     if maintenance_match:
         target_identity = bot_integration.get_active_identity() or "assistant"
@@ -754,6 +916,18 @@ def handle_transcribed_text_from_hotkey(text: str) -> bool:
                 description.capitalize(),
                 target_identity,
             )
+        return True
+
+    system_match = keywords.detect_system_keyword(normalized)
+    if system_match and system_match.keyword.payload == "quit_ctrlspeak":
+        if stage != LOBBY_STAGE:
+            logger.info(
+                "Hotkey quit command ignored because the conversation stage is active",
+            )
+            return False
+        logger.info("Hotkey command requesting CtrlSpeak shutdown from lobby stage")
+        _speak_lobby_goodbye()
+        request_application_shutdown("hotkey keyword")
         return True
 
     match = keywords.detect_conversation_start_keyword(normalized)
@@ -805,6 +979,7 @@ def handle_transcribed_text_from_hotkey(text: str) -> bool:
             )
             return True
         logger.info("Hotkey command stopping bot '%s'", identity)
+        _speak_conversation_goodbye(identity)
         try:
             request_goodbye = getattr(bot_integration, "request_goodbye", None)
             should_fallback = True
@@ -825,51 +1000,53 @@ def handle_transcribed_text_from_hotkey(text: str) -> bool:
 def on_release(key):
     from utils.models import transcribe_audio
     global recording, recording_thread, recording_file_path
-    if key == keyboard.Key.ctrl_r:
-        if recording:
-            recording = False
-            if recording_thread:
-                recording_thread.join(); recording_thread = None
-            path = recording_file_path
-            # switch overlay into “processing” mode
+    if key != keyboard.Key.ctrl_r:
+        return
+    _resume_bot_vad_for_hotkey()
+    if recording:
+        recording = False
+        if recording_thread:
+            recording_thread.join(); recording_thread = None
+        path = recording_file_path
+        # switch overlay into “processing” mode
+        try:
+            from utils.gui import set_waveform_processing
+            enqueue_management_task(set_waveform_processing, "Processing…")
+        except Exception:
+            logger.exception("Failed to switch waveform overlay to processing mode")
+        # START the loading sound so GUI gets live levels + waveform
+        try:
+            start_processing_feedback()
+        except Exception:
+            logger.exception("Failed to start processing feedback loop")
+        text = None
+        try:
+            if path and path.exists() and path.stat().st_size > 0:
+                text = transcribe_audio(str(path))
+        except Exception as exc:
+            notify_error("Transcription failed", format_exception_details(exc)); text = None
+        if text:
+            handled_keyword = False
             try:
-                from utils.gui import set_waveform_processing
-                enqueue_management_task(set_waveform_processing, "Processing…")
+                handled_keyword = handle_transcribed_text_from_hotkey(text)
             except Exception:
-                logger.exception("Failed to switch waveform overlay to processing mode")
-            # START the loading sound so GUI gets live levels + waveform
-            try:
-                start_processing_feedback()
-            except Exception:
-                logger.exception("Failed to start processing feedback loop")
-            text = None
-            try:
-                if path and path.exists() and path.stat().st_size > 0:
-                    text = transcribe_audio(str(path))
-            except Exception as exc:
-                notify_error("Transcription failed", format_exception_details(exc)); text = None
-            if text:
-                handled_keyword = False
+                logger.exception("Hotkey keyword handling failed")
+            if not handled_keyword:
                 try:
-                    handled_keyword = handle_transcribed_text_from_hotkey(text)
-                except Exception:
-                    logger.exception("Hotkey keyword handling failed")
-                if not handled_keyword:
-                    try:
-                        insert_text_into_focus(text)
-                    except Exception as exc:
-                        notify_error("Text insertion failed", format_exception_details(exc))
-            try:
-                stop_processing_feedback()
-            except Exception:
-                logger.exception("Failed to stop processing feedback loop")
-            try:
-                from utils.gui import hide_waveform_overlay
-                enqueue_management_task(hide_waveform_overlay)
-            except Exception:
-                logger.exception("Failed to hide waveform overlay")
-            cleanup_recording_file(path)
-            recording_file_path = None
+                    insert_text_into_focus(text)
+                except Exception as exc:
+                    notify_error("Text insertion failed", format_exception_details(exc))
+        try:
+            stop_processing_feedback()
+        except Exception:
+            logger.exception("Failed to stop processing feedback loop")
+        try:
+            from utils.gui import hide_waveform_overlay
+            enqueue_management_task(hide_waveform_overlay)
+        except Exception:
+            logger.exception("Failed to hide waveform overlay")
+        cleanup_recording_file(path)
+        recording_file_path = None
 
 # ---- Discovery wrappers to restore original side-effects ----
 def _apply_last_connected(server: Optional[ServerInfo]) -> Optional[ServerInfo]:
@@ -978,6 +1155,20 @@ def handle_transcription_keyword(text: str) -> tuple[bool, str]:
         logger.exception("Failed to import transcription keyword dependencies")
         return False, normalized
 
+    stage = get_interaction_stage()
+
+    system_match = keywords.detect_system_keyword(normalized)
+    if system_match and system_match.keyword.payload == "quit_ctrlspeak":
+        if stage != LOBBY_STAGE:
+            logger.debug(
+                "Transcription server ignoring quit keyword while conversation stage is active",
+            )
+            return False, normalized
+        logger.info("Transcription server received quit keyword; shutting down CtrlSpeak")
+        _speak_lobby_goodbye()
+        request_application_shutdown("transcription keyword")
+        return True, ""
+
     start_match = keywords.detect_conversation_start_keyword(normalized)
     if start_match:
         identity = start_match.keyword.payload
@@ -1062,6 +1253,8 @@ def handle_transcription_keyword(text: str) -> tuple[bool, str]:
 
     logger.info("Transcription server stopping bot '%s' after goodbye keyword", identity)
 
+    _speak_conversation_goodbye(identity)
+
     should_fallback = True
     request_goodbye = getattr(bot_integration, "request_goodbye", None)
     if callable(request_goodbye):
@@ -1083,6 +1276,13 @@ def handle_transcription_keyword(text: str) -> tuple[bool, str]:
             )
 
     return True, ""
+
+
+
+class CtrlSpeakHTTPServer(ThreadingHTTPServer):
+    """HTTP server that permits quick reuse of the listening socket."""
+
+    allow_reuse_address = True
 
 
 class TranscriptionRequestHandler(BaseHTTPRequestHandler):
@@ -1156,11 +1356,40 @@ class TranscriptionRequestHandler(BaseHTTPRequestHandler):
 
 # threads/events for server discovery helpers
 server_thread: Optional[threading.Thread] = None
-server_httpd: Optional[ThreadingHTTPServer] = None
+server_httpd: Optional[CtrlSpeakHTTPServer] = None
 broadcast_stop_event = threading.Event()
 discovery_broadcaster: Optional[threading.Thread] = None
 discovery_query_listener: Optional[threading.Thread] = None
 discovery_query_stop_event = threading.Event()
+
+
+def _candidate_server_ports(requested_port: int) -> List[int]:
+    """Return the preferred port followed by fallbacks."""
+
+    candidates: List[int] = [requested_port]
+    for candidate in range(65433, 65443):
+        if candidate != requested_port:
+            candidates.append(candidate)
+    candidates.append(0)  # allow the OS to choose an ephemeral port as a last resort
+    return candidates
+
+
+def _is_permission_error(exc: OSError) -> bool:
+    win_error = getattr(exc, "winerror", None)
+    return win_error == 10013 or exc.errno in {errno.EACCES, 10013}
+
+
+def _is_address_in_use_error(exc: OSError) -> bool:
+    win_error = getattr(exc, "winerror", None)
+    return win_error == 10048 or exc.errno in {errno.EADDRINUSE, 10048}
+
+
+def _describe_port_failure(exc: OSError) -> str:
+    if _is_permission_error(exc):
+        return "Windows blocked access to the port (error 10013). Check firewall and antivirus rules or run CtrlSpeak as administrator."
+    if _is_address_in_use_error(exc):
+        return "Another application is already bound to this port. Close the conflicting program or choose a different port."
+    return exc.strerror or str(exc)
 
 def start_server() -> None:
     global server_thread, server_httpd, discovery_broadcaster, discovery_query_listener, discovery_query_stop_event, last_connected_server
@@ -1173,7 +1402,8 @@ def start_server() -> None:
     with settings_lock:
         port = int(settings.get("server_port", 65432))
         discovery_port = int(settings.get("discovery_port", 54330))
-    logger.info("Starting CtrlSpeak server on port %s (discovery %s)", port, discovery_port)
+    requested_port = port
+    logger.info("Starting CtrlSpeak server on port %s (discovery %s)", requested_port, discovery_port)
     # Ensure transcriber is initialized before starting the server
     from utils.models import initialize_transcriber
     if initialize_transcriber() is None:
@@ -1181,11 +1411,51 @@ def start_server() -> None:
         notify_error("Server startup failed", "Failed to initialize transcription engine.")
         return
 
-    try:
-        server_httpd = ThreadingHTTPServer(("0.0.0.0", port), TranscriptionRequestHandler)
-    except OSError as exc:
-        logger.error("Server startup failed on port %s: %s", port, exc)
-        notify_error("Server startup failed", str(exc)); server_httpd = None; return
+    bind_errors: List[tuple[int, OSError]] = []
+    httpd: Optional[CtrlSpeakHTTPServer] = None
+    for candidate in _candidate_server_ports(requested_port):
+        try:
+            httpd = CtrlSpeakHTTPServer(("0.0.0.0", candidate), TranscriptionRequestHandler)
+        except OSError as exc:
+            bind_errors.append((candidate if candidate != 0 else requested_port, exc))
+            continue
+        else:
+            port = httpd.server_port
+            break
+
+    if httpd is None:
+        if bind_errors:
+            _, first_error = bind_errors[0]
+            message = _describe_port_failure(first_error)
+            logger.error(
+                "Server startup failed on port %s after trying %s candidates: %s",
+                requested_port,
+                len(bind_errors),
+                message,
+            )
+            notify_error("Server startup failed", f"Unable to bind to port {requested_port}: {message}")
+        else:
+            logger.error("Server startup failed: unable to bind HTTP server to any port")
+            notify_error("Server startup failed", "Unable to bind HTTP server to any port.")
+        server_httpd = None
+        return
+
+    server_httpd = httpd
+    if port != requested_port:
+        cause_description = _describe_port_failure(bind_errors[0][1]) if bind_errors else "port unavailable"
+        logger.warning(
+            "Port %s unavailable (%s); CtrlSpeak server switched to port %s",
+            requested_port,
+            cause_description,
+            port,
+        )
+        with settings_lock:
+            settings["server_port"] = port
+            save_settings()
+        notify(
+            f"Server port changed to {port} because {cause_description}",
+            title="CtrlSpeak server port updated",
+        )
     def serve():
         try:
             server_httpd.serve_forever()
@@ -1457,6 +1727,25 @@ def shutdown_all():
         request_management_ui_shutdown()
     except Exception:
         logger.exception("Failed to shut down management UI during shutdown")
+
+
+def request_application_shutdown(source: str = "unspecified") -> None:
+    """Request a graceful shutdown of the entire CtrlSpeak application."""
+
+    if _shutdown_requested.is_set():
+        logger.debug("Shutdown already requested (source=%s)", source)
+        return
+
+    _shutdown_requested.set()
+    logger.info("Application shutdown requested via %s", source)
+
+    try:
+        shutdown_all()
+    finally:
+        try:
+            release_single_instance_lock()
+        except Exception:
+            logger.exception("Failed to release instance lock during shutdown request")
 
 # ---------------- CLI ----------------
 def parse_cli_args(argv: list[str]) -> argparse.Namespace:

@@ -1,4 +1,4 @@
-"""Entrypoint for the robot face and dialogue loop."""
+﻿"""Entrypoint for the robot face and dialogue loop."""
 
 from __future__ import annotations
 
@@ -9,13 +9,24 @@ import sys
 import tempfile
 import threading
 import atexit
+import warnings
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Pattern
+
 
 from audio.stt import FasterWhisperSTT
 from audio.remote_stt import RemoteSTT
 from audio.tts import KokoroTTS
 from audio.vad import VADListener, VADConfig
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+warnings.filterwarnings(
+    "ignore",
+    message=r"pkg_resources is deprecated as an API\..*",
+    category=UserWarning,
+    module="ctranslate2",
+)
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -40,18 +51,19 @@ from background_agents.document_memory_agent import refresh_document_memory
 from background_agents.manage_think import ManageThinkAgent, load_manage_think_agent
 from background_agents.transcript_cleanup_agent import normalize_transcript
 from tools import keywords, vision
-from tools.message_management import force_plaintext, requires_force_plaintext
-from utils.config_paths import get_logger
+from tools.message_management import force_plaintext, requires_force_plaintext, strip_emoji, strip_emoji
+from utils.config_paths import get_data_dir, get_logger
 from utils.image_store import (
     IdentityImageRecord,
     is_image_request,
     load_identity_image,
     write_identity_image_from_base64,
 )
-from utils.io_atomic import AtomicWriteError, atomic_append_lines
+from utils.io_atomic import AtomicWriteError, atomic_append_lines, atomic_write_text
 from utils.memory_lock import IdentityLock, IdentityLockError, probe_lock_path
 from utils.memory_orchestrator import MemoryOrchestrator
 from utils.memory_settings import load_identity_settings
+from utils.memory_paths import get_bot_memory_dir, get_bot_profile_export_path
 
 
 logger = get_logger(__name__)
@@ -124,7 +136,14 @@ except Exception:
 def _detect_whisper_device() -> str:
     """Detects the best available device for ctranslate2 (CUDA or CPU)."""
     try:
-        import ctranslate2
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"pkg_resources is deprecated as an API\..*",
+                category=UserWarning,
+                module="ctranslate2",
+            )
+            import ctranslate2
         if ctranslate2.get_cuda_device_count() > 0:
             return "cuda"
     except Exception:
@@ -240,6 +259,39 @@ def _coerce_int(value, *, context: str) -> Optional[int]:
     return None
 
 
+def _prepare_memory_dir(identity_name: str, configured: Optional[str]) -> Path:
+    default_dir = get_bot_memory_dir(identity_name)
+    if not configured:
+        return default_dir
+    normalized = str(configured).strip()
+    if not normalized:
+        return default_dir
+    replacements = {
+        "{appdata}": str(get_data_dir()),
+        "{data_root}": str(get_data_dir()),
+        "{identity}": identity_name,
+    }
+    expanded = normalized
+    for token, replacement in replacements.items():
+        expanded = expanded.replace(token, replacement)
+    expanded = os.path.expandvars(expanded)
+    candidate = Path(expanded).expanduser()
+    try:
+        resolved = candidate.resolve()
+    except Exception as exc:
+        print(f"-> Failed to resolve memory directory {candidate}: {exc}")
+        return default_dir
+    data_root = get_data_dir().resolve()
+    try:
+        resolved.relative_to(data_root)
+    except ValueError:
+        print(f"-> Memory directory {resolved} must reside under {data_root}; using default.")
+        return default_dir
+    for sub in ("conversation", "screenshots", "chroma", "traces"):
+        (resolved / sub).mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
 def _parse_json_list(raw: Optional[str], *, context: str) -> Optional[List[object]]:
     if not raw:
         return None
@@ -296,17 +348,17 @@ def resolve_identity(args) -> tuple[IdentityProfile, dict]:
     if not system_prompt:
         system_prompt = DEFAULT_SYSTEM_PROMPT
 
-    memory_dir = args.memory_dir or os.getenv("CTRLSPK_BOT_MEMORY_ROOT")
+    memory_setting = (
+        args.memory_dir
+        or os.getenv("CTRLSPK_BOT_MEMORY_ROOT")
+        or config.get("memory_dir")
+    )
     memory_path: Optional[Path] = None
-    if memory_dir:
-        memory_path = Path(memory_dir)
-        try:
-            memory_path = memory_path.expanduser().resolve()
-            for sub in ("conversation", "screenshots", "chroma", "traces"):
-                (memory_path / sub).mkdir(parents=True, exist_ok=True)
-        except Exception as exc:
-            print(f"-> Failed to ensure memory directory {memory_path}: {exc}")
-            memory_path = None
+    try:
+        memory_path = _prepare_memory_dir(identity_name, memory_setting)
+    except Exception as exc:
+        print(f"-> Failed to prepare memory directory: {exc}")
+        memory_path = None
 
     raw_options = config.get("ollama_options")
     ollama_options: Dict[str, object] = {}
@@ -538,6 +590,10 @@ def main():
     identity_settings = load_identity_settings(profile.name)
 
     use_orchestrator = os.getenv("CTRLSPK_USE_LANGGRAPH_MEMORY_ORCHESTRATOR") == "1"
+    forced_tool_orchestrator = False
+    if profile.tool_enabled and not use_orchestrator:
+        use_orchestrator = True
+        forced_tool_orchestrator = True
     metrics_env = os.getenv("CTRLSPK_METRICS_PATH")
     if metrics_env:
         metrics_path = Path(metrics_env).expanduser()
@@ -568,10 +624,14 @@ def main():
                 metrics_path=metrics_path,
                 identity_settings=identity_settings,
                 think_manager=think_agent if profile.hide_think else None,
+                tooling_enabled=profile.tool_enabled,
             )
             _memory_orchestrator = orchestrator
             atexit.register(_shutdown_orchestrator)
-            print("-> LangGraph memory orchestrator enabled.")
+            if forced_tool_orchestrator:
+                print("-> LangGraph memory orchestrator enabled for tooling support.")
+            else:
+                print("-> LangGraph memory orchestrator enabled.")
         except Exception as exc:
             print(f"-> Failed to initialize LangGraph orchestrator: {exc}")
             logger.exception("Failed to initialize LangGraph orchestrator")
@@ -658,7 +718,9 @@ def main():
     vad_config = VADConfig(sample_rate=16000, frame_duration_ms=30, padding_duration_ms=360, aggressiveness=2, deactivation_ratio=0.9)
     vad_listener: Optional[VADListener] = None
     vad_thread: Optional[threading.Thread] = None
+    vad_suppressed = False
     voice_mode_active = threading.Event()
+    session_history: List[dict] = []
     last_bot_response: str = ""
     processing_lock = threading.Lock()
     shutdown_requested = threading.Event()
@@ -678,8 +740,45 @@ def main():
         if isinstance(animator, LogoAnimator):
             animator.hide_widget()
 
+    def _export_profile_snapshot() -> None:
+        orchestrator = _memory_orchestrator
+        if orchestrator is None:
+            chat_window.append_status_message("Memory", "Profile export unavailable; memory offline.")
+            return
+        try:
+            slots = orchestrator.vector_store.read_all_profile(orchestrator.profile_user_id)
+        except Exception:
+            logger.exception("Failed to read profile slots for export")
+            chat_window.append_status_message("Memory", "Failed to read profile slots.")
+            return
+        payload = {
+            "identity": profile.name,
+            "user_id": orchestrator.profile_user_id,
+            "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "slots": [
+                {
+                    "attribute": (entry.get("metadata") or {}).get("attribute"),
+                    "value": (entry.get("metadata") or {}).get("value"),
+                    "status": (entry.get("metadata") or {}).get("status", "current"),
+                }
+                for entry in slots
+                if isinstance(entry, dict)
+            ],
+        }
+        export_path = get_bot_profile_export_path(profile.name)
+        try:
+            export_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(export_path, json.dumps(payload, indent=2, ensure_ascii=False))
+        except Exception:
+            logger.exception("Failed to write profile snapshot")
+            chat_window.append_status_message("Memory", "Failed to export profile snapshot.")
+            return
+        chat_window.append_status_message("Memory", f"Profile exported to {export_path}")
+
+    chat_window.export_profile_requested.connect(_export_profile_snapshot)
+
     def _enable_voice_mode() -> None:
-        nonlocal vad_listener, vad_thread
+        nonlocal vad_listener, vad_thread, vad_suppressed
         if voice_mode_active.is_set():
             return
         voice_mode_active.set()
@@ -693,9 +792,10 @@ def main():
         )
         vad_thread = threading.Thread(target=vad_listener.start, daemon=True)
         vad_thread.start()
+        vad_suppressed = False
 
     def _disable_voice_mode() -> None:
-        nonlocal vad_listener, vad_thread
+        nonlocal vad_listener, vad_thread, vad_suppressed
         if not voice_mode_active.is_set():
             return
         voice_mode_active.clear()
@@ -712,19 +812,50 @@ def main():
             vad_thread.join(timeout=2.0)
             vad_thread = None
         vad_listener = None
+        vad_suppressed = False
         if tts_model.is_playing:
             tts_model.stop_playback()
         animator.update_amplitude(0.0)
+
+    def _pause_vad_listener() -> None:
+        nonlocal vad_listener, vad_suppressed
+        if vad_listener is None or not voice_mode_active.is_set():
+            return
+        try:
+            vad_listener.disable_vad()
+            vad_suppressed = True
+            logger.debug("VAD listener paused via control command")
+        except Exception:
+            logger.exception("Failed to pause VAD listener on control command")
+
+    def _resume_vad_listener() -> None:
+        nonlocal vad_listener, vad_suppressed
+        if vad_listener is None:
+            vad_suppressed = False
+            return
+        if not voice_mode_active.is_set():
+            vad_suppressed = False
+            return
+        try:
+            vad_listener.enable_vad()
+            vad_suppressed = False
+            logger.debug("VAD listener resumed after control command")
+        except Exception:
+            vad_suppressed = False
+            logger.exception("Failed to resume VAD listener after control command")
 
     def _on_text_submitted(message: str) -> None:
         cleaned = message.strip()
         if not cleaned:
             return
-        chat_window.append_user_message(cleaned)
 
         def _worker() -> None:
             with processing_lock:
-                _handle_user_request(cleaned, source="text")
+                _handle_user_request(
+                    cleaned,
+                    source="voice" if voice_mode_active.is_set() else "text",
+                    input_medium="text",
+                )
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -910,8 +1041,9 @@ def main():
         *,
         capture_override: Optional[str] = None,
         source: str = "voice",
+        input_medium: Optional[str] = None,
     ) -> None:
-        nonlocal last_bot_response, vad_listener
+        nonlocal last_bot_response, vad_listener, session_history
 
         if shutdown_requested.is_set():
             logger.debug(
@@ -994,10 +1126,8 @@ def main():
             animator.update_amplitude(0.0)
             return
 
-        if source == "voice":
-            chat_window.append_user_message(cleaned, via_voice=True)
-        elif source == "command":
-            chat_window.append_user_message(cleaned)
+        medium = input_medium or ("voice" if source == "voice" else None)
+        chat_window.append_user_message(cleaned, medium=medium)
 
         normalized_user = cleaned.lower()
         normalized_bot = last_bot_response.strip().lower()
@@ -1155,6 +1285,9 @@ def main():
         used_orchestrator = False
         think_hidden = False
         think_placeholder: Optional[str] = None
+        history = list(session_history)
+        history_baseline = len(history)
+        turn_result = None
         if use_orchestrator and orchestrator is not None:
             try:
                 turn_result = orchestrator.run_turn(
@@ -1173,9 +1306,10 @@ def main():
                 use_orchestrator = False
                 _shutdown_orchestrator()
 
+        if used_orchestrator and turn_result is not None:
+            session_history.extend(turn_result.history_entries)
+
         if not used_orchestrator:
-            history = load_history(profile.memory_path)
-            history_baseline = len(history)
             try:
                 llm_response = ollama_client.query(
                     augmented_text,
@@ -1228,38 +1362,68 @@ def main():
         print("-> Raw LLM reply:", raw_response)
 
         if think_hidden and think_placeholder and not placeholder_displayed:
-            chat_window.append_bot_message(think_placeholder)
+            chat_window.append_status_message("Bot (thinking)", think_placeholder)
             placeholder_displayed = True
 
-        final_response = llm_response
+        display_response = llm_response
 
-        if requires_force_plaintext(final_response):
+        sanitized_input = strip_emoji(llm_response)
+
+
+
+        if requires_force_plaintext(sanitized_input):
+
             print("-> Handing reply to force_plaintext().")
-            final_response = force_plaintext(final_response)
-            print("-> Scrubbed reply:", final_response)
-            if final_response != llm_response:
+
+            sanitized_response = force_plaintext(sanitized_input)
+
+            print("-> Scrubbed reply:", sanitized_response)
+
+            if sanitized_response != sanitized_input:
+
                 print("-> Applied deterministic TTS scrub.")
+
         else:
+
             print("-> Reply does not require deterministic scrub.")
-            final_response = llm_response
-        print("-> Final reply for chat history and TTS:", final_response)
+
+            sanitized_response = sanitized_input
+
+
+
+        sanitized_response = sanitized_response.strip()
+
+        if not sanitized_response and display_response:
+
+            sanitized_response = "..."
+
+        if sanitized_response != display_response:
+
+            print("-> Reply shown in chat window:", display_response)
+
+        print("-> Final reply for chat history and TTS:", sanitized_response)
+
+
 
         if not used_orchestrator:
-            history.append({"role": "assistant", "content": final_response})
-            save_history(profile.memory_path, history[history_baseline:])
+            history.append({"role": "assistant", "content": sanitized_response})
+            new_entries = history[history_baseline:]
+            if new_entries:
+                session_history.extend(new_entries)
+                save_history(profile.memory_path, new_entries)
 
-        chat_window.append_bot_message(final_response)
-        last_bot_response = final_response
+        chat_window.append_bot_message(display_response)
+        last_bot_response = display_response
 
         if not voice_mode_active.is_set():
             animator.update_amplitude(0.0)
             return
 
         try:
-            if not final_response:
+            if not sanitized_response:
                 animator.update_amplitude(0.0)
                 return
-            audio_data = tts_model.synthesize(final_response)
+            audio_data = tts_model.synthesize(sanitized_response)
         except Exception as exc:
             print("TTS error:", exc)
             animator.update_amplitude(0.0)
@@ -1292,7 +1456,11 @@ def main():
             recognized_text = ""
 
         with processing_lock:
-            _handle_user_request(recognized_text, source="voice")
+            _handle_user_request(
+                recognized_text,
+                source="voice",
+                input_medium="voice",
+            )
 
     def _trigger_look_at_screen() -> None:
         if not profile.vision_enabled:
@@ -1357,6 +1525,12 @@ def main():
             elif command == "look_at_my_clipboard":
                 logger.debug("stdin control command received: look_at_my_clipboard")
                 _trigger_look_at_clipboard()
+            elif command == "pause_vad":
+                logger.debug("stdin control command received: pause_vad")
+                _pause_vad_listener()
+            elif command == "resume_vad":
+                logger.debug("stdin control command received: resume_vad")
+                _resume_vad_listener()
             elif command == "chat_with":
                 target_identity = str(payload.get("identity") or "")
                 if target_identity:
@@ -1432,3 +1606,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

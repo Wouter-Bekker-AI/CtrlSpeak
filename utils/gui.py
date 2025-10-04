@@ -1455,7 +1455,7 @@ class ManagementWindow:
         self.clear_memory_button = ttk.Button(
             bot_buttons,
             text="Clear Bot Memory",
-            style="Subtle.TButton",
+            style="Danger.TButton",
             command=self._clear_bot_memory,
         )
         self.clear_memory_button.pack(fill=tk.X, pady=4)

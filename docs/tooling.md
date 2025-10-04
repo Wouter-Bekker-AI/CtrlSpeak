@@ -14,11 +14,36 @@ ctrlspeak/
 │   ├── __init__.py
 │   ├── keywords.py
 │   ├── message_management.py
-│   └── vision.py
+│   ├── vision.py
+│   └── goose_tool.py
 ```
 
 - `tools/__init__.py` exposes the modules that make up the shared tooling surface. Import helpers via `from tools import vision` (or `keywords`) so the package can evolve without breaking downstream code.
 - Additional tooling (for example, browser automation or document parsing) should live beside `vision.py` inside this directory. Each module must document its public API in this file before it is merged.
+- `tools/goose_tool.py` wraps the Goose CLI so Einstein can delegate file inspection, edits, searches, and executions to a purpose-built automation agent.
+
+## Goose automation helper (`tools/goose_tool.py`)
+
+`goose_tool.py` exposes a single entry point that launches Goose in headless mode and returns the resulting transcript to CtrlSpeak:
+
+| Function | Description |
+| -------- | ----------- |
+| `goose_query(prompt, *, model="qwen3:14b", mode="auto", provider="ollama", goose_exe="goose", stream=False)` | Runs `goose run` with the supplied natural-language prompt. By default the command executes non-streaming so the combined transcript is returned once Goose exits (the wrapper still mirrors stdout to the console). Set `stream=True` to forward output live through `subprocess.Popen`. The call raises `RuntimeError` when Goose exits non-zero or produces no output. |
+
+### Usage guidelines
+
+- The prompt must be a non-empty string. The optional `mode` argument is validated against Goose's supported values (`auto`, `smart_approve`, `approve`, `chat`).
+- Goose runs without a persistent session (`--no-session`) and automatically enables the built-in `developer` tool so it can open shells, edit files, and manage approvals on Einstein's behalf.
+- The wrapper sets `GOOSE_MODE` in the environment before launching Goose so downstream scripts honour the requested approval strategy.
+- By default stdout is collected and echoed after Goose completes. Opt into live streaming with `stream=True` when real-time updates are necessary.
+
+### LangGraph integration
+
+- Einstein's tool belt now exposes a single function, `goose_tool_query(prompt, mode?, model?, provider?, goose_exe?, stream?)`. The orchestrator expects the model to describe the desired filesystem or shell task in natural language and let Goose execute it.
+- The orchestrator validates that every tool call includes a prompt. Missing prompts are rejected and surfaced back to the model so it can refine the request.
+- Goose executions always run with `stream=True` so the CLI's live output mirrors into the CtrlSpeak terminal. Once Goose exits the orchestrator stores its transcript (trimmed to 4 000 characters) as a `tool` role entry in the session history so later LLM calls can reference the result, while the chat window continues to show only the assistant's final reply.
+- The LangGraph workflow no longer stages Goose plans heuristically. Each turn simply presents the tool schema to Einstein and honours whatever tool call it issues, keeping responsibility for when and how Goose is used entirely with the LLM.
+
 
 ## Vision tooling (`tools/vision.py`)
 
@@ -106,7 +131,8 @@ The application responds to the following spoken or typed keywords. Each phrase 
 | `update documentation` (also accepts “refresh documentation”) | Memory maintenance | Force a documentation-ingestion pass for the active identity (assistant, Einstein, or default), bypassing the 24-hour cooldown. |
 | `update datetime` (accepts “update date time” or “refresh date time”) | Memory maintenance | Force the active identity to store the latest local date, timezone, and locale snapshot in vector memory, bypassing the 24-hour cooldown. |
 | `chat with <identity>` | Conversation start | Relaunch the bot using the requested identity via the transcription server (ignored if that identity is already active). |
-| `goodbye <identity>` | Conversation end | Shut down the active conversation for the specified identity from the CtrlSpeak main process. |
+| `goodbye <identity>` | Conversation end | Play a farewell in the active persona’s voice and then shut down the conversation from the CtrlSpeak main process. |
+| `quit control speak` | System | From the Lobby stage, speaks “goodbye” with the default receptionist voice before shutting down CtrlSpeak (ignored while a conversation is active). |
 
 > **Note:** SocialRobot’s text chat window no longer treats typed “goodbye <identity>” phrases as keywords. Those messages are delivered to the bot verbatim; only spoken requests (or ones injected through the stdin control channel) trigger the shutdown helpers.
 
@@ -115,7 +141,7 @@ The application responds to the following spoken or typed keywords. Each phrase 
 `configure_identity_keywords()` keeps the voice trigger list synchronized with the identity folders. Once configured, the helpers recognize:
 
 - `chat with <identity>` – immediately relaunches SocialRobot with the requested identity via the transcription server (no action is taken when the user asks for the already-active persona). Close variants like “chat was assistant” are recognised automatically.
-- `goodbye <identity>` – immediately ends the current conversation and shuts the bot down from the CtrlSpeak main process before SocialRobot processes the utterance. Light punctuation (for example, “goodbye, assistant”) remains valid.
+- `goodbye <identity>` – immediately ends the current conversation, first speaking a “goodbye” line with the active persona’s voice before the CtrlSpeak main process shuts the bot down. Light punctuation (for example, “goodbye, assistant”) remains valid.
 
 The `<identity>` placeholder uses the directory names under `third_party/social_robot/identities/`. Call `configure_identity_keywords()` whenever you add or remove identities (for example, during application startup) to keep the registry current.
 
@@ -202,7 +228,7 @@ Use this helper when gating assistant, Einstein, or default start-up or respondi
 
 Before any retrieval runs, the LangGraph orchestrator applies lightweight heuristics to the user text to decide which context buckets are required. The heuristics cover documentation (instruction manuals and CtrlSpeak usage notes), chat history (personal conversation memories), and temporal context (current date/time). When they trigger, the resulting plan is used immediately without calling the LLM. Only when the heuristics return an empty plan does the orchestrator ask the planner prompt to choose between `documentation`, `chat_history`, `date`, or `none`; the final decision ORs the heuristic guess with any LLM suggestion so guidance-driven requests still bias toward documentation even if the model stays silent. For Einstein, that fallback planner prompt automatically appends `/no_think` so Qwen3 returns a terse bucket selection without emitting a `<think>` block. A `none` outcome skips the vector store entirely, while any other choice constrains retrieval to the requested categories so documentation and temporal snippets are injected only when relevant. Retrieved snippets surface inside a system message headed `Documentation excerpts`, signalling to the bundled personas that those passages come from the official docs and should be quoted verbatim when guiding users. Each turn also prints a `[Memory]` line that now records the requested plan, whether the heuristics or the LLM produced it (`method=heuristic` or `method=llm`), and how many documentation and temporal-context chunks contributed, giving operators immediate feedback that the ingest pipeline is feeding the conversation.
 
-The documentation embeddings (and all other vector memories) use the deterministic `ctrlspeak-minhash` embedder implemented in `utils.vector_memory.VectorMemoryStore`. The helper hashes each chunk into a 32-dimensional vector and compares them with cosine similarity against every stored entry, returning up to the configured `retrieval_top_k` items (default **5**) for each turn. This hand-rolled similarity search keeps the runtime self-contained—no external embedding model downloads are required—while still enabling LangGraph to rank results and apply category-specific fallbacks.
+The documentation embeddings (and all other vector memories) use the deterministic `ctrlspeak-minhash` embedder implemented in `utils.vector_memory.VectorMemoryStore`. The v2 embedder tokenises text into lower-cased unigrams and bigrams, hashes them into a 128-dimensional unit vector, and compares those signatures with cosine similarity so lexical overlap (for example, names, ages, preferences) surfaces reliably. This hashed bag-of-words approach keeps the runtime self-contained—no external embedding model downloads are required—while still enabling LangGraph to rank results and apply category-specific fallbacks. Conversation turns are stored with `category: "chat_history"`, letting the orchestrator expressly request personal memories alongside documentation and temporal snippets when the user asks for them.
 
 ## Date/time context helper (`background_agents/datetime_memory_agent.py`)
 

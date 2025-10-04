@@ -8,10 +8,10 @@ import re
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, TypedDict
+from typing import Any, Callable, Dict, Iterable, List, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 
@@ -24,7 +24,8 @@ from utils.metrics import MetricsRecorder
 from utils.memory_paths import get_bot_conversation_log, get_bot_traces_dir
 from utils.memory_settings import load_identity_settings
 from utils.vector_memory import RetrievedMemory, VectorMemoryStore
-from tools.message_management import force_plaintext, requires_force_plaintext
+from tools.message_management import force_plaintext, requires_force_plaintext, strip_emoji
+from tools.goose_tool import goose_query, ALLOWED_MODES as GOOSE_ALLOWED_MODES
 
 
 CONVERSATION_MAX_BYTES = 10 * 1024 * 1024
@@ -33,6 +34,7 @@ PERSIST_START_DELAY_SECONDS = 0.05
 
 DOCUMENTATION_CATEGORY = "documentation"
 TEMPORAL_CATEGORY = "temporal_context"
+CHAT_HISTORY_CATEGORY = "chat_history"
 _REASONING_TAG_PATTERN = re.compile(r"/(?:no_)?think\b", re.IGNORECASE)
 _DOCUMENTATION_INTENT_PHRASES = (
     "how do i",
@@ -74,6 +76,7 @@ _TEMPORAL_INTENT_PHRASES = (
 
 _CHAT_HISTORY_INTENT_PHRASES = (
     "what do you know about me",
+    "tell me everything you know about me",
     "what's my name",
     "what is my name",
     "do you remember",
@@ -89,6 +92,237 @@ _CHAT_HISTORY_INTENT_PHRASES = (
     "our history",
     "history with me",
 )
+
+
+
+
+PROFILE_CONFIDENCE_THRESHOLD = 0.7
+PROFILE_ATTRIBUTES = {"name", "age", "favorite_sport"}
+_PROFILE_WRITE_PATTERNS = (
+    ("name", re.compile(r"\bmy name is\s+(?P<value>[A-Za-z][A-Za-z\s'\-]{0,60})", re.IGNORECASE)),
+    ("name", re.compile(r"\bi am called\s+(?P<value>[A-Za-z][A-Za-z\s'\-]{0,60})", re.IGNORECASE)),
+    (
+        "age",
+        re.compile(
+            r"\b(?:i am|i'm|my age is)\s+(?P<value>\d{1,3})(?:\s*(?:years? old|yo|yrs? old)\b)?",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "favorite_sport",
+        re.compile(
+            r"\bmy\s+(?:favorite|favourite)\s+sport\s+is\s+(?P<value>[A-Za-z][A-Za-z\s'\-]{0,60})",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
+_PROFILE_READ_PATTERNS = (
+    ("name", re.compile(r"\bwhat(?:'s| is)\s+my\s+name\b", re.IGNORECASE)),
+    ("name", re.compile(r"\bwho\s+am\s+i\b", re.IGNORECASE)),
+    ("age", re.compile(r"\bhow\s+old\s+am\s+i\b", re.IGNORECASE)),
+    ("age", re.compile(r"\bwhat(?:'s| is)\s+my\s+age\b", re.IGNORECASE)),
+    (
+        "favorite_sport",
+        re.compile(
+            r"\bwhat(?:'s| is)\s+my\s+(?:favorite|favourite)\s+sport\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "favorite_sport",
+        re.compile(r"\bdo\s+you\s+remember\s+my\s+(?:favorite|favourite)\s+sport\b", re.IGNORECASE),
+    ),
+)
+
+_PROFILE_GENERAL_PATTERNS = (
+    re.compile(r"\bwhat\s+do\s+you\s+know\s+about\s+me\b", re.IGNORECASE),
+    re.compile(r"\bwhat\s+do\s+you\s+remember\s+about\s+me\b", re.IGNORECASE),
+    re.compile(r"\btell\s+me\s+about\s+myself\b", re.IGNORECASE),
+)
+
+_PROFILE_QUERY_TEXT = {
+    "name": "user.name?",
+    "age": "user.age?",
+    "favorite_sport": "user.favorite_sport?",
+    None: "user.profile?",
+}
+
+
+@dataclass
+class ProfileSlotExtraction:
+    attribute: str
+    value: str
+    confidence: float
+    source: str
+
+
+def _clean_profile_value(text: str) -> str:
+    return text.strip().strip(".?!")
+
+
+def _normalize_profile_value(attribute: str, value: str) -> str:
+    cleaned = _clean_profile_value(value)
+    if attribute == "age":
+        digits = re.findall(r"\d+", cleaned)
+        if digits:
+            return digits[0]
+    return cleaned
+
+
+def _regex_profile_extraction(text: str) -> Optional[ProfileSlotExtraction]:
+    for attribute, pattern in _PROFILE_WRITE_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        value = match.groupdict().get("value", "").strip()
+        if not value:
+            continue
+        normalized = _normalize_profile_value(attribute, value)
+        if not normalized:
+            continue
+        return ProfileSlotExtraction(attribute, normalized, 0.95, "regex")
+    return None
+
+
+def _detect_profile_question(text: str) -> Optional[str]:
+    for attribute, pattern in _PROFILE_READ_PATTERNS:
+        if pattern.search(text):
+            return attribute
+    for pattern in _PROFILE_GENERAL_PATTERNS:
+        if pattern.search(text):
+            return None
+    return None
+
+
+def _chat_query_variants(query_text: str) -> list[str]:
+    lowered = query_text.lower()
+    variants: list[str] = []
+    seen = set()
+
+    def _add(candidate: str) -> None:
+        candidate = candidate.strip()
+        if candidate and candidate not in seen:
+            variants.append(candidate)
+            seen.add(candidate)
+
+    _add(query_text)
+
+    if any(phrase in lowered for phrase in ("what's my name", "what is my name", "tell me my name", "everything you know about me")):
+        _add("my name is")
+
+    if any(term in lowered for term in ("how old am i", "what's my age", "what is my age", "age")):
+        _add("my age is")
+        _add("i am")
+
+    if 'favorite' in lowered or 'favourite' in lowered:
+        after = lowered.split('favorite', 1)[1] if 'favorite' in lowered else lowered.split('favourite', 1)[1]
+        after = after.strip(' ?!.,')
+        if after:
+            first_words = after.split()[:2]
+            for length in range(1, len(first_words) + 1):
+                phrase = ' '.join(first_words[:length])
+                _add(f"my favorite {phrase} is")
+        _add("my favorite")
+
+    if 'sport' in lowered and 'favorite' not in lowered:
+        _add("my favorite sport is")
+
+    if 'everything you know about me' in lowered or 'tell me everything you know about me' in lowered:
+        _add("my name is")
+        _add("i am")
+        _add("i like")
+
+    if lowered.startswith('look at our chat history') or 'chat history' in lowered:
+        _add("my name is")
+        _add("my age is")
+
+    if not variants:
+        variants.append(query_text)
+    return variants
+
+
+def _format_chat_history_response(retrieved_items: List[dict]) -> str:
+    facts: List[str] = []
+    seen: set[str] = set()
+    for item in retrieved_items:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata") or {}
+        if str(metadata.get("category", "")) != CHAT_HISTORY_CATEGORY:
+            continue
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        role = str(metadata.get("role") or "")
+        if role == "turn":
+            for line in content.splitlines():
+                trimmed = line.strip()
+                if trimmed and trimmed not in seen:
+                    facts.append(trimmed)
+                    seen.add(trimmed)
+        else:
+            if content not in seen:
+                facts.append(content)
+                seen.add(content)
+    if not facts:
+        return ""
+    summary_lines = ["Here is what our previous conversations mention:"]
+    summary_lines.extend(f"- {fact}" for fact in facts[:8])
+    return "\\n".join(summary_lines)
+
+
+TOOL_RESPONSE_CHAR_LIMIT = 4000
+
+_TOOL_EXECUTION_GUARD = (
+    "You have access to the goose_tool_query function. Use it for any filesystem or execution task by describing the request in natural language. "
+    "Return a tool call whenever the user asks you to inspect, modify, search, list, or run files. Do not fabricate results—let the tool perform the work."
+)
+
+_GOOSE_TOOL_SCHEMA: List[Dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "goose_tool_query",
+            "description": (
+                "Delegate complex workspace operations to the Goose CLI. Provide a detailed natural-language prompt that explains"
+                " the desired file action (read, edit, create, list, search, execute, etc.)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Detailed instruction for Goose describing the desired workspace task.",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "Optional Goose mode ('auto', 'smart_approve', 'approve', or 'chat').",
+                        "enum": sorted(GOOSE_ALLOWED_MODES),
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional Goose model identifier to override the default.",
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Optional Goose provider name (defaults to 'ollama').",
+                    },
+                    "goose_exe": {
+                        "type": "string",
+                        "description": "Optional path to the Goose executable (defaults to 'goose').",
+                    },
+                    "stream": {
+                        "type": "boolean",
+                        "description": "Stream Goose output live (defaults to false).",
+                    },
+                },
+                "required": ["prompt"],
+                "additionalProperties": False,
+            },
+        },
+    }
+]
 
 _ASSESSMENT_INSTRUCTIONS = (
     "You are the CtrlSpeak retrieval planner."
@@ -129,6 +363,15 @@ class _TurnState(TypedDict, total=False):
     think_hidden: bool
     think_placeholder: str
     hidden_think: str
+    profile_action: str
+    profile_attribute: str
+    profile_value: str
+    profile_confidence: float
+    profile_source: str
+    profile_confirmation_required: bool
+    profile_updates: List[Dict[str, Any]]
+    profile_results: List[Dict[str, Any]]
+    profile_response: str
 
 
 @dataclass
@@ -160,13 +403,30 @@ class PersistenceTask:
         vector_documents: List[str],
         vector_metadata: List[Dict[str, Any]],
         settings: Dict[str, Any],
+        profile_updates: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         self.correlation_id = correlation_id
         self.entries = entries
         self.vector_documents = vector_documents
         self.vector_metadata = vector_metadata
         self.settings = settings
+        self.profile_updates = list(profile_updates or [])
         self.retries = 0
+
+
+@dataclass
+class ToolAction:
+    kind: str
+    description: str
+    candidate_path: Optional[str] = None
+    search_term: Optional[str] = None
+    location_hint: Optional[str] = None
+    source: str = "langgraph"
+    parameters: Optional[Dict[str, Any]] = None
+
+    def __post_init__(self) -> None:
+        if self.parameters is None:
+            self.parameters = {}
 
 
 class MemoryPersistenceWorker:
@@ -236,17 +496,22 @@ class MemoryPersistenceWorker:
 
     def _flush_vector_store(self, task: PersistenceTask) -> int:
         settings = task.settings
+        evicted = 0
+        for update in task.profile_updates:
+            try:
+                self.vector_store.upsert_profile_slot(**update)
+            except Exception as exc:
+                logger.debug("Profile upsert failed: %s", exc)
         if not settings.get("store_vector_memory", True):
-            return 0
+            return evicted
         documents = task.vector_documents
         if not documents:
-            return 0
+            return evicted
         ttl_days = settings.get("vector_ttl_days")
         try:
             ttl_value = None if ttl_days is None else float(ttl_days)
         except Exception:
             ttl_value = None
-        evicted = 0
         try:
             evicted += self.vector_store.purge_expired()
         except Exception:
@@ -274,6 +539,8 @@ class MemoryOrchestrator:
         metrics_path: Path,
         identity_settings: Optional[Dict[str, Any]] = None,
         think_manager: Optional[ManageThinkAgent] = None,
+        tooling_enabled: bool = False,
+        tool_logger: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.identity = identity
         self.llm_client = llm_client
@@ -288,7 +555,19 @@ class MemoryOrchestrator:
         self.traces_dir = get_bot_traces_dir(identity)
         self.metrics = MetricsRecorder(metrics_path)
         self.vector_store = VectorMemoryStore(identity)
-        self.history: List[dict] = self._load_history()
+        prior_history = self._load_history()
+        self._prior_history_count = len(prior_history)
+        if self._prior_history_count:
+            logger.debug(
+                "Loaded %d persisted history entries for identity '%s'; starting new session with a fresh runtime history.",
+                self._prior_history_count,
+                self.identity,
+            )
+        self.history: List[dict] = []
+        self.tooling_enabled = bool(tooling_enabled)
+        self._custom_tool_logger: Optional[Callable[[str], None]] = tool_logger
+        self.profile_user_id = str(self.identity_settings.get("profile_user_id") or "default_user")
+        self.profile_rerank_enabled = bool(self.identity_settings.get("profile_rerank", False))
         self._graph = self._build_graph()
         self._persistence = MemoryPersistenceWorker(
             identity,
@@ -338,164 +617,183 @@ class MemoryOrchestrator:
         graph.add_edge("persist", END)
         return graph.compile()
 
-    def _documentation_threshold(self) -> float:
-        value = self.identity_settings.get("documentation_retrieval_threshold")
-        try:
-            return float(value)
-        except Exception:
-            return 0.35
+    def _emit_tool_event(self, message: str) -> None:
+        if not self.tooling_enabled:
+            return
+        prefixed = f"[Tools] {message}"
+        if self._custom_tool_logger is not None:
+            try:
+                self._custom_tool_logger(prefixed)
+                return
+            except Exception:
+                pass
+        print(prefixed)
 
-    def _build_planner_prompt(self, query_text: str) -> str:
-        cleaned = _REASONING_TAG_PATTERN.sub("", query_text or "")
-        cleaned = cleaned.strip()
-        if not cleaned:
-            cleaned = (query_text or "").strip()
+    @staticmethod
+    def _log_turn_event(message: str) -> None:
+        print(f"[LangGraph] {message}")
+
+    @staticmethod
+    def _preview_text(value: str, *, limit: int = 200) -> str:
+        cleaned = value.replace("\n", " ").strip()
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[: limit - 1].rstrip() + "…"
+
+    def _plan_tool_actions(self, state: _TurnState) -> List[ToolAction]:
+        """Tool selection is delegated entirely to the LLM."""
+        return []
+
+    def _extract_profile_slot(self, text: str) -> Optional[ProfileSlotExtraction]:
+        extraction = _regex_profile_extraction(text)
+        if extraction is not None:
+            return extraction
+        return self._llm_profile_slot(text)
+
+    def _llm_profile_slot(self, text: str) -> Optional[ProfileSlotExtraction]:
         prompt = (
-            "Decide which additional context is required for this user question:\n"
-            f"{cleaned}"
+            "Extract a user profile fact from the statement if one is clearly provided. "
+            "Allowed attributes: name, age, favorite_sport. Respond with strict JSON "
+            "of the form {\"attribute\": <attribute or null>, \"value\": <value or null>, "
+            "\"confidence\": <0-1 number>}. Return an empty object when no fact is present."
+            f"\nStatement: {text}"
         )
-        if self.identity.casefold() == "einstein":
-            prompt = f"{prompt}\n/no_think"
-        return prompt
-
-    @staticmethod
-    def _should_prioritize_documentation(text: str) -> bool:
-        if not text:
-            return False
-        lowered = text.casefold()
-        stripped = lowered.strip()
-        if stripped in {"help", "docs", "documentation", "manual", "guide"}:
-            return True
-        if "explain" in lowered and any(
-            phrase in lowered for phrase in {"program", "software", "ctrlspeak", "app", "bot"}
-        ):
-            return True
-        return any(phrase in lowered for phrase in _DOCUMENTATION_INTENT_PHRASES)
-
-    def _temporal_threshold(self) -> float:
-        value = self.identity_settings.get("temporal_retrieval_threshold")
         try:
-            return float(value)
+            response = self.llm_client.query(
+                prompt,
+                history=[{"role": "system", "content": "You produce minimal JSON."}],
+            )
+        except Exception as exc:
+            logger.debug("Profile slot LLM extraction failed: %s", exc)
+            return None
+        payload = str(response).strip()
+        start = payload.find("{")
+        end = payload.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            payload = payload[start : end + 1]
+        try:
+            data = json.loads(payload)
         except Exception:
-            return 0.15
-
-    @staticmethod
-    def _should_prioritize_temporal(text: str) -> bool:
-        if not text:
-            return False
-        lowered = text.casefold()
-        stripped = lowered.strip()
-        if stripped in {"date", "time", "timezone", "time zone"}:
-            return True
-        return any(phrase in lowered for phrase in _TEMPORAL_INTENT_PHRASES)
-
-    @staticmethod
-    def _should_prioritize_chat_history(text: str) -> bool:
-        if not text:
-            return False
-        lowered = text.casefold()
-        if "history" in lowered and any(
-            token in lowered for token in {"chat", "conversation", "with me", "about us"}
-        ):
-            return True
-        return any(phrase in lowered for phrase in _CHAT_HISTORY_INTENT_PHRASES)
-
-    @staticmethod
-    def _parse_assessment_response(response: str) -> Optional[Dict[str, bool]]:
-        if not response:
+            logger.debug("Profile slot LLM response not valid JSON: %s", payload)
             return None
-        lowered = response.strip().casefold()
-        if not lowered:
+        if not isinstance(data, dict):
             return None
-        if lowered in {"no", "nope", "nah"}:
-            lowered = "none"
-        tokens = [token for token in re.split(r"[^a-z]+", lowered) if token]
+        attribute = str(data.get("attribute") or "").strip().lower()
+        value = str(data.get("value") or "").strip()
+        if attribute not in PROFILE_ATTRIBUTES or not value:
+            return None
+        normalized = _normalize_profile_value(attribute, value)
+        if not normalized:
+            return None
+        try:
+            confidence = float(data.get("confidence", 0.0))
+        except Exception:
+            confidence = 0.0
+        confidence = max(0.0, min(confidence, 1.0))
+        return ProfileSlotExtraction(attribute, normalized, confidence, "llm")
+
+    def _default_retrieval_plan(self, text: str) -> Dict[str, bool]:
+        lowered = text.lower()
+        plan = {"documentation": False, "chat_history": False, "date": False}
+        if any(phrase in lowered for phrase in _DOCUMENTATION_INTENT_PHRASES):
+            plan["documentation"] = True
+        if any(phrase in lowered for phrase in _CHAT_HISTORY_INTENT_PHRASES):
+            plan["chat_history"] = True
+        if any(phrase in lowered for phrase in _TEMPORAL_INTENT_PHRASES):
+            plan["date"] = True
+        return plan
+
+    def _build_planner_prompt(self, text: str) -> str:
+        cleaned = text.strip()
+        cleaned = _REASONING_TAG_PATTERN.sub("", cleaned).strip()
+        if "/no_think" not in cleaned.lower():
+            cleaned = f"{cleaned} /no_think".strip()
+        return cleaned
+
+    @staticmethod
+    def _parse_assessment_response(payload: str) -> Optional[Dict[str, bool]]:
+        if not payload:
+            return None
+        normalized = payload.strip().lower()
+        if not normalized:
+            return None
+        tokens = [token.strip() for token in normalized.split(",") if token.strip()]
         if not tokens:
+            if normalized == "none":
+                return {"documentation": False, "chat_history": False, "date": False}
             return None
-        if any(token not in {"documentation", "chat", "chat_history", "history", "date", "time", "timezone", "none"} for token in tokens):
+        valid = {"documentation", "chat_history", "date", "none"}
+        if any(token not in valid for token in tokens):
             return None
-        if "none" in tokens:
+        if tokens == ["none"]:
             return {"documentation": False, "chat_history": False, "date": False}
-        normalized: Dict[str, bool] = {"documentation": False, "chat_history": False, "date": False}
+        plan = {"documentation": False, "chat_history": False, "date": False}
         for token in tokens:
-            if token == "documentation":
-                normalized["documentation"] = True
-            elif token in {"chat_history", "history", "chat"}:
-                normalized["chat_history"] = True
-            elif token in {"date", "time", "timezone"}:
-                normalized["date"] = True
-        return normalized
+            if token == "none":
+                continue
+            plan[token] = True
+        return plan
 
     @staticmethod
     def _summarize_plan(plan: Dict[str, bool]) -> str:
         if not plan:
             return "none"
-        requested = [key for key, value in plan.items() if value]
-        return "+".join(requested) if requested else "none"
+        enabled = [name for name, enabled in plan.items() if enabled]
+        return ",".join(enabled) if enabled else "none"
 
-    def _default_retrieval_plan(self, text: str) -> Dict[str, bool]:
-        return {
-            "documentation": self._should_prioritize_documentation(text),
-            "chat_history": self._should_prioritize_chat_history(text),
-            "date": self._should_prioritize_temporal(text),
-        }
+    def _documentation_threshold(self) -> float:
+        raw = self.identity_settings.get("documentation_threshold")
+        try:
+            value = float(raw)
+        except Exception:
+            base = float(self.identity_settings.get("retrieval_threshold", 0.75))
+            value = min(base, 0.6)
+        return max(0.0, value)
 
-    # ------------------------------------------------------------------
-    def _resolve_vision_payload(
-        self,
-        augmented_text: str,
-        vision_metadata: Optional[Dict[str, Any]],
-    ) -> tuple[Optional[List[dict]], Optional[Dict[str, Any]], bool]:
-        metadata: Dict[str, Any] = {}
-        if isinstance(vision_metadata, dict):
-            metadata = dict(vision_metadata)
+    def _temporal_threshold(self) -> float:
+        raw = self.identity_settings.get("temporal_threshold")
+        try:
+            value = float(raw)
+        except Exception:
+            base = float(self.identity_settings.get("retrieval_threshold", 0.75))
+            value = min(base, 0.5)
+        return max(0.0, value)
 
-        request_hint = metadata.get("vision_request")
-        include_image = bool(request_hint)
-        if not include_image and is_image_request(augmented_text):
-            include_image = True
-
-        if not include_image:
-            metadata.pop("vision_attached", None)
-            return None, (metadata or None), False
-
-        record = load_identity_image(self.identity)
-        if record is None:
-            logger.debug(
-                "Requested image attachment for identity '%s' but no stored PNG was found.",
-                self.identity,
-            )
-            metadata.pop("vision_attached", None)
-            return None, (metadata or None), False
-
-        metadata.update(
-            {
-                "vision_file": str(record.path),
-                "vision_updated": record.updated_at_iso,
-            }
-        )
-        if record.source and not metadata.get("vision_source"):
-            metadata["vision_source"] = record.source
-        metadata["vision_attached"] = True
-        metadata.pop("vision_request", None)
-
-        content = [
-            {"type": "text", "text": augmented_text},
-            {"type": "image", "image": record.image_b64},
-        ]
-        return content, metadata, True
-
-    # ------------------------------------------------------------------
-    # Graph nodes
-    # ------------------------------------------------------------------
     def _node_assess_context(self, state: _TurnState) -> _TurnState:
         query_text = state.get("augmented_text") or state.get("user_text") or ""
+        cleaned_query = force_plaintext(query_text)
+        state["profile_action"] = "none"
+        state["profile_attribute"] = ""
+        state["profile_value"] = ""
+        state["profile_confidence"] = 0.0
+        state["profile_source"] = ""
+        state["profile_confirmation_required"] = False
+        state["profile_updates"] = []
+        state["profile_results"] = []
+        state["profile_response"] = ""
         plan: Dict[str, bool] = {"documentation": False, "chat_history": False, "date": False}
         summary = "none"
         planned = False
         planner_invoked = False
 
-        if query_text.strip():
+        if cleaned_query.strip():
+            extraction = self._extract_profile_slot(cleaned_query)
+            if extraction:
+                state["profile_action"] = "write"
+                state["profile_attribute"] = extraction.attribute
+                state["profile_value"] = extraction.value
+                state["profile_confidence"] = extraction.confidence
+                state["profile_source"] = extraction.source
+                if extraction.confidence < PROFILE_CONFIDENCE_THRESHOLD:
+                    state["profile_confirmation_required"] = True
+            else:
+                question_attribute = _detect_profile_question(cleaned_query)
+                if question_attribute is not None:
+                    state["profile_action"] = "read"
+                    state["profile_attribute"] = question_attribute or ""
+                    state["profile_confidence"] = 1.0
+                    state["profile_source"] = "question"
+
             heuristic_plan = self._default_retrieval_plan(query_text)
             for key, value in heuristic_plan.items():
                 if value:
@@ -527,7 +825,64 @@ class MemoryOrchestrator:
         state["retrieval_plan_used_llm"] = planner_invoked
         return state
 
+    def _handle_profile_read(self, state: _TurnState, query_text: str) -> _TurnState:
+        attribute_key = state.get("profile_attribute") or ""
+        attribute = attribute_key or None
+        canonical_query = _PROFILE_QUERY_TEXT.get(attribute, "user.profile?")
+        results = self.vector_store.query_profile(
+            canonical_query,
+            self.profile_user_id,
+            attribute=attribute,
+            k=3,
+            rerank=self.profile_rerank_enabled,
+        )
+        state["vector_query_attempted"] = True
+        state["vector_query_result_count"] = len(results)
+        state["vector_query_documentation_count"] = 0
+        state["vector_query_temporal_count"] = 0
+        state["retrieved"] = [
+            {"content": item.content, "metadata": item.metadata, "similarity": item.similarity}
+            for item in results
+        ]
+        state["profile_results"] = list(state["retrieved"])
+        friendly_attribute = attribute_key.replace("_", " ") if attribute_key else "profile"
+        if not results:
+            if attribute_key:
+                response = (
+                    f"I don't have your {friendly_attribute} yet. Let me know and I'll remember it."
+                )
+            else:
+                response = (
+                    "I don't have any saved profile details yet. Tell me things like your name, age, or favorite sport and I'll remember them."
+                )
+        else:
+            if attribute_key:
+                top = results[0]
+                value = top.metadata.get("value") or top.metadata.get("Value") or top.content
+                response = f"Your {friendly_attribute} is {value}."
+            else:
+                lines = []
+                for item in results:
+                    meta = item.metadata or {}
+                    attr = str(meta.get("attribute") or "").strip()
+                    value = str(meta.get("value") or "").strip()
+                    if attr in PROFILE_ATTRIBUTES and value:
+                        lines.append(f"- {attr.replace('_', ' ')}: {value}")
+                if lines:
+                    response = "Here is what I have saved about you:\n" + "\n".join(lines)
+                else:
+                    response = "I have a few profile facts saved for you."
+        state["profile_response"] = response
+        state["response_text"] = response
+        state["raw_response_text"] = response
+        state["skip_llm"] = True
+        state.setdefault("metrics", {})
+        return state
+
     def _node_retrieve(self, state: _TurnState) -> _TurnState:
+        if state.get("profile_action") == "read":
+            query_text = state.get("augmented_text") or state.get("user_text") or ""
+            return self._handle_profile_read(state, query_text)
         threshold = float(self.identity_settings.get("retrieval_threshold", 0.75))
         top_k = int(self.identity_settings.get("retrieval_top_k", 5))
         query_text = state.get("augmented_text") or state.get("user_text") or ""
@@ -540,6 +895,9 @@ class MemoryOrchestrator:
         doc_limit = min(top_k, 3 if doc_intent else 1)
         category_thresholds: dict[str, float] = {}
         fallback_categories: dict[str, int] = {}
+        if chat_intent:
+            category_thresholds[CHAT_HISTORY_CATEGORY] = threshold
+            fallback_categories[CHAT_HISTORY_CATEGORY] = max(1, min(top_k, 4))
         if doc_intent:
             category_thresholds[DOCUMENTATION_CATEGORY] = doc_threshold
             fallback_categories[DOCUMENTATION_CATEGORY] = doc_limit
@@ -554,35 +912,51 @@ class MemoryOrchestrator:
         results = []
         metrics: Dict[str, float] = {}
         attempted = False
+        used_query = query_text
 
-        if query_text and (doc_intent or temporal_intent or chat_intent):
-            attempted = True
-            try:
-                results = self.vector_store.retrieve(
-                    query_text,
-                    top_k=top_k,
-                    threshold=threshold,
-                    category_thresholds=category_thresholds,
-                    fallback_categories=fallback_categories,
-                )
-            except Exception as exc:
-                state.setdefault("errors", []).append({"node": "retrieve", "error": str(exc)})
+        if chat_intent:
+            query_candidates = _chat_query_variants(query_text)
+        else:
+            query_candidates = [query_text]
+
+        if doc_intent or temporal_intent or chat_intent:
+            for candidate in query_candidates:
+                if not candidate.strip():
+                    continue
+                attempted = True
+                try:
+                    candidate_results = self.vector_store.retrieve(
+                        candidate,
+                        top_k=top_k,
+                        threshold=threshold,
+                        category_thresholds=category_thresholds,
+                        fallback_categories=fallback_categories,
+                    )
+                except Exception as exc:
+                    state.setdefault("errors", []).append({"node": "retrieve", "error": str(exc)})
+                    continue
+                if candidate_results:
+                    results = candidate_results
+                    used_query = candidate
+                    if candidate != query_text:
+                        print(f"[Memory] Chat query adjusted to: {candidate}")
+                    break
 
         if (
             attempted
             and not results
+            and chat_intent
             and not doc_intent
             and not temporal_intent
-            and chat_intent
-            and query_text
         ):
             try:
+                relaxed_threshold = min(threshold, 0.6)
                 results = self.vector_store.retrieve(
-                    query_text,
+                    used_query,
                     top_k=top_k,
-                    threshold=threshold,
-                    category_thresholds={DOCUMENTATION_CATEGORY: doc_threshold},
-                    fallback_categories={DOCUMENTATION_CATEGORY: doc_limit},
+                    threshold=relaxed_threshold,
+                    category_thresholds={CHAT_HISTORY_CATEGORY: relaxed_threshold},
+                    fallback_categories={CHAT_HISTORY_CATEGORY: max(1, min(top_k, 4))},
                 )
             except Exception as exc:
                 state.setdefault("errors", []).append({"node": "retrieve", "error": str(exc)})
@@ -591,15 +965,38 @@ class MemoryOrchestrator:
             filtered = []
             for item in results:
                 metadata = item.metadata or {}
-                category = str(metadata.get("category", ""))
-                if category == DOCUMENTATION_CATEGORY and not doc_intent:
-                    continue
-                if category == TEMPORAL_CATEGORY and not temporal_intent:
-                    continue
-                if category not in {DOCUMENTATION_CATEGORY, TEMPORAL_CATEGORY} and not chat_intent:
-                    continue
+                category = str(metadata.get("category", "") or "")
+                if not category:
+                    category = CHAT_HISTORY_CATEGORY
+                if category == DOCUMENTATION_CATEGORY:
+                    if not doc_intent:
+                        continue
+                elif category == TEMPORAL_CATEGORY:
+                    if not temporal_intent:
+                        continue
+                elif category == CHAT_HISTORY_CATEGORY:
+                    if not chat_intent:
+                        continue
+                else:
+                    if not chat_intent:
+                        continue
                 filtered.append(item)
             results = filtered
+
+        if attempted and chat_intent:
+            chat_results = [
+                item
+                for item in results
+                if str(item.metadata.get("category", "")) == CHAT_HISTORY_CATEGORY
+            ]
+            if chat_results:
+                print("[Memory] Chat history results:")
+                for index, item in enumerate(chat_results[:top_k], start=1):
+                    role = str(item.metadata.get("role") or "unknown")
+                    snippet = item.content.replace("\n", " ").strip()
+                    if len(snippet) > 200:
+                        snippet = snippet[:197] + "..."
+                    print(f"  {index}. ({role}) {snippet}")
 
         if results:
             avg_similarity = sum(item.similarity for item in results) / len(results)
@@ -637,20 +1034,173 @@ class MemoryOrchestrator:
             container.update(metrics)
         return state
 
+    @staticmethod
+    def _serialize_tool_action(action: ToolAction) -> Dict[str, Any]:
+        return {
+            "kind": action.kind,
+            "description": action.description,
+            "candidate_path": action.candidate_path,
+            "search_term": action.search_term,
+            "location_hint": action.location_hint,
+            "source": action.source,
+            "parameters": action.parameters,
+        }
+
+    @staticmethod
+    def _deserialize_tool_action(payload: Dict[str, Any]) -> ToolAction:
+        return ToolAction(
+            kind=str(payload.get("kind", "")),
+            description=str(payload.get("description", "")),
+            candidate_path=payload.get("candidate_path"),
+            search_term=payload.get("search_term"),
+            location_hint=payload.get("location_hint"),
+            source=str(payload.get("source", "langgraph")),
+            parameters=dict(payload.get("parameters") or {}),
+        )
+
+
+    def _actions_from_tool_calls(
+        self,
+        tool_calls: Iterable[Dict[str, Any]],
+        *,
+        user_text: Optional[str] = None,
+    ) -> List[ToolAction]:
+        actions: List[ToolAction] = []
+        for index, call in enumerate(tool_calls):
+            function_payload = call.get("function") if isinstance(call, dict) else None
+            if not isinstance(function_payload, dict):
+                continue
+            name = str(function_payload.get("name") or "").strip()
+            raw_arguments = function_payload.get("arguments", {})
+            if isinstance(raw_arguments, str):
+                try:
+                    arguments = json.loads(raw_arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+            elif isinstance(raw_arguments, dict):
+                arguments = dict(raw_arguments)
+            else:
+                arguments = {}
+
+            if name != "goose_tool_query":
+                continue
+
+            prompt_value = str(arguments.get("prompt") or "").strip()
+            if not prompt_value:
+                continue
+
+            parameters: Dict[str, Any] = {"prompt": prompt_value, "tool_call_index": index}
+            for optional_key in ("mode", "model", "provider", "goose_exe"):
+                value = arguments.get(optional_key)
+                if isinstance(value, str) and value.strip():
+                    parameters[optional_key] = value.strip()
+            stream_value = arguments.get("stream")
+            if isinstance(stream_value, bool):
+                parameters["stream"] = stream_value
+
+            preview = prompt_value.replace("\n", " ")
+            if len(preview) > 60:
+                preview = preview[:57].rstrip() + "…"
+            description = f"Goose query: {preview}"
+            actions.append(
+                ToolAction(
+                    kind="goose_query",
+                    description=description,
+                    source="llm",
+                    parameters=parameters,
+                )
+            )
+        return actions
+
+    def _execute_tool_plan(self, actions: List[ToolAction]) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        for action in actions:
+            if action.kind == "goose_query":
+                results.append(self._execute_goose_tool_query_action(action))
+            else:
+                self._emit_tool_event(f"Unsupported tool action '{action.kind}' ignored.")
+                results.append({"kind": action.kind, "success": False, "message": "unsupported"})
+        return results
+
+    def _execute_goose_tool_query_action(self, action: ToolAction) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "kind": action.kind,
+            "description": action.description,
+            "success": False,
+        }
+        parameters = action.parameters or {}
+        prompt = str(parameters.get("prompt") or "").strip()
+        if not prompt:
+            result["message"] = "Goose query missing prompt."
+            self._emit_tool_event("Goose tool call rejected: missing prompt.")
+            return result
+
+        goose_kwargs: Dict[str, Any] = {}
+        for optional_key in ("mode", "model", "provider", "goose_exe"):
+            value = parameters.get(optional_key)
+            if isinstance(value, str) and value.strip():
+                goose_kwargs[optional_key] = value.strip()
+
+        stream_value = parameters.get("stream")
+        if isinstance(stream_value, bool) and not stream_value:
+            self._emit_tool_event(
+                "Goose tool requested non-streaming output; forcing stream=True for terminal visibility."
+            )
+
+        goose_kwargs["stream"] = True
+
+        try:
+            self._log_turn_event(
+                f"Calling Goose tool with prompt: {self._preview_text(prompt)}"
+            )
+            self._emit_tool_event("Invoking goose_tool_query.")
+            output = goose_query(prompt, **goose_kwargs)
+        except Exception as exc:
+            message = str(exc)
+            result["message"] = message
+            self._emit_tool_event(f"Goose tool failed: {message}")
+            return result
+
+        result.update({
+            "success": True,
+            "output": output,
+            "prompt": prompt,
+        })
+        self._log_turn_event(
+            f"Goose tool completed successfully: {self._preview_text(output)}"
+        )
+        return result
     def _node_plan_tools(self, state: _TurnState) -> _TurnState:
-        # Placeholder for future tool planning.
         if not isinstance(state.get("metrics"), dict):
             state["metrics"] = {}
         if not isinstance(state.get("errors"), list):
             state["errors"] = []
+        actions = self._plan_tool_actions(state)
+        state["tool_plan"] = [self._serialize_tool_action(action) for action in actions]
+        state["tool_plan_summary"] = "none"
+        state.pop("tool_probe_hint", None)
+        state.pop("tool_probe_pending", None)
+        state.pop("tool_probe_force_required", None)
         return state
 
     def _node_call_tools(self, state: _TurnState) -> _TurnState:
-        # Currently there are no blocking tool calls.
+        plan_entries = state.get("tool_plan")
+        if not self.tooling_enabled or not isinstance(plan_entries, list) or not plan_entries:
+            state.pop("tool_probe_pending", None)
+            state.pop("tool_probe_force_required", None)
+            return state
+
+        actions: List[ToolAction] = []
+        for entry in plan_entries:
+            if isinstance(entry, dict):
+                actions.append(self._deserialize_tool_action(entry))
+        if not actions:
+            return state
+
+        self._emit_tool_event("Tool plan ready; awaiting LLM decision.")
         return state
 
-    def _node_llm(self, state: _TurnState) -> _TurnState:
-        augmented = state.get("augmented_text") or state.get("user_text") or ""
+    def _prepare_history_with_context(self, state: _TurnState) -> List[dict]:
         history = list(self.history)
         retrieved = state.get("retrieved") or []
         if retrieved:
@@ -677,17 +1227,10 @@ class MemoryOrchestrator:
                 sections.append("Temporal context:\n" + "\n".join(temporal_lines))
             if sections:
                 history.append({"role": "system", "content": "\n\n".join(sections)})
-        content_blocks = state.get("content_blocks")
-        try:
-            response = self.llm_client.query(
-                augmented,
-                history=history,
-                content=content_blocks,
-            )
-        except Exception as exc:
-            state.setdefault("errors", []).append({"node": "llm", "error": str(exc)})
-            response = "I'm having trouble responding right now."
-        raw_response = (response or "")
+        return history
+
+    def _store_llm_response(self, state: _TurnState, raw_response: str) -> _TurnState:
+        state.pop("think_missing_answer", None)
         state["raw_response_text"] = raw_response
         filtered_response = raw_response
         if self.think_manager is not None:
@@ -703,38 +1246,323 @@ class MemoryOrchestrator:
                         state["think_placeholder"] = think_result.placeholder_text
                     if think_result.hidden_think:
                         state["hidden_think"] = think_result.hidden_think
+                    if not filtered_response.strip():
+                        state["think_missing_answer"] = True
         state["response_text"] = filtered_response or ""
+        if filtered_response:
+            self._log_turn_event(
+                f"LLM returned response: {self._preview_text(filtered_response)}"
+            )
         return state
+
+    def _normalize_history_for_chat(self, history: List[dict]) -> List[dict]:
+        normalizer = getattr(self.llm_client, "_normalize_history_entry", None)
+        normalized: List[dict] = []
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            if callable(normalizer):
+                normalized.append(normalizer(entry))
+            else:
+                role = entry.get("role", "user")
+                content = entry.get("content", "")
+                normalized.append({"role": role, "content": content})
+        return normalized
+
+    def _build_user_message(self, state: _TurnState, text: str) -> dict:
+        content_blocks = state.get("content_blocks")
+        builder = getattr(self.llm_client, "_build_user_message", None)
+        if content_blocks is not None and callable(builder):
+            try:
+                return builder(content_blocks)
+            except Exception:
+                pass
+        return {"role": "user", "content": text}
+
+    def _node_llm_plain(self, state: _TurnState) -> _TurnState:
+        augmented = state.get("augmented_text") or state.get("user_text") or ""
+        history = self._prepare_history_with_context(state)
+        content_blocks = state.get("content_blocks")
+        self._log_turn_event(
+            f"Sending to LLM without tools: {self._preview_text(str(augmented))}"
+        )
+        try:
+            response = self.llm_client.query(
+                augmented,
+                history=history,
+                content=content_blocks,
+            )
+        except Exception as exc:
+            state.setdefault("errors", []).append({"node": "llm", "error": str(exc)})
+            raw_response = "I'm having trouble responding right now."
+        else:
+            raw_response = response or ""
+        stored_state = self._store_llm_response(state, raw_response)
+        if stored_state.pop("think_missing_answer", False):
+            if stored_state.get("_think_retry_attempted"):
+                apology = "I'm sorry, I wasn't able to produce a final answer. Please try again."
+                stored_state["response_text"] = apology
+                stored_state["raw_response_text"] = apology
+                stored_state.pop("_think_retry_attempted", None)
+                return stored_state
+
+            stored_state["_think_retry_attempted"] = True
+            reminder = (
+                "Your previous response only contained a <think> plan. Provide the final Answer now "
+                "without using <think>."
+            )
+            self._log_turn_event(
+                "LLM response contained only a hidden plan; requesting the visible answer."
+            )
+            history.append({"role": "assistant", "content": raw_response})
+            try:
+                retry_raw = self.llm_client.query(
+                    reminder,
+                    history=history,
+                    content=content_blocks,
+                )
+            except Exception as exc:
+                state.setdefault("errors", []).append({"node": "llm", "error": str(exc)})
+                apology = "I'm sorry, I wasn't able to produce a final answer. Please try again."
+                stored_state["response_text"] = apology
+                stored_state["raw_response_text"] = apology
+                stored_state.pop("_think_retry_attempted", None)
+                return stored_state
+
+            for key in (
+                "response_text",
+                "raw_response_text",
+                "think_hidden",
+                "think_placeholder",
+                "hidden_think",
+            ):
+                stored_state.pop(key, None)
+
+            return self._store_llm_response(state, retry_raw or "")
+
+        stored_state.pop("_think_retry_attempted", None)
+        return stored_state
+
+    def _tool_name_for_action(self, action: ToolAction) -> str:
+        if action.kind == "goose_query":
+            return "goose_tool_query"
+        return action.kind
+
+    def _node_llm_with_tools(self, state: _TurnState) -> Optional[_TurnState]:
+        augmented = state.get("augmented_text") or state.get("user_text") or ""
+        history = self._prepare_history_with_context(state)
+        messages: List[dict] = []
+        system_prompt = getattr(self.llm_client, "system_prompt", None)
+        if system_prompt:
+            messages.append({"role": "system", "content": str(system_prompt)})
+        messages.append({"role": "system", "content": _TOOL_EXECUTION_GUARD})
+        messages.extend(self._normalize_history_for_chat(history))
+
+        user_message = self._build_user_message(state, augmented)
+        messages.append(user_message)
+
+        preview_source = augmented
+        if isinstance(user_message, dict):
+            content = user_message.get("content")
+            if isinstance(content, str) and content.strip():
+                preview_source = content
+            elif isinstance(content, list):
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text_parts.append(str(block.get("text") or ""))
+                if text_parts:
+                    preview_source = " ".join(text_parts)
+        self._log_turn_event(
+            "Sending to LLM with tools (goose_tool_query available): "
+            f"{self._preview_text(str(preview_source))}"
+        )
+
+        loop_results: List[Dict[str, Any]] = []
+        max_iterations = 6
+        for iteration in range(max_iterations):
+            try:
+                response = self.llm_client.chat(
+                    messages,
+                    tools=_GOOSE_TOOL_SCHEMA,
+                    tool_choice="auto",
+                    stream=False,
+                )
+            except Exception as exc:
+                self._emit_tool_event(f"Tool-enabled LLM call failed: {exc}")
+                state.setdefault("errors", []).append({"node": "llm", "error": str(exc)})
+                return None
+
+            message = response.get("message") if isinstance(response, dict) else None
+            if not isinstance(message, dict):
+                break
+
+            tool_calls = message.get("tool_calls")
+            content = str(message.get("content") or "")
+
+            if tool_calls:
+                actions = self._actions_from_tool_calls(tool_calls, user_text=state.get("user_text"))
+                if not actions:
+                    if content:
+                        messages.append({"role": "assistant", "content": content})
+                        return self._store_llm_response(state, content)
+                    break
+
+                assistant_entry = {"role": "assistant", "content": content or "", "tool_calls": tool_calls}
+                messages.append(assistant_entry)
+
+                for action in actions:
+                    tool_name = self._tool_name_for_action(action)
+                    parameters = action.parameters or {}
+                    prompt_text = str(parameters.get("prompt") or "")
+                    if prompt_text:
+                        self._log_turn_event(
+                            f"LLM requested tool '{tool_name}' with prompt: {self._preview_text(prompt_text)}"
+                        )
+
+                results = self._execute_tool_plan(actions)
+                loop_results.extend(results)
+                state.setdefault("tool_results", []).extend(results)
+
+                for tool_call, action, result in zip(tool_calls, actions, results):
+                    tool_name = str(tool_call.get("function", {}).get("name") or self._tool_name_for_action(action))
+                    try:
+                        serialized = json.dumps(result, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        serialized = str(result)
+                    self._log_turn_event(
+                        f"Handing tool output back to LLM for '{tool_name}': {self._preview_text(serialized)}"
+                    )
+                    messages.append({"role": "tool", "name": tool_name, "content": serialized})
+                continue
+
+            messages.append({"role": "assistant", "content": content})
+            stored_state = self._store_llm_response(state, content)
+            if stored_state.pop("think_missing_answer", False):
+                if stored_state.get("_think_retry_attempted"):
+                    apology = "I'm sorry, I wasn't able to produce a final answer. Please try again."
+                    stored_state["response_text"] = apology
+                    stored_state["raw_response_text"] = apology
+                    stored_state.pop("_think_retry_attempted", None)
+                    return stored_state
+
+                stored_state["_think_retry_attempted"] = True
+                reminder = (
+                    "Your previous response only contained a <think> plan. Provide the final Answer now "
+                    "without using <think>."
+                )
+                self._log_turn_event(
+                    "LLM response contained only a hidden plan; requesting the visible answer."
+                )
+                messages.append({"role": "user", "content": reminder})
+                for key in (
+                    "response_text",
+                    "raw_response_text",
+                    "think_hidden",
+                    "think_placeholder",
+                    "hidden_think",
+                ):
+                    stored_state.pop(key, None)
+                continue
+
+            stored_state.pop("_think_retry_attempted", None)
+            return stored_state
+
+        if loop_results:
+            last_success = next((item for item in reversed(loop_results) if item.get("success")), None)
+            if last_success and last_success.get("message"):
+                return self._store_llm_response(state, str(last_success.get("message")))
+        return None
+
+    def _node_llm(self, state: _TurnState) -> _TurnState:
+        if state.get("profile_action") == "write":
+            attribute = (state.get("profile_attribute") or "").strip()
+            value = (state.get("profile_value") or "").strip()
+            if attribute and value:
+                friendly = attribute.replace("_", " ")
+                if state.get("profile_confirmation_required"):
+                    response = f"I heard your {friendly} might be {value}. Could you confirm?"
+                else:
+                    response = f"Got it! I'll remember that your {friendly} is {value}."
+                state["profile_response"] = response
+                state["response_text"] = response
+                state["raw_response_text"] = response
+                state["skip_llm"] = True
+                return state
+        if state.get("skip_llm"):
+            if "raw_response_text" not in state:
+                state["raw_response_text"] = state.get("response_text", "")
+            return state
+        if self.tooling_enabled:
+            updated_state = self._node_llm_with_tools(state)
+            if updated_state is not None:
+                return updated_state
+        return self._node_llm_plain(state)
 
     def _node_persist(self, state: _TurnState) -> _TurnState:
         correlation_id = state["correlation_id"]
         response = state.get("response_text", "")
-        if requires_force_plaintext(response):
-            scrubbed_response = force_plaintext(response)
+        sanitized_response = strip_emoji(response)
+        if requires_force_plaintext(sanitized_response):
+            scrubbed_response = force_plaintext(sanitized_response)
         else:
-            scrubbed_response = response
+            scrubbed_response = sanitized_response
+        scrubbed_response = scrubbed_response.strip()
+        if response and not scrubbed_response:
+            scrubbed_response = "..."
         state["scrubbed_response"] = scrubbed_response
         user_text = state.get("user_text", "")
         vision_metadata = state.get("vision_metadata")
         attached_image = bool(state.get("vision_attached"))
+        tool_results = state.get("tool_results") if isinstance(state.get("tool_results"), list) else None
         entries = self._build_history_entries(
             user_text,
             scrubbed_response,
             attached_image,
             vision_metadata,
+            tool_results=tool_results,
         )
         self.history.extend(entries)
-        vector_documents = [user_text, scrubbed_response]
-        vector_metadata = [
-            {"role": "user", "correlation_id": correlation_id},
-            {"role": "assistant", "correlation_id": correlation_id},
-        ]
+        vector_documents = []
+        vector_metadata = []
+        profile_updates: List[Dict[str, Any]] = []
+        if (
+            state.get("profile_action") == "write"
+            and not state.get("profile_confirmation_required")
+        ):
+            attribute = (state.get("profile_attribute") or "").strip()
+            value = (state.get("profile_value") or "").strip()
+            if attribute and value:
+                profile_updates.append(
+                    {
+                        "user_id": self.profile_user_id,
+                        "attribute": attribute,
+                        "value": value,
+                        "source": state.get("profile_source") or "user_statement",
+                    }
+                )
+        state["profile_updates"] = profile_updates
+
+        user_entry = strip_emoji(user_text) if user_text else ""
+        if user_entry:
+            vector_documents.append(user_entry)
+            vector_metadata.append({"role": "user", "correlation_id": correlation_id, "category": CHAT_HISTORY_CATEGORY})
+
+        if scrubbed_response:
+            vector_documents.append(scrubbed_response)
+            vector_metadata.append({"role": "assistant", "correlation_id": correlation_id, "category": CHAT_HISTORY_CATEGORY})
+
+        if user_entry and scrubbed_response:
+            combined_turn = f"User: {user_entry}\nAssistant: {scrubbed_response}"
+            vector_documents.append(combined_turn)
+            vector_metadata.append({"role": "turn", "correlation_id": correlation_id, "category": CHAT_HISTORY_CATEGORY, "kind": "user_assistant_pair"})
         task = PersistenceTask(
             correlation_id=correlation_id,
             entries=entries,
             vector_documents=vector_documents,
             vector_metadata=vector_metadata,
             settings=self.identity_settings,
+            profile_updates=profile_updates,
         )
         self._persistence.enqueue(task)
         return state
@@ -746,6 +1574,8 @@ class MemoryOrchestrator:
         response_text: str,
         attached_image: bool,
         vision_metadata: Optional[Dict[str, Any]],
+        *,
+        tool_results: Optional[List[Dict[str, Any]]] = None,
     ) -> List[dict]:
         entries: List[dict] = []
         if attached_image:
@@ -761,8 +1591,80 @@ class MemoryOrchestrator:
             entries.append({"role": "user", "content": entry_content, "metadata": metadata})
         else:
             entries.append({"role": "user", "content": user_text})
+
+        if tool_results:
+            entries.extend(self._build_tool_history_entries(tool_results))
+
         entries.append({"role": "assistant", "content": response_text})
         return entries
+
+    def _build_tool_history_entries(self, tool_results: List[Dict[str, Any]]) -> List[dict]:
+        entries: List[dict] = []
+        for result in tool_results:
+            if not isinstance(result, dict):
+                continue
+
+            kind = str(result.get("kind") or "").strip()
+            tool_name = "goose_tool_query" if kind == "goose_query" else (kind or "tool")
+            output_text = ""
+            if isinstance(result.get("output"), str) and result["output"].strip():
+                output_text = result["output"].strip()
+            elif isinstance(result.get("message"), str) and result["message"].strip():
+                output_text = result["message"].strip()
+            if not output_text:
+                continue
+
+            truncated = self._truncate_tool_output(output_text)
+            metadata: Dict[str, Any] = {"tool_name": tool_name, "success": bool(result.get("success"))}
+            prompt = result.get("prompt")
+            if isinstance(prompt, str) and prompt.strip():
+                metadata["prompt"] = prompt.strip()
+            description = result.get("description")
+            if isinstance(description, str) and description.strip():
+                metadata["description"] = description.strip()
+            if isinstance(result.get("message"), str) and result["message"].strip() and not result.get("success"):
+                metadata.setdefault("error", result["message"].strip())
+            if len(output_text) > TOOL_RESPONSE_CHAR_LIMIT:
+                metadata["truncated"] = True
+
+            entry: Dict[str, Any] = {"role": "tool", "name": tool_name, "content": truncated}
+            if metadata:
+                entry["metadata"] = metadata
+            entries.append(entry)
+        return entries
+
+    @staticmethod
+    def _truncate_tool_output(text: str) -> str:
+        normalized = text.strip()
+        if len(normalized) <= TOOL_RESPONSE_CHAR_LIMIT:
+            return normalized
+        truncated = normalized[:TOOL_RESPONSE_CHAR_LIMIT].rstrip()
+        return f"{truncated}\n…[truncated]"
+
+    def _resolve_vision_payload(
+        self,
+        user_text: str,
+        vision_metadata: Optional[Dict[str, Any]],
+    ) -> tuple[Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]], bool]:
+        if not user_text or not is_image_request(user_text):
+            return None, vision_metadata, False
+
+        record = load_identity_image(self.identity)
+        if record is None:
+            return None, vision_metadata, False
+
+        content_blocks: List[Dict[str, Any]] = [
+            {"type": "text", "text": user_text},
+            {"type": "image", "image": record.image_b64},
+        ]
+        metadata: Dict[str, Any] = dict(vision_metadata or {})
+        metadata["vision_file"] = str(record.path)
+        metadata["vision_updated"] = record.updated_at_iso
+        if record.source:
+            metadata["vision_source"] = record.source
+        metadata["vision_request"] = user_text
+        metadata["vision_attached"] = True
+        return content_blocks, metadata, True
 
     # ------------------------------------------------------------------
     def run_turn(
@@ -774,6 +1676,7 @@ class MemoryOrchestrator:
         vision_metadata: Optional[Dict[str, Any]] = None,
     ) -> TurnResult:
         correlation_id = uuid.uuid4().hex
+        self._log_turn_event(f"User request received: {self._preview_text(user_text)}")
         augmented = augmented_text or user_text
         resolved_blocks = content_blocks
         resolved_metadata: Optional[Dict[str, Any]] = vision_metadata
@@ -858,11 +1761,21 @@ class MemoryOrchestrator:
         think_hidden = bool(result_state.get("think_hidden"))
         think_placeholder = result_state.get("think_placeholder")
         hidden_think = result_state.get("hidden_think")
+        tool_results_state = result_state.get("tool_results")
+        tool_results: Optional[List[Dict[str, Any]]]
+        if isinstance(tool_results_state, list):
+            tool_results = list(tool_results_state)
+        else:
+            tool_results = None
         entries = self._build_history_entries(
             user_text,
             scrubbed_response,
             result_attached,
             result_metadata,
+            tool_results=tool_results,
+        )
+        self._log_turn_event(
+            f"Final answer prepared for chat: {self._preview_text(result_state.get('response_text', ''))}"
         )
         return TurnResult(
             correlation_id=correlation_id,
@@ -899,6 +1812,12 @@ class MemoryOrchestrator:
             "response_text": state.get("response_text"),
             "errors": state.get("errors", []),
         }
+        if state.get("tool_plan"):
+            trace["tool_plan"] = state.get("tool_plan")
+        if state.get("tool_results"):
+            trace["tool_results"] = state.get("tool_results")
+        if state.get("tool_plan_summary"):
+            trace["tool_plan_summary"] = state.get("tool_plan_summary")
         trace["vision_attached"] = bool(state.get("vision_attached"))
         if state.get("vision_metadata"):
             trace["vision_metadata"] = state.get("vision_metadata")
@@ -914,3 +1833,9 @@ class MemoryOrchestrator:
 
 
 __all__ = ["MemoryOrchestrator", "TurnResult", "CONVERSATION_MAX_BYTES", "CONVERSATION_KEEP"]
+
+
+
+
+
+

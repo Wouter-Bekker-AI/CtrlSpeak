@@ -10,7 +10,7 @@
   "ollama_hardware": "gpu_only",
   "ollama_options": {
     "temperature": 0.9,
-    "num_ctx": 4000,
+    "num_ctx": 8000,
     "num_gpu": 999,
     "main_gpu": 0,
     "gpu_split": [
@@ -26,5 +26,5 @@
   "require_text_cleaning": false,
   "vision": false,
   "tool": false,
-  "memory_dir": "memory"
+  "memory_dir": "{appdata}/bot_memory/default"
 }

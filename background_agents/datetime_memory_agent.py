@@ -97,9 +97,9 @@ def _locale_candidates() -> Tuple[str | None, str | None]:
     except Exception:
         _LOGGER.debug("Failed to query default locale", exc_info=True)
     try:
-        loc = locale.getdefaultlocale()
-        if loc and loc[0]:
-            codes.append(loc[0])
+        lc_time = locale.setlocale(locale.LC_TIME)
+        if lc_time and lc_time not in {"C", "POSIX"}:
+            codes.append(lc_time)
     except Exception:
         _LOGGER.debug("Failed to query system default locale", exc_info=True)
     env_locale = os.environ.get("LC_ALL") or os.environ.get("LANG")

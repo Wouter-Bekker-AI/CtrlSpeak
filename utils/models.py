@@ -13,6 +13,7 @@ import requests
 import platform
 import hashlib
 import importlib
+import warnings
 from datetime import datetime
 from pathlib import Path
 from queue import Empty
@@ -26,7 +27,21 @@ try:  # pragma: no cover - optional dependency rarely installed
 except ImportError:
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
-from huggingface_hub import HfApi, hf_hub_url
+try:
+    from huggingface_hub import HfApi, hf_hub_url
+except Exception:  # pragma: no cover - missing optional dependency
+    class HfApi:  # type: ignore[dead-code]
+        """Fallback stub used when huggingface_hub is unavailable."""
+
+        def __init__(self, *args: object, **kwargs: object) -> None:  # pragma: no cover - trivial stub
+            raise RuntimeError(
+                "huggingface_hub is required for model management but is not installed."
+            )
+
+    def hf_hub_url(*_args: object, **_kwargs: object) -> str:  # pragma: no cover - trivial stub
+        raise RuntimeError(
+            "huggingface_hub is required for model management but is not installed."
+        )
 import tkinter as tk
 from tkinter import ttk
 from PIL import Image, ImageTk
@@ -81,6 +96,7 @@ CUDA_DOWNLOAD_SPEC: dict[str, list[dict[str, str]]] = {
     "win_amd64": [
         {"package": "nvidia-cuda-runtime-cu12", "version": "12.9.79"},
         {"package": "nvidia-cublas-cu12", "version": "12.9.1.4"},
+        {"package": "nvidia-cufft-cu12", "version": "11.4.1.4"},
         {"package": "nvidia-cudnn-cu12", "version": "9.13.0.50"},
     ],
 }
@@ -364,14 +380,16 @@ def get_cuda_dll_dirs() -> list[Path]:
     paths = []
     # user runtime in AppData (preferred first)
     for root in _iter_cuda_roots():
-        for sub in ("bin", "cuda_runtime/bin", "cublas/bin", "cudnn/bin"):
+        for sub in ("bin", "cuda_runtime/bin", "cublas/bin", "cufft/bin", "cudnn/bin"):
             paths.append(root / sub)
     # embedded bundle (if any, e.g., PyInstaller)
     bundle_base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     paths.append(bundle_base / "nvidia" / "cublas" / "bin")
+    paths.append(bundle_base / "nvidia" / "cufft" / "bin")
     paths.append(bundle_base / "nvidia" / "cudnn" / "bin")
     # site-packages wheels (if present)
     paths.append(Path(sys.prefix) / "Lib" / "site-packages" / "nvidia" / "cublas" / "bin")
+    paths.append(Path(sys.prefix) / "Lib" / "site-packages" / "nvidia" / "cufft" / "bin")
     paths.append(Path(sys.prefix) / "Lib" / "site-packages" / "nvidia" / "cudnn" / "bin")
     return paths
 
@@ -398,7 +416,14 @@ def _import_ctranslate2():
     global _ctranslate2_runtime
     if _ctranslate2_runtime is None:
         configure_cuda_paths()
-        import ctranslate2 as _ctranslate2_module  # noqa: WPS433 - intentional local import
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"pkg_resources is deprecated as an API\..*",
+                category=UserWarning,
+                module="ctranslate2",
+            )
+            import ctranslate2 as _ctranslate2_module  # noqa: WPS433 - intentional local import
 
         _ctranslate2_runtime = _ctranslate2_module
     return _ctranslate2_runtime
@@ -445,19 +470,27 @@ def cuda_runtime_ready(*, ignore_preference: bool = False, quiet: bool = False) 
 
         cudnn_ops: Optional[str] = None
         cudnn_core: Optional[str] = None
+        cufft_dll: Optional[str] = None
         for root in _iter_cuda_roots():
-            bin_dir = root / "bin"
-            if not bin_dir.exists():
-                continue
-            if cudnn_ops is None:
-                matches = sorted(bin_dir.glob("cudnn_ops64_*.dll"), reverse=True)
-                if matches:
-                    cudnn_ops = matches[0].name
-            if cudnn_core is None:
-                matches = sorted(bin_dir.glob("cudnn64_*.dll"), reverse=True)
-                if matches:
-                    cudnn_core = matches[0].name
-            if cudnn_ops and cudnn_core:
+            search_dirs = [root / "bin", root / "cufft" / "bin"]
+            for candidate_dir in search_dirs:
+                if not candidate_dir.exists():
+                    continue
+                if cudnn_ops is None:
+                    matches = sorted(candidate_dir.glob("cudnn_ops64_*.dll"), reverse=True)
+                    if matches:
+                        cudnn_ops = matches[0].name
+                if cudnn_core is None:
+                    matches = sorted(candidate_dir.glob("cudnn64_*.dll"), reverse=True)
+                    if matches:
+                        cudnn_core = matches[0].name
+                if cufft_dll is None:
+                    matches = sorted(candidate_dir.glob("cufft64_*.dll"), reverse=True)
+                    if matches:
+                        cufft_dll = matches[0].name
+                if cudnn_ops and cudnn_core and cufft_dll:
+                    break
+            if cudnn_ops and cudnn_core and cufft_dll:
                 break
 
         if not cudnn_ops:
@@ -467,10 +500,29 @@ def cuda_runtime_ready(*, ignore_preference: bool = False, quiet: bool = False) 
             else:
                 logger.warning(message)
             return False
+        if not cufft_dll:
+            message = "Could not locate cufft64 DLL in staged CUDA runtime"
+            if quiet:
+                logger.debug(message)
+            else:
+                logger.warning(message)
+            return False
+        try:
+            cufft_major = int(cufft_dll.split("_")[1].split(".")[0])
+        except (IndexError, ValueError):
+            cufft_major = None
+        if cufft_major is None or cufft_major < 11:
+            message = "Detected cufft64 DLL with unsupported major version; expected 11 or newer"
+            if quiet:
+                logger.debug(message)
+            else:
+                logger.warning(message)
+            return False
 
         if cudnn_core:
             required_dlls.append(cudnn_core)
         required_dlls.append(cudnn_ops)
+        required_dlls.append(cufft_dll)
 
         for dll in required_dlls:
             try:
@@ -504,6 +556,7 @@ def cuda_runtime_files_present() -> bool:
                 "cudart64_*.dll",
                 "cublas64_*.dll",
                 "cublasLt64_*.dll",
+                "cufft64_*.dll",
                 "cudnn_ops64_*.dll",
             )
         else:
@@ -511,6 +564,7 @@ def cuda_runtime_files_present() -> bool:
                 "libcudart.so*",
                 "libcublas.so*",
                 "libcublasLt.so*",
+                "libcufft.so*",
                 "libcudnn*.so*",
             )
 
@@ -546,7 +600,7 @@ def _copy_from_nvidia_packages(dest_root: Path) -> bool:
         if not package_root.exists():
             continue
 
-        for component in ("cuda_runtime", "cublas", "cudnn"):
+        for component in ("cuda_runtime", "cublas", "cufft", "cudnn"):
             src = package_root / component
             if not src.exists():
                 continue
@@ -556,12 +610,8 @@ def _copy_from_nvidia_packages(dest_root: Path) -> bool:
             shutil.copytree(src, dest)
             staged = True
 
-        runtime_bin = dest_root / "cuda_runtime" / "bin"
-        dest_bin = dest_root / "bin"
-        if runtime_bin.exists():
-            if dest_bin.exists():
-                shutil.rmtree(dest_bin)
-            shutil.copytree(runtime_bin, dest_bin)
+        if any((dest_root / component).exists() for component in ("cuda_runtime", "cublas", "cufft", "cudnn")):
+            _sync_cuda_bins(dest_root)
             staged = True
 
     return staged
@@ -621,11 +671,13 @@ def _copy_from_system_cuda(dest_root: Path) -> bool:
         "cudart64_*.dll",
         "cublas64_*.dll",
         "cublasLt64_*.dll",
+        "cufft64_*.dll",
         "nvrtc64_*.dll",
         "nvblas64_*.dll",
         "libcudart.so*",
         "libcublas.so*",
         "libcublasLt.so*",
+        "libcufft.so*",
         "libnvrtc.so*",
     )
     for source_dir in candidates:
@@ -710,7 +762,7 @@ def _sync_cuda_bins(dest_root: Path) -> None:
     if bin_root.exists():
         shutil.rmtree(bin_root)
     bin_root.mkdir(parents=True, exist_ok=True)
-    for sub in ("cuda_runtime/bin", "cublas/bin", "cudnn/bin"):
+    for sub in ("cuda_runtime/bin", "cublas/bin", "cufft/bin", "cudnn/bin"):
         candidate = dest_root / sub
         if not candidate.exists():
             continue
@@ -783,6 +835,7 @@ def _validate_cuda_runtime_install(root: Path) -> bool:
             required_dlls = ["cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll"]
             cudnn_ops: Optional[Path] = None
             cudnn_core: Optional[Path] = None
+            cufft_path: Optional[Path] = None
 
             for directory in dll_dirs:
                 if cudnn_ops is None:
@@ -793,11 +846,28 @@ def _validate_cuda_runtime_install(root: Path) -> bool:
                     matches = sorted(directory.glob("cudnn64_*.dll"), reverse=True)
                     if matches:
                         cudnn_core = matches[0]
-                if cudnn_ops and cudnn_core:
+                if cufft_path is None:
+                    matches = sorted(directory.glob("cufft64_*.dll"), reverse=True)
+                    if matches:
+                        cufft_path = matches[0]
+                if cudnn_ops and cudnn_core and cufft_path:
                     break
 
             if cudnn_ops is None:
                 logger.warning("CUDA validation failed: cudnn_ops64 DLL not found in %s", root)
+                return False
+            if cufft_path is None:
+                logger.warning("CUDA validation failed: cufft64 DLL not found in %s", root)
+                return False
+            try:
+                cufft_major = int(cufft_path.stem.split("_")[1])
+            except (IndexError, ValueError):
+                cufft_major = None
+            if cufft_major is None or cufft_major < 11:
+                logger.warning(
+                    "CUDA validation failed: cufft64 DLL %s has unsupported major version",
+                    cufft_path,
+                )
                 return False
             required_paths: list[Path] = []
             for dll in required_dlls:
@@ -815,6 +885,7 @@ def _validate_cuda_runtime_install(root: Path) -> bool:
             required_paths.append(cudnn_ops)
             if cudnn_core is not None:
                 required_paths.append(cudnn_core)
+            required_paths.append(cufft_path)
 
             kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
             for dll_path in required_paths:
@@ -2310,6 +2381,8 @@ def transcribe_local(file_path: str, play_feedback: bool = True, allow_client: b
                 except Exception:
                     logger.exception("Failed to schedule management refresh after local transcription")
         return text or None
+    except ValueError:
+        return None
     except Exception as exc:
         notify_error("Transcription failed", format_exception_details(exc))
         return None

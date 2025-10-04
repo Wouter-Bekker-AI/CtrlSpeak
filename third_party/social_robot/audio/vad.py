@@ -48,6 +48,14 @@ class VADListener:
         self._vad = webrtcvad.Vad(config.aggressiveness)
         self._pa = pyaudio.PyAudio()
         self._stream = None
+        self._stream_kwargs = {
+            "format": pyaudio.paInt16,
+            "channels": 1,
+            "rate": self.sample_rate,
+            "input": True,
+            "frames_per_buffer": self.frame_size,
+            "input_device_index": self.device_index,
+        }
 
         self._stop_flag = threading.Event()
         self._vad_enabled = threading.Event()
@@ -64,14 +72,7 @@ class VADListener:
     def start(self) -> None:
         """Start capturing audio and running VAD (blocking)."""
 
-        self._stream = self._pa.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=self.sample_rate,
-            input=True,
-            frames_per_buffer=self.frame_size,
-            input_device_index=self.device_index,
-        )
+        self._stream = self._pa.open(**self._stream_kwargs)
 
         ring_buffer: Deque[Frame] = collections.deque(maxlen=self.padding_frames)
         triggered = False
@@ -83,18 +84,53 @@ class VADListener:
 
         while not self._stop_flag.is_set():
             if not self._vad_enabled.is_set():
-                if self._stream is not None and self._stream.is_active():
-                    self._stream.stop_stream()
+                if self._stream is not None:
+                    try:
+                        if self._stream.is_active():
+                            self._stream.stop_stream()
+                    except OSError:
+                        # Treat closed streams as already stopped.
+                        pass
                 ring_buffer.clear()
                 voiced_frames.clear()
                 triggered = False
                 time.sleep(frame_interval)
                 continue
 
-            if self._stream is not None and not self._stream.is_active():
-                self._stream.start_stream()
+            if self._stream is None:
+                try:
+                    self._stream = self._pa.open(**self._stream_kwargs)
+                except Exception:
+                    time.sleep(frame_interval)
+                    continue
 
-            frame = self._stream.read(self.frame_size, exception_on_overflow=False)
+            try:
+                if not self._stream.is_active():
+                    self._stream.start_stream()
+            except OSError:
+                try:
+                    self._stream.close()
+                except OSError:
+                    pass
+                self._stream = None
+                time.sleep(frame_interval)
+                continue
+
+            try:
+                frame = self._stream.read(self.frame_size, exception_on_overflow=False)
+            except (OSError, ValueError):
+                try:
+                    self._stream.stop_stream()
+                except OSError:
+                    pass
+                try:
+                    self._stream.close()
+                except OSError:
+                    pass
+                self._stream = None
+                self._reset_buffers = True
+                time.sleep(frame_interval)
+                continue
 
             if self._reset_buffers:
                 ring_buffer.clear()
@@ -129,8 +165,17 @@ class VADListener:
                             # print("-> Speech segment detected ({} bytes).".format(len(speech_audio)))
                             self.on_speech_callback(speech_audio)
 
-        self._stream.stop_stream()
-        self._stream.close()
+        try:
+            if self._stream is not None and self._stream.is_active():
+                self._stream.stop_stream()
+        except OSError:
+            pass
+        if self._stream is not None:
+            try:
+                self._stream.close()
+            except OSError:
+                pass
+            self._stream = None
         self._pa.terminate()
 
     def stop(self) -> None:
@@ -140,15 +185,31 @@ class VADListener:
         skip_frames = max(1, int(0.4 / (self.frame_duration_ms / 1000.0)))
         self._frames_to_skip = max(skip_frames, self.padding_frames)
         self._reset_buffers = True
-        if self._stream is not None and not self._stream.is_active():
-            self._stream.start_stream()
+        if self._stream is None:
+            try:
+                self._stream = self._pa.open(**self._stream_kwargs)
+            except Exception:
+                return
+        try:
+            if not self._stream.is_active():
+                self._stream.start_stream()
+        except OSError:
+            try:
+                self._stream.close()
+            except OSError:
+                pass
+            self._stream = None
         self._vad_enabled.set()
 
     def disable_vad(self) -> None:
         self._frames_to_skip = 0
         self._reset_buffers = True
-        if self._stream is not None and self._stream.is_active():
-            self._stream.stop_stream()
+        if self._stream is not None:
+            try:
+                if self._stream.is_active():
+                    self._stream.stop_stream()
+            except OSError:
+                pass
         self._vad_enabled.clear()
 
 

@@ -26,5 +26,5 @@
   "require_text_cleaning": true,
   "vision": true,
   "tool": false,
-  "memory_dir": "memory"
+  "memory_dir": "{appdata}/bot_memory/assistant"
 }

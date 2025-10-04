@@ -26,6 +26,7 @@ class ChatWindow(QWidget):
 
     send_text = Signal(str)
     voice_mode_requested = Signal(bool)
+    export_profile_requested = Signal()
     closed = Signal()
 
     _append_html = Signal(str)
@@ -83,6 +84,13 @@ class ChatWindow(QWidget):
         self._mode_button.clicked.connect(self._on_mode_button_clicked)
         header.addWidget(self._mode_button)
 
+        self._export_button = QPushButton("Export profile")
+        self._export_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._export_button.setToolTip("Save the remembered profile details to disk")
+        self._export_button.setAccessibleName("Export profile snapshot")
+        self._export_button.clicked.connect(self.export_profile_requested.emit)
+        header.addWidget(self._export_button)
+
         layout.addLayout(header)
 
         self._history = QTextBrowser(self)
@@ -98,7 +106,9 @@ class ChatWindow(QWidget):
         controls_layout.setSpacing(8)
 
         self._input = QLineEdit(self._controls_widget)
-        self._input.setPlaceholderText("Type a message…")
+        self._default_placeholder = "Type a message…"
+        self._voice_placeholder = "Type a message (sent as voice)…"
+        self._input.setPlaceholderText(self._default_placeholder)
         self._input.returnPressed.connect(self._on_return_pressed)
         self._input.textChanged.connect(self._update_send_enabled)
         controls_layout.addWidget(self._input)
@@ -118,10 +128,10 @@ class ChatWindow(QWidget):
         self._move_to_active_corner()
 
     # ------------------------------------------------------------------
-    def append_user_message(self, text: str, *, via_voice: bool = False) -> None:
+    def append_user_message(self, text: str, *, medium: Optional[str] = None) -> None:
         if not text:
             return
-        speaker = "You (voice)" if via_voice else "You"
+        speaker = self._resolve_user_speaker_label(medium)
         self._append_message(speaker, text)
 
     def append_bot_message(self, text: str) -> None:
@@ -129,10 +139,31 @@ class ChatWindow(QWidget):
             return
         self._append_message("Bot", text)
 
+    def append_status_message(self, speaker: str, text: str) -> None:
+        """Display a non-persistent status update in the transcript."""
+
+        if not text:
+            return
+        escaped_text = html.escape(text).replace("\n", "<br>")
+        escaped_speaker = html.escape(speaker)
+        self._append_html.emit(
+            f"<span style=\"color:#5f6368;\"><b>{escaped_speaker}:</b> {escaped_text}</span>"
+        )
+
     def _append_message(self, speaker: str, text: str) -> None:
         escaped_text = html.escape(text).replace("\n", "<br>")
         escaped_speaker = html.escape(speaker)
         self._append_html.emit(f"<b>{escaped_speaker}:</b> {escaped_text}")
+
+    def _resolve_user_speaker_label(self, medium: Optional[str]) -> str:
+        if not medium:
+            return "You"
+        normalized = medium.strip().lower()
+        if normalized == "voice":
+            return "You (voice)"
+        if normalized == "text":
+            return "You (text)"
+        return "You"
 
     def _append_to_history(self, html_text: str) -> None:
         self._history.append(html_text)
@@ -177,7 +208,8 @@ class ChatWindow(QWidget):
                 self._mode_button.setText("⌨")
             else:
                 self._mode_button.setText("")
-            self._controls_widget.setVisible(False)
+            self._controls_widget.setVisible(True)
+            self._input.setPlaceholderText(self._voice_placeholder)
             self._history.setMinimumHeight(220)
             self.resize(420, 420)
         else:
@@ -189,6 +221,7 @@ class ChatWindow(QWidget):
             else:
                 self._mode_button.setText("")
             self._controls_widget.setVisible(True)
+            self._input.setPlaceholderText(self._default_placeholder)
             self._history.setMinimumHeight(320)
             self.resize(520, 640)
             QApplication.processEvents()
@@ -222,8 +255,6 @@ class ChatWindow(QWidget):
         self.send_text.emit(text)
 
     def _on_return_pressed(self) -> None:
-        if self._voice_mode:
-            return
         self._on_send_clicked()
 
     def _update_send_enabled(self) -> None:
