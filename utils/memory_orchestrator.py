@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """LangGraph-based memory orchestrator for SocialRobot."""
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from utils.metrics import MetricsRecorder
 from utils.memory_paths import get_bot_conversation_log, get_bot_traces_dir
 from utils.memory_settings import load_identity_settings
 from utils.vector_memory import RetrievedMemory, VectorMemoryStore
-from tools.message_management import force_plaintext, requires_force_plaintext
+from tools.message_management import force_plaintext, requires_force_plaintext, strip_emoji
 from tools.goose_tool import goose_query, ALLOWED_MODES as GOOSE_ALLOWED_MODES
 
 
@@ -34,6 +34,7 @@ PERSIST_START_DELAY_SECONDS = 0.05
 
 DOCUMENTATION_CATEGORY = "documentation"
 TEMPORAL_CATEGORY = "temporal_context"
+CHAT_HISTORY_CATEGORY = "chat_history"
 _REASONING_TAG_PATTERN = re.compile(r"/(?:no_)?think\b", re.IGNORECASE)
 _DOCUMENTATION_INTENT_PHRASES = (
     "how do i",
@@ -75,6 +76,7 @@ _TEMPORAL_INTENT_PHRASES = (
 
 _CHAT_HISTORY_INTENT_PHRASES = (
     "what do you know about me",
+    "tell me everything you know about me",
     "what's my name",
     "what is my name",
     "do you remember",
@@ -91,11 +93,90 @@ _CHAT_HISTORY_INTENT_PHRASES = (
     "history with me",
 )
 
+
+
+def _chat_query_variants(query_text: str) -> list[str]:
+    lowered = query_text.lower()
+    variants: list[str] = []
+    seen = set()
+
+    def _add(candidate: str) -> None:
+        candidate = candidate.strip()
+        if candidate and candidate not in seen:
+            variants.append(candidate)
+            seen.add(candidate)
+
+    _add(query_text)
+
+    if any(phrase in lowered for phrase in ("what's my name", "what is my name", "tell me my name", "everything you know about me")):
+        _add("my name is")
+
+    if any(term in lowered for term in ("how old am i", "what's my age", "what is my age", "age")):
+        _add("my age is")
+        _add("i am")
+
+    if 'favorite' in lowered or 'favourite' in lowered:
+        after = lowered.split('favorite', 1)[1] if 'favorite' in lowered else lowered.split('favourite', 1)[1]
+        after = after.strip(' ?!.,')
+        if after:
+            first_words = after.split()[:2]
+            for length in range(1, len(first_words) + 1):
+                phrase = ' '.join(first_words[:length])
+                _add(f"my favorite {phrase} is")
+        _add("my favorite")
+
+    if 'sport' in lowered and 'favorite' not in lowered:
+        _add("my favorite sport is")
+
+    if 'everything you know about me' in lowered or 'tell me everything you know about me' in lowered:
+        _add("my name is")
+        _add("i am")
+        _add("i like")
+
+    if lowered.startswith('look at our chat history') or 'chat history' in lowered:
+        _add("my name is")
+        _add("my age is")
+
+    if not variants:
+        variants.append(query_text)
+    return variants
+
+
+def _format_chat_history_response(retrieved_items: List[dict]) -> str:
+    facts: List[str] = []
+    seen: set[str] = set()
+    for item in retrieved_items:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata") or {}
+        if str(metadata.get("category", "")) != CHAT_HISTORY_CATEGORY:
+            continue
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        role = str(metadata.get("role") or "")
+        if role == "turn":
+            for line in content.splitlines():
+                trimmed = line.strip()
+                if trimmed and trimmed not in seen:
+                    facts.append(trimmed)
+                    seen.add(trimmed)
+        else:
+            if content not in seen:
+                facts.append(content)
+                seen.add(content)
+    if not facts:
+        return ""
+    summary_lines = ["Here is what our previous conversations mention:"]
+    summary_lines.extend(f"- {fact}" for fact in facts[:8])
+    return "\\n".join(summary_lines)
+
+
 TOOL_RESPONSE_CHAR_LIMIT = 4000
 
 _TOOL_EXECUTION_GUARD = (
     "You have access to the goose_tool_query function. Use it for any filesystem or execution task by describing the request in natural language. "
-    "Return a tool call whenever the user asks you to inspect, modify, search, list, or run files. Do not fabricate results—let the tool perform the work."
+    "Return a tool call whenever the user asks you to inspect, modify, search, list, or run files. Do not fabricate resultsÃ¢â‚¬â€let the tool perform the work."
 )
 
 _GOOSE_TOOL_SCHEMA: List[Dict[str, Any]] = [
@@ -439,7 +520,7 @@ class MemoryOrchestrator:
         cleaned = value.replace("\n", " ").strip()
         if len(cleaned) <= limit:
             return cleaned
-        return cleaned[: limit - 1].rstrip() + "…"
+        return cleaned[: limit - 1].rstrip() + "â€¦"
 
     def _plan_tool_actions(self, state: _TurnState) -> List[ToolAction]:
         """Tool selection is delegated entirely to the LLM."""
@@ -564,6 +645,9 @@ class MemoryOrchestrator:
         doc_limit = min(top_k, 3 if doc_intent else 1)
         category_thresholds: dict[str, float] = {}
         fallback_categories: dict[str, int] = {}
+        if chat_intent:
+            category_thresholds[CHAT_HISTORY_CATEGORY] = threshold
+            fallback_categories[CHAT_HISTORY_CATEGORY] = max(1, min(top_k, 4))
         if doc_intent:
             category_thresholds[DOCUMENTATION_CATEGORY] = doc_threshold
             fallback_categories[DOCUMENTATION_CATEGORY] = doc_limit
@@ -578,35 +662,51 @@ class MemoryOrchestrator:
         results = []
         metrics: Dict[str, float] = {}
         attempted = False
+        used_query = query_text
 
-        if query_text and (doc_intent or temporal_intent or chat_intent):
-            attempted = True
-            try:
-                results = self.vector_store.retrieve(
-                    query_text,
-                    top_k=top_k,
-                    threshold=threshold,
-                    category_thresholds=category_thresholds,
-                    fallback_categories=fallback_categories,
-                )
-            except Exception as exc:
-                state.setdefault("errors", []).append({"node": "retrieve", "error": str(exc)})
+        if chat_intent:
+            query_candidates = _chat_query_variants(query_text)
+        else:
+            query_candidates = [query_text]
+
+        if doc_intent or temporal_intent or chat_intent:
+            for candidate in query_candidates:
+                if not candidate.strip():
+                    continue
+                attempted = True
+                try:
+                    candidate_results = self.vector_store.retrieve(
+                        candidate,
+                        top_k=top_k,
+                        threshold=threshold,
+                        category_thresholds=category_thresholds,
+                        fallback_categories=fallback_categories,
+                    )
+                except Exception as exc:
+                    state.setdefault("errors", []).append({"node": "retrieve", "error": str(exc)})
+                    continue
+                if candidate_results:
+                    results = candidate_results
+                    used_query = candidate
+                    if candidate != query_text:
+                        print(f"[Memory] Chat query adjusted to: {candidate}")
+                    break
 
         if (
             attempted
             and not results
+            and chat_intent
             and not doc_intent
             and not temporal_intent
-            and chat_intent
-            and query_text
         ):
             try:
+                relaxed_threshold = min(threshold, 0.6)
                 results = self.vector_store.retrieve(
-                    query_text,
+                    used_query,
                     top_k=top_k,
-                    threshold=threshold,
-                    category_thresholds={DOCUMENTATION_CATEGORY: doc_threshold},
-                    fallback_categories={DOCUMENTATION_CATEGORY: doc_limit},
+                    threshold=relaxed_threshold,
+                    category_thresholds={CHAT_HISTORY_CATEGORY: relaxed_threshold},
+                    fallback_categories={CHAT_HISTORY_CATEGORY: max(1, min(top_k, 4))},
                 )
             except Exception as exc:
                 state.setdefault("errors", []).append({"node": "retrieve", "error": str(exc)})
@@ -615,15 +715,38 @@ class MemoryOrchestrator:
             filtered = []
             for item in results:
                 metadata = item.metadata or {}
-                category = str(metadata.get("category", ""))
-                if category == DOCUMENTATION_CATEGORY and not doc_intent:
-                    continue
-                if category == TEMPORAL_CATEGORY and not temporal_intent:
-                    continue
-                if category not in {DOCUMENTATION_CATEGORY, TEMPORAL_CATEGORY} and not chat_intent:
-                    continue
+                category = str(metadata.get("category", "") or "")
+                if not category:
+                    category = CHAT_HISTORY_CATEGORY
+                if category == DOCUMENTATION_CATEGORY:
+                    if not doc_intent:
+                        continue
+                elif category == TEMPORAL_CATEGORY:
+                    if not temporal_intent:
+                        continue
+                elif category == CHAT_HISTORY_CATEGORY:
+                    if not chat_intent:
+                        continue
+                else:
+                    if not chat_intent:
+                        continue
                 filtered.append(item)
             results = filtered
+
+        if attempted and chat_intent:
+            chat_results = [
+                item
+                for item in results
+                if str(item.metadata.get("category", "")) == CHAT_HISTORY_CATEGORY
+            ]
+            if chat_results:
+                print("[Memory] Chat history results:")
+                for index, item in enumerate(chat_results[:top_k], start=1):
+                    role = str(item.metadata.get("role") or "unknown")
+                    snippet = item.content.replace("\n", " ").strip()
+                    if len(snippet) > 200:
+                        snippet = snippet[:197] + "..."
+                    print(f"  {index}. ({role}) {snippet}")
 
         if results:
             avg_similarity = sum(item.similarity for item in results) / len(results)
@@ -727,7 +850,7 @@ class MemoryOrchestrator:
 
             preview = prompt_value.replace("\n", " ")
             if len(preview) > 60:
-                preview = preview[:57].rstrip() + "…"
+                preview = preview[:57].rstrip() + "â€¦"
             description = f"Goose query: {preview}"
             actions.append(
                 ToolAction(
@@ -1115,10 +1238,14 @@ class MemoryOrchestrator:
     def _node_persist(self, state: _TurnState) -> _TurnState:
         correlation_id = state["correlation_id"]
         response = state.get("response_text", "")
-        if requires_force_plaintext(response):
-            scrubbed_response = force_plaintext(response)
+        sanitized_response = strip_emoji(response)
+        if requires_force_plaintext(sanitized_response):
+            scrubbed_response = force_plaintext(sanitized_response)
         else:
-            scrubbed_response = response
+            scrubbed_response = sanitized_response
+        scrubbed_response = scrubbed_response.strip()
+        if response and not scrubbed_response:
+            scrubbed_response = "..."
         state["scrubbed_response"] = scrubbed_response
         user_text = state.get("user_text", "")
         vision_metadata = state.get("vision_metadata")
@@ -1132,11 +1259,22 @@ class MemoryOrchestrator:
             tool_results=tool_results,
         )
         self.history.extend(entries)
-        vector_documents = [user_text, scrubbed_response]
-        vector_metadata = [
-            {"role": "user", "correlation_id": correlation_id},
-            {"role": "assistant", "correlation_id": correlation_id},
-        ]
+        vector_documents = []
+        vector_metadata = []
+
+        user_entry = strip_emoji(user_text) if user_text else ""
+        if user_entry:
+            vector_documents.append(user_entry)
+            vector_metadata.append({"role": "user", "correlation_id": correlation_id, "category": CHAT_HISTORY_CATEGORY})
+
+        if scrubbed_response:
+            vector_documents.append(scrubbed_response)
+            vector_metadata.append({"role": "assistant", "correlation_id": correlation_id, "category": CHAT_HISTORY_CATEGORY})
+
+        if user_entry and scrubbed_response:
+            combined_turn = f"User: {user_entry}\nAssistant: {scrubbed_response}"
+            vector_documents.append(combined_turn)
+            vector_metadata.append({"role": "turn", "correlation_id": correlation_id, "category": CHAT_HISTORY_CATEGORY, "kind": "user_assistant_pair"})
         task = PersistenceTask(
             correlation_id=correlation_id,
             entries=entries,
@@ -1219,7 +1357,7 @@ class MemoryOrchestrator:
         if len(normalized) <= TOOL_RESPONSE_CHAR_LIMIT:
             return normalized
         truncated = normalized[:TOOL_RESPONSE_CHAR_LIMIT].rstrip()
-        return f"{truncated}\n…[truncated]"
+        return f"{truncated}\nâ€¦[truncated]"
 
     def _resolve_vision_payload(
         self,
@@ -1413,3 +1551,9 @@ class MemoryOrchestrator:
 
 
 __all__ = ["MemoryOrchestrator", "TurnResult", "CONVERSATION_MAX_BYTES", "CONVERSATION_KEEP"]
+
+
+
+
+
+

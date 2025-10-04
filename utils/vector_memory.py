@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import threading
 from collections.abc import Iterable as IterableABC
 from dataclasses import dataclass
@@ -23,7 +24,7 @@ from utils.pii import redact_iterable
 _STATE_FILE = "collection_state.json"
 
 DEFAULT_EMBEDDER_NAME = "ctrlspeak-minhash"
-DEFAULT_EMBEDDER_VERSION = "1"
+DEFAULT_EMBEDDER_VERSION = "2"
 
 
 def _utc_now() -> datetime:
@@ -42,23 +43,43 @@ def _sanitize_identity(identity: str) -> str:
 
 
 class _HashEmbeddingFunction(EmbeddingFunction[Iterable[str]]):
-    """Deterministic lightweight embedding function."""
+    """Deterministic hashed bag-of-words embedding."""
 
-    def __init__(self, dimensions: int = 32) -> None:
-        self.dimensions = dimensions
+    def __init__(self, dimensions: int = 128, *, ngram_min: int = 1, ngram_max: int = 2) -> None:
+        self.dimensions = max(1, int(dimensions))
+        self.ngram_min = max(1, int(min(ngram_min, ngram_max)))
+        self.ngram_max = max(self.ngram_min, int(max(ngram_min, ngram_max)))
+
+    def _iter_features(self, text: str) -> Iterable[str]:
+        tokens = re.findall(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?", text.lower())
+        if not tokens:
+            return []
+        features: List[str] = []
+        for size in range(self.ngram_min, self.ngram_max + 1):
+            if len(tokens) < size:
+                continue
+            for index in range(len(tokens) - size + 1):
+                features.append(" ".join(tokens[index : index + size]))
+        return features or tokens
 
     def __call__(self, input: Documents) -> Embeddings:  # type: ignore[override]
-        texts = list(input)
         vectors: List[List[float]] = []
-        for text in texts:
-            digest = hashlib.sha256(text.encode("utf-8")).digest()
-            floats: List[float] = []
-            for index in range(self.dimensions):
-                start = (index * 2) % len(digest)
-                chunk = digest[start : start + 2]
-                value = int.from_bytes(chunk, "big") / 65535.0
-                floats.append(value)
-            vectors.append(floats)
+        for raw in input:
+            text = str(raw or "")
+            features = list(self._iter_features(text))
+            if not features:
+                vectors.append([0.0] * self.dimensions)
+                continue
+            values = [0.0] * self.dimensions
+            for feature in features:
+                digest = hashlib.blake2s(feature.encode("utf-8"), digest_size=8).digest()
+                index = int.from_bytes(digest[:4], "big") % self.dimensions
+                sign = 1.0 if (digest[4] & 0x01) == 0 else -1.0
+                values[index] += sign
+            norm = math.sqrt(sum(value * value for value in values))
+            if norm:
+                values = [value / norm for value in values]
+            vectors.append(values)
         return vectors
 
     @staticmethod
@@ -72,12 +93,18 @@ class _HashEmbeddingFunction(EmbeddingFunction[Iterable[str]]):
         return False
 
     def get_config(self) -> Dict[str, Any]:  # pragma: no cover - deterministic
-        return {"dimensions": self.dimensions}
+        return {
+            "dimensions": self.dimensions,
+            "ngram_min": self.ngram_min,
+            "ngram_max": self.ngram_max,
+        }
 
     @staticmethod
     def build_from_config(config: Dict[str, Any]) -> "_HashEmbeddingFunction":  # pragma: no cover - deterministic
-        dimensions = int(config.get("dimensions", 32))
-        return _HashEmbeddingFunction(dimensions=dimensions)
+        dimensions = int(config.get("dimensions", 128))
+        ngram_min = int(config.get("ngram_min", 1))
+        ngram_max = int(config.get("ngram_max", max(ngram_min, 2)))
+        return _HashEmbeddingFunction(dimensions=dimensions, ngram_min=ngram_min, ngram_max=ngram_max)
 
 
 def _cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:

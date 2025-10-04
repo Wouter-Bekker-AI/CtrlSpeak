@@ -1,4 +1,4 @@
-"""Entrypoint for the robot face and dialogue loop."""
+﻿"""Entrypoint for the robot face and dialogue loop."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ from background_agents.document_memory_agent import refresh_document_memory
 from background_agents.manage_think import ManageThinkAgent, load_manage_think_agent
 from background_agents.transcript_cleanup_agent import normalize_transcript
 from tools import keywords, vision
-from tools.message_management import force_plaintext, requires_force_plaintext
+from tools.message_management import force_plaintext, requires_force_plaintext, strip_emoji, strip_emoji
 from utils.config_paths import get_data_dir, get_logger
 from utils.image_store import (
     IdentityImageRecord,
@@ -1295,38 +1295,65 @@ def main():
             chat_window.append_status_message("Bot (thinking)", think_placeholder)
             placeholder_displayed = True
 
-        final_response = llm_response
+        display_response = llm_response
 
-        if requires_force_plaintext(final_response):
+        sanitized_input = strip_emoji(llm_response)
+
+
+
+        if requires_force_plaintext(sanitized_input):
+
             print("-> Handing reply to force_plaintext().")
-            final_response = force_plaintext(final_response)
-            print("-> Scrubbed reply:", final_response)
-            if final_response != llm_response:
+
+            sanitized_response = force_plaintext(sanitized_input)
+
+            print("-> Scrubbed reply:", sanitized_response)
+
+            if sanitized_response != sanitized_input:
+
                 print("-> Applied deterministic TTS scrub.")
+
         else:
+
             print("-> Reply does not require deterministic scrub.")
-            final_response = llm_response
-        print("-> Final reply for chat history and TTS:", final_response)
+
+            sanitized_response = sanitized_input
+
+
+
+        sanitized_response = sanitized_response.strip()
+
+        if not sanitized_response and display_response:
+
+            sanitized_response = "..."
+
+        if sanitized_response != display_response:
+
+            print("-> Reply shown in chat window:", display_response)
+
+        print("-> Final reply for chat history and TTS:", sanitized_response)
+
+
 
         if not used_orchestrator:
-            history.append({"role": "assistant", "content": final_response})
+            history.append({"role": "assistant", "content": sanitized_response})
             new_entries = history[history_baseline:]
             if new_entries:
                 session_history.extend(new_entries)
                 save_history(profile.memory_path, new_entries)
 
-        chat_window.append_bot_message(final_response)
-        last_bot_response = final_response
+        chat_window.append_bot_message(display_response)
+        last_bot_response = display_response
 
         if not voice_mode_active.is_set():
             animator.update_amplitude(0.0)
             return
 
         try:
-            if not final_response:
+            if not sanitized_response:
                 animator.update_amplitude(0.0)
                 return
-            audio_data = tts_model.synthesize(final_response)
+            audio_data = tts_model.synthesize(sanitized_response)
         except Exception as exc:
             print("TTS error:", exc)
             animator.update_amplitude(0.0)
@@ -1499,3 +1526,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
