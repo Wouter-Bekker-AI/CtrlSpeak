@@ -137,6 +137,7 @@ listener: Optional[keyboard.Listener] = None
 recording_file_path: Optional[Path] = None
 listener_lock = threading.Lock()
 client_enabled = True
+bot_vad_suspended_for_hotkey = False
 
 instance_lock_handle: Optional[object] = None
 processing_sound_thread: Optional[threading.Thread] = None
@@ -788,22 +789,67 @@ def _client_hotkey_available() -> bool:
     return False
 
 
+def _pause_bot_vad_for_hotkey() -> None:
+    global bot_vad_suspended_for_hotkey
+    if bot_vad_suspended_for_hotkey:
+        return
+    try:
+        from utils import bot_integration
+    except Exception:
+        logger.exception("Failed to import bot integration while pausing bot VAD")
+        return
+    try:
+        paused = bot_integration.pause_bot_vad_listener()
+    except AttributeError:
+        logger.debug("Bot integration does not expose pause_bot_vad_listener; skipping pause request")
+        return
+    except Exception:
+        logger.exception("Failed to pause bot VAD listener for hotkey recording")
+        return
+    if paused:
+        bot_vad_suspended_for_hotkey = True
+
+
+def _resume_bot_vad_for_hotkey() -> None:
+    global bot_vad_suspended_for_hotkey
+    if not bot_vad_suspended_for_hotkey:
+        return
+    try:
+        from utils import bot_integration
+    except Exception:
+        logger.exception("Failed to import bot integration while resuming bot VAD")
+        bot_vad_suspended_for_hotkey = False
+        return
+    try:
+        bot_integration.resume_bot_vad_listener()
+    except AttributeError:
+        logger.debug("Bot integration does not expose resume_bot_vad_listener; skipping resume request")
+    except Exception:
+        logger.exception("Failed to resume bot VAD listener after hotkey recording")
+    finally:
+        bot_vad_suspended_for_hotkey = False
+
+
 def on_press(key):
     global recording, recording_thread, recording_file_path
+    if key != keyboard.Key.ctrl_r:
+        return
+    _pause_bot_vad_for_hotkey()
     if not client_enabled:
         return
-    if key == keyboard.Key.ctrl_r and not recording:
-        if not _client_hotkey_available():
-            return
-        recording = True
-        recording_file_path = create_recording_file_path()
-        recording_thread = threading.Thread(target=record_audio, args=(recording_file_path,), daemon=True)
-        recording_thread.start()
-        try:
-            from utils.gui import show_waveform_overlay
-            enqueue_management_task(show_waveform_overlay, lambda: get_recent_waveform(500))
-        except Exception:
-            logger.exception("Failed to show waveform overlay while recording")
+    if recording:
+        return
+    if not _client_hotkey_available():
+        return
+    recording = True
+    recording_file_path = create_recording_file_path()
+    recording_thread = threading.Thread(target=record_audio, args=(recording_file_path,), daemon=True)
+    recording_thread.start()
+    try:
+        from utils.gui import show_waveform_overlay
+        enqueue_management_task(show_waveform_overlay, lambda: get_recent_waveform(500))
+    except Exception:
+        logger.exception("Failed to show waveform overlay while recording")
 
 
 def handle_transcribed_text_from_hotkey(text: str) -> bool:
@@ -954,51 +1000,53 @@ def handle_transcribed_text_from_hotkey(text: str) -> bool:
 def on_release(key):
     from utils.models import transcribe_audio
     global recording, recording_thread, recording_file_path
-    if key == keyboard.Key.ctrl_r:
-        if recording:
-            recording = False
-            if recording_thread:
-                recording_thread.join(); recording_thread = None
-            path = recording_file_path
-            # switch overlay into “processing” mode
+    if key != keyboard.Key.ctrl_r:
+        return
+    _resume_bot_vad_for_hotkey()
+    if recording:
+        recording = False
+        if recording_thread:
+            recording_thread.join(); recording_thread = None
+        path = recording_file_path
+        # switch overlay into “processing” mode
+        try:
+            from utils.gui import set_waveform_processing
+            enqueue_management_task(set_waveform_processing, "Processing…")
+        except Exception:
+            logger.exception("Failed to switch waveform overlay to processing mode")
+        # START the loading sound so GUI gets live levels + waveform
+        try:
+            start_processing_feedback()
+        except Exception:
+            logger.exception("Failed to start processing feedback loop")
+        text = None
+        try:
+            if path and path.exists() and path.stat().st_size > 0:
+                text = transcribe_audio(str(path))
+        except Exception as exc:
+            notify_error("Transcription failed", format_exception_details(exc)); text = None
+        if text:
+            handled_keyword = False
             try:
-                from utils.gui import set_waveform_processing
-                enqueue_management_task(set_waveform_processing, "Processing…")
+                handled_keyword = handle_transcribed_text_from_hotkey(text)
             except Exception:
-                logger.exception("Failed to switch waveform overlay to processing mode")
-            # START the loading sound so GUI gets live levels + waveform
-            try:
-                start_processing_feedback()
-            except Exception:
-                logger.exception("Failed to start processing feedback loop")
-            text = None
-            try:
-                if path and path.exists() and path.stat().st_size > 0:
-                    text = transcribe_audio(str(path))
-            except Exception as exc:
-                notify_error("Transcription failed", format_exception_details(exc)); text = None
-            if text:
-                handled_keyword = False
+                logger.exception("Hotkey keyword handling failed")
+            if not handled_keyword:
                 try:
-                    handled_keyword = handle_transcribed_text_from_hotkey(text)
-                except Exception:
-                    logger.exception("Hotkey keyword handling failed")
-                if not handled_keyword:
-                    try:
-                        insert_text_into_focus(text)
-                    except Exception as exc:
-                        notify_error("Text insertion failed", format_exception_details(exc))
-            try:
-                stop_processing_feedback()
-            except Exception:
-                logger.exception("Failed to stop processing feedback loop")
-            try:
-                from utils.gui import hide_waveform_overlay
-                enqueue_management_task(hide_waveform_overlay)
-            except Exception:
-                logger.exception("Failed to hide waveform overlay")
-            cleanup_recording_file(path)
-            recording_file_path = None
+                    insert_text_into_focus(text)
+                except Exception as exc:
+                    notify_error("Text insertion failed", format_exception_details(exc))
+        try:
+            stop_processing_feedback()
+        except Exception:
+            logger.exception("Failed to stop processing feedback loop")
+        try:
+            from utils.gui import hide_waveform_overlay
+            enqueue_management_task(hide_waveform_overlay)
+        except Exception:
+            logger.exception("Failed to hide waveform overlay")
+        cleanup_recording_file(path)
+        recording_file_path = None
 
 # ---- Discovery wrappers to restore original side-effects ----
 def _apply_last_connected(server: Optional[ServerInfo]) -> Optional[ServerInfo]:

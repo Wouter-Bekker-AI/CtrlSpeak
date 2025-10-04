@@ -718,6 +718,7 @@ def main():
     vad_config = VADConfig(sample_rate=16000, frame_duration_ms=30, padding_duration_ms=360, aggressiveness=2, deactivation_ratio=0.9)
     vad_listener: Optional[VADListener] = None
     vad_thread: Optional[threading.Thread] = None
+    vad_suppressed = False
     voice_mode_active = threading.Event()
     session_history: List[dict] = []
     last_bot_response: str = ""
@@ -777,7 +778,7 @@ def main():
     chat_window.export_profile_requested.connect(_export_profile_snapshot)
 
     def _enable_voice_mode() -> None:
-        nonlocal vad_listener, vad_thread
+        nonlocal vad_listener, vad_thread, vad_suppressed
         if voice_mode_active.is_set():
             return
         voice_mode_active.set()
@@ -791,9 +792,10 @@ def main():
         )
         vad_thread = threading.Thread(target=vad_listener.start, daemon=True)
         vad_thread.start()
+        vad_suppressed = False
 
     def _disable_voice_mode() -> None:
-        nonlocal vad_listener, vad_thread
+        nonlocal vad_listener, vad_thread, vad_suppressed
         if not voice_mode_active.is_set():
             return
         voice_mode_active.clear()
@@ -810,19 +812,50 @@ def main():
             vad_thread.join(timeout=2.0)
             vad_thread = None
         vad_listener = None
+        vad_suppressed = False
         if tts_model.is_playing:
             tts_model.stop_playback()
         animator.update_amplitude(0.0)
+
+    def _pause_vad_listener() -> None:
+        nonlocal vad_listener, vad_suppressed
+        if vad_listener is None or not voice_mode_active.is_set():
+            return
+        try:
+            vad_listener.disable_vad()
+            vad_suppressed = True
+            logger.debug("VAD listener paused via control command")
+        except Exception:
+            logger.exception("Failed to pause VAD listener on control command")
+
+    def _resume_vad_listener() -> None:
+        nonlocal vad_listener, vad_suppressed
+        if vad_listener is None:
+            vad_suppressed = False
+            return
+        if not voice_mode_active.is_set():
+            vad_suppressed = False
+            return
+        try:
+            vad_listener.enable_vad()
+            vad_suppressed = False
+            logger.debug("VAD listener resumed after control command")
+        except Exception:
+            vad_suppressed = False
+            logger.exception("Failed to resume VAD listener after control command")
 
     def _on_text_submitted(message: str) -> None:
         cleaned = message.strip()
         if not cleaned:
             return
-        chat_window.append_user_message(cleaned)
 
         def _worker() -> None:
             with processing_lock:
-                _handle_user_request(cleaned, source="text")
+                _handle_user_request(
+                    cleaned,
+                    source="voice" if voice_mode_active.is_set() else "text",
+                    input_medium="text",
+                )
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1008,6 +1041,7 @@ def main():
         *,
         capture_override: Optional[str] = None,
         source: str = "voice",
+        input_medium: Optional[str] = None,
     ) -> None:
         nonlocal last_bot_response, vad_listener, session_history
 
@@ -1092,10 +1126,8 @@ def main():
             animator.update_amplitude(0.0)
             return
 
-        if source == "voice":
-            chat_window.append_user_message(cleaned, via_voice=True)
-        elif source == "command":
-            chat_window.append_user_message(cleaned)
+        medium = input_medium or ("voice" if source == "voice" else None)
+        chat_window.append_user_message(cleaned, medium=medium)
 
         normalized_user = cleaned.lower()
         normalized_bot = last_bot_response.strip().lower()
@@ -1424,7 +1456,11 @@ def main():
             recognized_text = ""
 
         with processing_lock:
-            _handle_user_request(recognized_text, source="voice")
+            _handle_user_request(
+                recognized_text,
+                source="voice",
+                input_medium="voice",
+            )
 
     def _trigger_look_at_screen() -> None:
         if not profile.vision_enabled:
@@ -1489,6 +1525,12 @@ def main():
             elif command == "look_at_my_clipboard":
                 logger.debug("stdin control command received: look_at_my_clipboard")
                 _trigger_look_at_clipboard()
+            elif command == "pause_vad":
+                logger.debug("stdin control command received: pause_vad")
+                _pause_vad_listener()
+            elif command == "resume_vad":
+                logger.debug("stdin control command received: resume_vad")
+                _resume_vad_listener()
             elif command == "chat_with":
                 target_identity = str(payload.get("identity") or "")
                 if target_identity:

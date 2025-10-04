@@ -1133,26 +1133,57 @@ def get_identity_tts_preferences(
     return voice, preferences
 
 
-def request_bot_screenshot() -> bool:
-    """Request that the running bot execute the look-at-my-screen workflow."""
+def _send_bot_command(command: str, extra: Optional[dict] = None) -> bool:
+    """Send a JSON control command to the running SocialRobot process."""
 
     proc = _bot_proc
     if proc is None or proc.poll() is not None:
-        logger.error("Bot is not running; cannot request screenshot")
+        logger.debug(
+            "Bot command '%s' skipped because the bot process is unavailable",
+            command,
+        )
         return False
     if proc.stdin is None:
-        logger.error("Bot stdin unavailable; cannot request screenshot")
+        logger.debug(
+            "Bot command '%s' skipped because stdin is unavailable",
+            command,
+        )
         return False
 
-    payload = json.dumps({"command": "look_at_my_screen"})
+    payload: dict[str, object] = {"command": command}
+    if extra:
+        payload.update(extra)
+
+    message = json.dumps(payload)
     try:
         with _bot_stdin_lock:
-            proc.stdin.write(payload + "\n")
+            proc.stdin.write(message + "\n")
             proc.stdin.flush()
         return True
     except Exception:
-        logger.exception("Failed to send screenshot request to bot")
+        logger.exception("Failed to send '%s' command to bot", command)
         return False
+
+
+def request_bot_screenshot() -> bool:
+    """Request that the running bot execute the look-at-my-screen workflow."""
+
+    if not _send_bot_command("look_at_my_screen"):
+        logger.error("Bot is not running; cannot request screenshot")
+        return False
+    return True
+
+
+def pause_bot_vad_listener() -> bool:
+    """Ask SocialRobot to pause VAD capture while the push-to-talk hotkey is held."""
+
+    return _send_bot_command("pause_vad")
+
+
+def resume_bot_vad_listener() -> bool:
+    """Ask SocialRobot to resume VAD capture after the push-to-talk hotkey ends."""
+
+    return _send_bot_command("resume_vad")
 
 
 def run_bot_test(
