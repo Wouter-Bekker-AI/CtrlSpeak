@@ -1013,6 +1013,126 @@ def get_active_identity() -> Optional[str]:
     return _active_identity
 
 
+def get_identity_tts_preferences(
+    identity: Optional[str],
+    *,
+    identities_dir: Optional[str] = None,
+) -> tuple[Optional[str], dict[str, Any]]:
+    """Return the preferred voice and TTS provider settings for an identity.
+
+    Environment variable overrides (``BOT_VOICE`` and the ``BOT_TTS_*`` set)
+    take precedence over the values stored in ``identity.json`` so the
+    behaviour matches SocialRobot's launch pipeline.
+    """
+
+    def _coerce_int(value: Any) -> Optional[int]:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                return int(stripped)
+            except ValueError:
+                logger.warning("Ignoring non-integer device id override: %r", value)
+        return None
+
+    def _parse_json_mapping(value: Any, *, context: str) -> Optional[dict]:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            candidate = value.strip()
+            if not candidate:
+                return None
+            try:
+                parsed = json.loads(candidate)
+            except Exception:
+                logger.warning("Ignoring %s override; JSON decode failed", context, exc_info=True)
+                return None
+            if isinstance(parsed, dict):
+                return parsed
+        logger.warning("Ignoring %s override; expected a JSON object", context)
+        return None
+
+    def _parse_json_sequence(value: Any, *, context: str) -> Optional[list]:
+        if value is None:
+            return None
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            candidate = value.strip()
+            if not candidate:
+                return None
+            try:
+                parsed = json.loads(candidate)
+            except Exception:
+                logger.warning("Ignoring %s override; JSON decode failed", context, exc_info=True)
+                return None
+            if isinstance(parsed, list):
+                return parsed
+        logger.warning("Ignoring %s override; expected a JSON array", context)
+        return None
+
+    normalized_identity = _normalized_identity(identity)
+    config, _ = _load_identity_config(normalized_identity, identities_dir)
+
+    voice: Optional[str] = os.getenv("BOT_VOICE")
+    if not voice:
+        raw_voice = config.get("voice")
+        if isinstance(raw_voice, str):
+            candidate = raw_voice.strip()
+            voice = candidate or None
+    else:
+        voice = voice.strip() or None
+
+    raw_tts_config = config.get("tts")
+    tts_config: dict[str, Any] = raw_tts_config if isinstance(raw_tts_config, dict) else {}
+
+    provider = os.getenv("BOT_TTS_PROVIDER")
+    if not provider:
+        raw_provider = tts_config.get("onnx_provider") or tts_config.get("provider")
+        if isinstance(raw_provider, str):
+            provider = raw_provider.strip() or None
+        elif raw_provider is not None:
+            logger.warning("Ignoring tts.onnx_provider; expected a string value")
+    else:
+        provider = provider.strip() or None
+
+    device_id = os.getenv("BOT_TTS_DEVICE_ID")
+    parsed_device_id = _coerce_int(device_id)
+    if parsed_device_id is None:
+        parsed_device_id = _coerce_int(tts_config.get("device_id"))
+
+    provider_options = _parse_json_mapping(
+        os.getenv("BOT_TTS_PROVIDER_OPTIONS"), context="BOT_TTS_PROVIDER_OPTIONS"
+    )
+    if provider_options is None:
+        provider_options = _parse_json_mapping(
+            tts_config.get("provider_options"), context="tts.provider_options"
+        )
+
+    providers = _parse_json_sequence(os.getenv("BOT_TTS_PROVIDERS"), context="BOT_TTS_PROVIDERS")
+    if providers is None:
+        providers = _parse_json_sequence(tts_config.get("providers"), context="tts.providers")
+    if providers is None:
+        providers = _parse_json_sequence(tts_config.get("onnx_providers"), context="tts.onnx_providers")
+
+    preferences: dict[str, Any] = {}
+    if provider:
+        preferences["onnx_provider"] = provider
+    if parsed_device_id is not None:
+        preferences["onnx_device_id"] = parsed_device_id
+    if provider_options:
+        preferences["onnx_provider_options"] = provider_options
+    if providers:
+        preferences["onnx_providers"] = providers
+
+    return voice, preferences
+
+
 def request_bot_screenshot() -> bool:
     """Request that the running bot execute the look-at-my-screen workflow."""
 

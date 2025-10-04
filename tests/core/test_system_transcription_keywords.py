@@ -25,6 +25,13 @@ def bot_module(monkeypatch):
         start_bot=lambda **_kwargs: True,
         stop_bot=lambda: None,
     )
+    goodbye_calls: list[str] = []
+
+    def _record_goodbye(identity: str) -> None:
+        goodbye_calls.append(identity)
+
+    monkeypatch.setattr(system, "_speak_conversation_goodbye", _record_goodbye)
+    stub.goodbye_calls = goodbye_calls
     monkeypatch.setitem(sys.modules, "utils.bot_integration", stub)
     return stub
 
@@ -43,6 +50,7 @@ def test_handle_transcription_keyword_stops_active_identity(bot_module):
     assert handled is True
     assert text == ""
     assert calls == [("request", "assistant")]
+    assert bot_module.goodbye_calls == ["assistant"]
 
 
 def test_handle_transcription_keyword_allows_punctuation(bot_module):
@@ -50,6 +58,7 @@ def test_handle_transcription_keyword_allows_punctuation(bot_module):
 
     assert handled is True
     assert text == ""
+    assert bot_module.goodbye_calls == ["assistant"]
 
 
 def test_handle_transcription_keyword_falls_back_to_stop(bot_module):
@@ -72,6 +81,7 @@ def test_handle_transcription_keyword_falls_back_to_stop(bot_module):
     assert text == ""
     assert request_calls == [("request", "assistant")]
     assert stop_calls == ["stop"]
+    assert bot_module.goodbye_calls == ["assistant"]
 
 
 def test_handle_transcription_keyword_switches_identity(bot_module):
@@ -97,6 +107,7 @@ def test_handle_transcription_keyword_switches_identity(bot_module):
     assert text == ""
     assert request_calls == [("default", 3.0)]
     assert start_calls == ["assistant"]
+    assert bot_module.goodbye_calls == []
 
 
 def test_handle_transcription_keyword_switches_identity_with_fallback(bot_module):
@@ -128,6 +139,7 @@ def test_handle_transcription_keyword_switches_identity_with_fallback(bot_module
     assert request_calls == [("default", 3.0)]
     assert stop_calls == ["stop"]
     assert start_calls == ["assistant"]
+    assert bot_module.goodbye_calls == []
 
 
 def test_handle_transcription_keyword_starts_when_no_identity_active(bot_module):
@@ -146,6 +158,7 @@ def test_handle_transcription_keyword_starts_when_no_identity_active(bot_module)
     assert handled is True
     assert text == ""
     assert start_calls == ["assistant"]
+    assert bot_module.goodbye_calls == []
 
 
 def test_handle_transcription_keyword_supports_fuzzy_chat(bot_module):
@@ -164,6 +177,7 @@ def test_handle_transcription_keyword_supports_fuzzy_chat(bot_module):
     assert handled is True
     assert text == ""
     assert start_calls == ["assistant"]
+    assert bot_module.goodbye_calls == []
 
 
 def test_handle_transcription_keyword_normalizes_defunct(bot_module):
@@ -182,6 +196,47 @@ def test_handle_transcription_keyword_normalizes_defunct(bot_module):
     assert handled is True
     assert text == ""
     assert start_calls == ["default"]
+    assert bot_module.goodbye_calls == []
+
+
+def test_handle_transcription_keyword_quit_requests_shutdown(monkeypatch, bot_module):
+    calls: list[str] = []
+    goodbye_calls: list[int] = []
+
+    def _request(reason: str = "unspecified") -> None:
+        calls.append(reason)
+
+    monkeypatch.setattr(system, "_speak_lobby_goodbye", lambda: goodbye_calls.append(1))
+    monkeypatch.setattr(system, "request_application_shutdown", _request)
+    bot_module.get_active_identity = lambda: None
+
+    handled, text = system.handle_transcription_keyword("Quit Control Speak")
+
+    assert handled is True
+    assert text == ""
+    assert calls == ["transcription keyword"]
+    assert goodbye_calls == [1]
+    assert bot_module.goodbye_calls == []
+
+
+def test_handle_transcription_keyword_quit_ignored_in_conversation(monkeypatch, bot_module):
+    calls: list[str] = []
+    goodbye_calls: list[int] = []
+
+    def _request(reason: str = "unspecified") -> None:
+        calls.append(reason)
+
+    monkeypatch.setattr(system, "_speak_lobby_goodbye", lambda: goodbye_calls.append(1))
+    monkeypatch.setattr(system, "request_application_shutdown", _request)
+    bot_module.get_active_identity = lambda: "assistant"
+
+    handled, text = system.handle_transcription_keyword("Quit Control Speak")
+
+    assert handled is False
+    assert text.lower() == "quit control speak"
+    assert calls == []
+    assert goodbye_calls == []
+    assert bot_module.goodbye_calls == []
 
 
 def test_handle_transcription_keyword_ignores_start_for_active_identity(bot_module):
@@ -200,6 +255,7 @@ def test_handle_transcription_keyword_ignores_start_for_active_identity(bot_modu
     assert handled is True
     assert text == ""
     assert start_calls == []
+    assert bot_module.goodbye_calls == []
 
 
 def test_handle_transcription_keyword_ignores_other_identity(bot_module):
@@ -207,6 +263,7 @@ def test_handle_transcription_keyword_ignores_other_identity(bot_module):
 
     assert handled is False
     assert text == "goodbye default"
+    assert bot_module.goodbye_calls == []
 
 
 def test_handle_transcription_keyword_ignores_when_no_bot_active(bot_module):
@@ -216,6 +273,7 @@ def test_handle_transcription_keyword_ignores_when_no_bot_active(bot_module):
 
     assert handled is False
     assert text == "goodbye assistant"
+    assert bot_module.goodbye_calls == []
 
 
 def test_handle_transcription_keyword_returns_normalized_text():

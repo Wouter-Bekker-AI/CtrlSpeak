@@ -115,6 +115,9 @@ PROCESSING_SAMPLE_RATE = 44100
 
 INSTANCE_PORT = int(os.environ.get("CTRLSPEAK_SINGLE_INSTANCE_PORT", "54329"))
 
+LOBBY_STAGE = "lobby"
+CONVERSATION_STAGE = "conversation"
+
 # ---------------- Build flags ----------------
 def detect_client_only_build() -> bool:
     try:
@@ -142,6 +145,8 @@ processing_sound_data: Optional[bytes] = None
 processing_sound_settings: Optional[Dict[str, int]] = None
 _ready_sound_lock = threading.Lock()
 _ready_sound_played = False
+
+_shutdown_requested = threading.Event()
 
 recording_temp_dir_name = "temp"
 AUTO_MODE = False
@@ -178,11 +183,13 @@ from utils.net_discovery import (
 # Re-export for callers that import from utils.system
 __all__ = [
     "APP_VERSION", "SPLASH_DURATION_MS", "CLIENT_ONLY_BUILD",
+    "LOBBY_STAGE", "CONVERSATION_STAGE",
     "settings", "settings_lock", "load_settings", "save_settings",
     "get_data_dir", "get_config_dir", "get_config_file_path", "get_temp_dir",
     "create_recording_file_path", "cleanup_recording_file", "resource_path",
     "insert_text_into_focus", "set_force_sendinput", "is_console_window",
-    "ServerInfo", "format_exception_details",
+    "ServerInfo", "format_exception_details", "get_interaction_stage",
+    "request_application_shutdown",
 ]
 
 # Keep a single shared discovery listener and last_connected_server here
@@ -205,6 +212,114 @@ def notify(message: str, title: str = "CtrlSpeak") -> None:
             logger.exception("Failed to print fallback notification '%s'", title)
 
 
+def get_interaction_stage() -> str:
+    """Return the current high-level interaction stage."""
+
+    try:
+        from utils import bot_integration
+    except Exception:
+        logger.exception("Failed to import bot integration while resolving interaction stage")
+        return LOBBY_STAGE
+
+    try:
+        active_identity = bot_integration.get_active_identity()
+    except Exception:
+        logger.exception("Failed to query active identity while resolving interaction stage")
+        return LOBBY_STAGE
+
+    return CONVERSATION_STAGE if active_identity else LOBBY_STAGE
+
+
+def _resolve_identity_tts_settings(
+    identity: Optional[str], *, fallback_voice: str, log_context: str
+) -> tuple[str, dict[str, object]]:
+    """Return the Kokoro voice and keyword arguments for an identity."""
+
+    resolved_voice = fallback_voice
+    kwargs: dict[str, object] = {}
+
+    try:
+        from utils import bot_integration
+    except Exception:
+        logger.exception(
+            "Failed to import bot integration while resolving TTS for %s",
+            log_context,
+        )
+        return resolved_voice, kwargs
+
+    try:
+        voice, preferences = bot_integration.get_identity_tts_preferences(identity)
+    except Exception:
+        logger.exception(
+            "Failed to resolve TTS preferences for identity '%s' (%s)",
+            identity or "<unspecified>",
+            log_context,
+        )
+        voice, preferences = None, {}
+
+    if not isinstance(preferences, dict):
+        preferences = {}
+
+    resolved_voice = (voice or fallback_voice).strip() or fallback_voice
+
+    provider = preferences.get("onnx_provider")
+    if isinstance(provider, str) and provider.strip():
+        kwargs["onnx_provider"] = provider.strip()
+    device_id = preferences.get("onnx_device_id")
+    if isinstance(device_id, int):
+        kwargs["onnx_device_id"] = device_id
+    provider_options = preferences.get("onnx_provider_options")
+    if isinstance(provider_options, dict) and provider_options:
+        kwargs["onnx_provider_options"] = provider_options
+    custom_providers = preferences.get("onnx_providers")
+    if isinstance(custom_providers, list) and custom_providers:
+        kwargs["onnx_providers"] = custom_providers
+
+    return resolved_voice, kwargs
+
+
+def _speak_lobby_goodbye() -> None:
+    """Play a goodbye message using the default identity's voice."""
+
+    try:
+        from third_party.social_robot.audio.tts import KokoroTTS
+    except Exception:
+        logger.exception("Failed to import dependencies for lobby goodbye playback")
+        return
+
+    voice_name, kwargs = _resolve_identity_tts_settings(
+        "default", fallback_voice="af_heart", log_context="lobby goodbye"
+    )
+
+    try:
+        tts = KokoroTTS(voice=voice_name, **kwargs)
+        audio = tts.synthesize("goodbye")
+        tts.play_audio_with_amplitude(audio, amplitude_callback=None)
+    except Exception:
+        logger.exception("Failed to play lobby goodbye message")
+
+
+def _speak_conversation_goodbye(identity: str) -> None:
+    """Play a goodbye message using the active identity's voice."""
+
+    try:
+        from third_party.social_robot.audio.tts import KokoroTTS
+    except Exception:
+        logger.exception(
+            "Failed to import dependencies for conversation goodbye playback"
+        )
+        return
+
+    voice_name, kwargs = _resolve_identity_tts_settings(
+        identity, fallback_voice="af_heart", log_context=f"conversation goodbye for {identity}"
+    )
+
+    try:
+        tts = KokoroTTS(voice=voice_name, **kwargs)
+        audio = tts.synthesize("goodbye")
+        tts.play_audio_with_amplitude(audio, amplitude_callback=None)
+    except Exception:
+        logger.exception("Failed to play conversation goodbye for '%s'", identity)
 
 
 def ui_show_lockout_window(message: str, cancel_callback: Optional[Callable[[], None]] = None) -> None:
@@ -726,6 +841,8 @@ def handle_transcribed_text_from_hotkey(text: str) -> bool:
         logger.exception("Failed to import keyword handlers for hotkey processing")
         return False
 
+    stage = get_interaction_stage()
+
     maintenance_match = keywords.detect_memory_refresh_keyword(normalized)
     if maintenance_match:
         target_identity = bot_integration.get_active_identity() or "assistant"
@@ -753,6 +870,18 @@ def handle_transcribed_text_from_hotkey(text: str) -> bool:
                 description.capitalize(),
                 target_identity,
             )
+        return True
+
+    system_match = keywords.detect_system_keyword(normalized)
+    if system_match and system_match.keyword.payload == "quit_ctrlspeak":
+        if stage != LOBBY_STAGE:
+            logger.info(
+                "Hotkey quit command ignored because the conversation stage is active",
+            )
+            return False
+        logger.info("Hotkey command requesting CtrlSpeak shutdown from lobby stage")
+        _speak_lobby_goodbye()
+        request_application_shutdown("hotkey keyword")
         return True
 
     match = keywords.detect_conversation_start_keyword(normalized)
@@ -804,6 +933,7 @@ def handle_transcribed_text_from_hotkey(text: str) -> bool:
             )
             return True
         logger.info("Hotkey command stopping bot '%s'", identity)
+        _speak_conversation_goodbye(identity)
         try:
             request_goodbye = getattr(bot_integration, "request_goodbye", None)
             should_fallback = True
@@ -977,6 +1107,20 @@ def handle_transcription_keyword(text: str) -> tuple[bool, str]:
         logger.exception("Failed to import transcription keyword dependencies")
         return False, normalized
 
+    stage = get_interaction_stage()
+
+    system_match = keywords.detect_system_keyword(normalized)
+    if system_match and system_match.keyword.payload == "quit_ctrlspeak":
+        if stage != LOBBY_STAGE:
+            logger.debug(
+                "Transcription server ignoring quit keyword while conversation stage is active",
+            )
+            return False, normalized
+        logger.info("Transcription server received quit keyword; shutting down CtrlSpeak")
+        _speak_lobby_goodbye()
+        request_application_shutdown("transcription keyword")
+        return True, ""
+
     start_match = keywords.detect_conversation_start_keyword(normalized)
     if start_match:
         identity = start_match.keyword.payload
@@ -1060,6 +1204,8 @@ def handle_transcription_keyword(text: str) -> tuple[bool, str]:
         return False, normalized
 
     logger.info("Transcription server stopping bot '%s' after goodbye keyword", identity)
+
+    _speak_conversation_goodbye(identity)
 
     should_fallback = True
     request_goodbye = getattr(bot_integration, "request_goodbye", None)
@@ -1533,6 +1679,25 @@ def shutdown_all():
         request_management_ui_shutdown()
     except Exception:
         logger.exception("Failed to shut down management UI during shutdown")
+
+
+def request_application_shutdown(source: str = "unspecified") -> None:
+    """Request a graceful shutdown of the entire CtrlSpeak application."""
+
+    if _shutdown_requested.is_set():
+        logger.debug("Shutdown already requested (source=%s)", source)
+        return
+
+    _shutdown_requested.set()
+    logger.info("Application shutdown requested via %s", source)
+
+    try:
+        shutdown_all()
+    finally:
+        try:
+            release_single_instance_lock()
+        except Exception:
+            logger.exception("Failed to release instance lock during shutdown request")
 
 # ---------------- CLI ----------------
 def parse_cli_args(argv: list[str]) -> argparse.Namespace:

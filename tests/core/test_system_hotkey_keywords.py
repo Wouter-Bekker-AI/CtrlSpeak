@@ -28,6 +28,13 @@ def bot_module(monkeypatch):
         start_bot=lambda **_kwargs: True,
         stop_bot=lambda: None,
     )
+    goodbye_calls: list[str] = []
+
+    def _record_goodbye(identity: str) -> None:
+        goodbye_calls.append(identity)
+
+    monkeypatch.setattr(system, "_speak_conversation_goodbye", _record_goodbye)
+    stub.goodbye_calls = goodbye_calls
     monkeypatch.setitem(sys.modules, "utils.bot_integration", stub)
     return stub
 
@@ -99,6 +106,7 @@ def test_hotkey_goodbye_stops_active_identity(bot_module):
     assert handled is True
     assert stop_calls == ["stop"]
     assert start_calls == []
+    assert bot_module.goodbye_calls == ["assistant"]
 
 
 def test_hotkey_goodbye_handles_punctuation(bot_module):
@@ -111,6 +119,7 @@ def test_hotkey_goodbye_handles_punctuation(bot_module):
 
     assert handled is True
     assert stop_calls == ["stop"]
+    assert bot_module.goodbye_calls == ["assistant"]
 
 
 def test_hotkey_goodbye_for_other_identity_is_ignored(bot_module):
@@ -126,6 +135,7 @@ def test_hotkey_goodbye_for_other_identity_is_ignored(bot_module):
     assert handled is True
     assert stop_calls == []
     assert start_calls == []
+    assert bot_module.goodbye_calls == []
 
 
 def test_hotkey_non_keyword_returns_false(bot_module):
@@ -141,6 +151,7 @@ def test_hotkey_non_keyword_returns_false(bot_module):
     assert handled is False
     assert stop_calls == []
     assert start_calls == []
+    assert bot_module.goodbye_calls == []
 
 
 def test_hotkey_supports_fuzzy_chat(bot_module):
@@ -158,6 +169,7 @@ def test_hotkey_supports_fuzzy_chat(bot_module):
 
     assert handled is True
     assert start_calls == ["assistant"]
+    assert bot_module.goodbye_calls == []
 
 
 def test_hotkey_normalizes_defunct_identity(bot_module):
@@ -175,6 +187,45 @@ def test_hotkey_normalizes_defunct_identity(bot_module):
 
     assert handled is True
     assert start_calls == ["default"]
+    assert bot_module.goodbye_calls == []
+
+
+def test_hotkey_quit_requests_shutdown(monkeypatch, bot_module):
+    calls: list[str] = []
+    goodbye_calls: list[int] = []
+
+    def _request(reason: str = "unspecified") -> None:
+        calls.append(reason)
+
+    monkeypatch.setattr(system, "_speak_lobby_goodbye", lambda: goodbye_calls.append(1))
+    monkeypatch.setattr(system, "request_application_shutdown", _request)
+
+    handled = system.handle_transcribed_text_from_hotkey("Quit Control Speak")
+
+    assert handled is True
+    assert calls == ["hotkey keyword"]
+    assert goodbye_calls == [1]
+    assert bot_module.goodbye_calls == []
+
+
+def test_hotkey_quit_ignored_during_conversation(monkeypatch, bot_module):
+    calls: list[str] = []
+    goodbye_calls: list[int] = []
+
+    bot_module.get_active_identity = lambda: "assistant"
+
+    def _request(reason: str = "unspecified") -> None:
+        calls.append(reason)
+
+    monkeypatch.setattr(system, "_speak_lobby_goodbye", lambda: goodbye_calls.append(1))
+    monkeypatch.setattr(system, "request_application_shutdown", _request)
+
+    handled = system.handle_transcribed_text_from_hotkey("Quit Control Speak")
+
+    assert handled is False
+    assert calls == []
+    assert goodbye_calls == []
+    assert bot_module.goodbye_calls == []
 
 
 def test_hotkey_update_documentation_uses_active_identity(monkeypatch, bot_module):

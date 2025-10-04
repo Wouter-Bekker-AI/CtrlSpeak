@@ -45,6 +45,10 @@ CtrlSpeak stays resident as a tray application once initialization is complete.
 2. **Tray menu** – Right-clicking the tray icon surfaces two actions: “Manage CtrlSpeak” (opens the management dashboard) and “Quit” (invokes a clean shutdown after stopping client listeners, server threads, and Tk).【F:utils/system.py†L924-L968】
 3. **Shutdown guarantees** – `atexit` handlers ensure the single-instance lock is released and all background threads (recording, discovery, server, management UI) are stopped even if the app exits unexpectedly.【F:main.py†L111-L116】【F:utils/system.py†L1105-L1121】
 
+### Lobby vs. Conversation stages
+
+CtrlSpeak tracks a high-level interaction stage so voice keywords behave predictably. When no Chat with Bot identity is active the app is in the **Lobby stage**. Launching any persona moves CtrlSpeak into the **Conversation stage** until that session stops. Stage awareness ensures that automation tied to the Lobby—such as the "Quit Control Speak" shutdown keyword—never interrupts an active conversation, while conversation-specific commands ("chat with…", "goodbye…") remain scoped to the active persona. When "Quit Control Speak" fires from the Lobby, CtrlSpeak first plays a Kokoro "goodbye" line with the default receptionist voice before requesting application shutdown, while Conversation-stage goodbyes speak through the active persona’s voice before the bot is stopped.【F:utils/system.py†L173-L320】【F:utils/system.py†L694-L912】【F:utils/system.py†L944-L1166】
+
 ## 6. User Recording Flow (Ctrl+R)
 Holding the right Control key drives the core speech-to-text workflow.
 
