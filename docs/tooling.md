@@ -131,7 +131,8 @@ The application responds to the following spoken or typed keywords. Each phrase 
 | `update documentation` (also accepts “refresh documentation”) | Memory maintenance | Force a documentation-ingestion pass for the active identity (assistant, Einstein, or default), bypassing the 24-hour cooldown. |
 | `update datetime` (accepts “update date time” or “refresh date time”) | Memory maintenance | Force the active identity to store the latest local date, timezone, and locale snapshot in vector memory, bypassing the 24-hour cooldown. |
 | `chat with <identity>` | Conversation start | Relaunch the bot using the requested identity via the transcription server (ignored if that identity is already active). |
-| `goodbye <identity>` | Conversation end | Shut down the active conversation for the specified identity from the CtrlSpeak main process. |
+| `goodbye <identity>` | Conversation end | Play a farewell in the active persona’s voice and then shut down the conversation from the CtrlSpeak main process. |
+| `quit control speak` | System | From the Lobby stage, speaks “goodbye” with the default receptionist voice before shutting down CtrlSpeak (ignored while a conversation is active). |
 
 > **Note:** SocialRobot’s text chat window no longer treats typed “goodbye <identity>” phrases as keywords. Those messages are delivered to the bot verbatim; only spoken requests (or ones injected through the stdin control channel) trigger the shutdown helpers.
 
@@ -140,7 +141,7 @@ The application responds to the following spoken or typed keywords. Each phrase 
 `configure_identity_keywords()` keeps the voice trigger list synchronized with the identity folders. Once configured, the helpers recognize:
 
 - `chat with <identity>` – immediately relaunches SocialRobot with the requested identity via the transcription server (no action is taken when the user asks for the already-active persona). Close variants like “chat was assistant” are recognised automatically.
-- `goodbye <identity>` – immediately ends the current conversation and shuts the bot down from the CtrlSpeak main process before SocialRobot processes the utterance. Light punctuation (for example, “goodbye, assistant”) remains valid.
+- `goodbye <identity>` – immediately ends the current conversation, first speaking a “goodbye” line with the active persona’s voice before the CtrlSpeak main process shuts the bot down. Light punctuation (for example, “goodbye, assistant”) remains valid.
 
 The `<identity>` placeholder uses the directory names under `third_party/social_robot/identities/`. Call `configure_identity_keywords()` whenever you add or remove identities (for example, during application startup) to keep the registry current.
 

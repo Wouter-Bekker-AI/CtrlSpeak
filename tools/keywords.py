@@ -65,6 +65,23 @@ VISION_KEYWORDS: tuple[Keyword, ...] = (
     _LOOK_AT_CLIPBOARD,
 )
 
+_QUIT_CTRL_SPEAK = Keyword(
+    name="quit_ctrlspeak",
+    pattern=re.compile(r"\bquit\s+control\s+speak\b", re.IGNORECASE),
+    category="system",
+    payload="quit_ctrlspeak",
+    fuzzy_targets=(
+        "quit control speak",
+        "quit ctrl speak",
+        "quit controlspeak",
+    ),
+    fuzzy_threshold=0.83,
+)
+
+SYSTEM_KEYWORDS: tuple[Keyword, ...] = (
+    _QUIT_CTRL_SPEAK,
+)
+
 _UPDATE_DOCUMENTATION = Keyword(
     name="update_documentation",
     pattern=re.compile(r"\bupdate documentation\b", re.IGNORECASE),
@@ -96,7 +113,7 @@ MEMORY_KEYWORDS: tuple[Keyword, ...] = (
 _CONVERSATION_START_KEYWORDS: tuple[Keyword, ...] = ()
 _CONVERSATION_END_KEYWORDS: tuple[Keyword, ...] = ()
 
-ALL_KEYWORDS: tuple[Keyword, ...] = VISION_KEYWORDS + MEMORY_KEYWORDS
+ALL_KEYWORDS: tuple[Keyword, ...] = VISION_KEYWORDS + MEMORY_KEYWORDS + SYSTEM_KEYWORDS
 
 
 def _identity_tokens(name: str) -> list[str]:
@@ -215,6 +232,12 @@ def detect_memory_refresh_keyword(text: str) -> Optional[KeywordMatch]:
     return find_first_keyword(text, MEMORY_KEYWORDS)
 
 
+def detect_system_keyword(text: str) -> Optional[KeywordMatch]:
+    """Detect whether ``text`` contains a system-level keyword."""
+
+    return find_first_keyword(text, SYSTEM_KEYWORDS)
+
+
 def get_vision_keyword(payload: str) -> Optional[Keyword]:
     """Retrieve a vision keyword by its payload identifier."""
 
@@ -304,9 +327,11 @@ __all__ = [
     "KeywordMatch",
     "VISION_KEYWORDS",
     "MEMORY_KEYWORDS",
+    "SYSTEM_KEYWORDS",
     "ALL_KEYWORDS",
     "detect_vision_keyword",
     "detect_memory_refresh_keyword",
+    "detect_system_keyword",
     "find_first_keyword",
     "get_vision_keyword",
     "iter_keyword_matches",
