@@ -1,4 +1,4 @@
-"""PySide chat window that toggles between text and voice modes."""
+"""PySide chat window that exposes independent VAD and TTS toggles."""
 
 from __future__ import annotations
 
@@ -22,10 +22,11 @@ from PySide6.QtWidgets import (
 
 
 class ChatWindow(QWidget):
-    """Simple chat UI for SocialRobot voice-first conversations."""
+    """Simple chat UI for SocialRobot conversations."""
 
     send_text = Signal(str)
-    voice_mode_requested = Signal(bool)
+    vad_toggle_requested = Signal(bool)
+    tts_toggle_requested = Signal(bool)
     export_profile_requested = Signal()
     closed = Signal()
 
@@ -35,26 +36,37 @@ class ChatWindow(QWidget):
     def __init__(
         self,
         identity_display: str,
-        icon_path: Path,
+        persona_icon_path: Path,
+        *,
+        deaf_icon_path: Optional[Path] = None,
+        speak_icon_path: Optional[Path] = None,
+        mute_icon_path: Optional[Path] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self._voice_mode = False
         self._identity_display = identity_display
 
-        self._icon = QIcon(str(icon_path))
-        if not self._icon.isNull():
-            self.setWindowIcon(self._icon)
+        self._persona_icon = self._load_icon(persona_icon_path)
+        self._deaf_icon = self._load_icon(deaf_icon_path)
+        self._speak_icon = self._load_icon(speak_icon_path)
+        self._mute_icon = self._load_icon(mute_icon_path)
+
+        if not self._persona_icon.isNull():
+            self.setWindowIcon(self._persona_icon)
 
         self.setWindowTitle(f"Chat with {identity_display}")
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+        self._vad_enabled = False
+        self._tts_enabled = False
+
         self._build_ui()
 
         self._append_html.connect(self._append_to_history)
-        self._update_send_enabled()
-        self._apply_mode_styles()
-
         self._invoke_callable.connect(self._dispatch_callable)
+        self._update_send_enabled()
+        self._apply_vad_styles()
+        self._apply_tts_styles()
 
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -68,21 +80,25 @@ class ChatWindow(QWidget):
         title_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         header.addWidget(title_label)
 
-        self._mode_button = QPushButton()
-        if self._icon.isNull():
-            self._mode_button.setText("🎤")
-        else:
-            self._mode_button.setIcon(self._icon)
-            self._mode_button.setIconSize(QSize(24, 24))
-        self._mode_button.setToolTip("Switch to voice mode")
-        self._mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._mode_button.setCheckable(True)
-        self._mode_button.setFlat(False)
-        self._mode_button.setDefault(False)
-        self._mode_button.setAutoDefault(False)
-        self._mode_button.setAccessibleName("Toggle microphone mode")
-        self._mode_button.clicked.connect(self._on_mode_button_clicked)
-        header.addWidget(self._mode_button)
+        self._vad_button = QPushButton()
+        self._vad_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._vad_button.setCheckable(True)
+        self._vad_button.setFlat(False)
+        self._vad_button.setDefault(False)
+        self._vad_button.setAutoDefault(False)
+        self._vad_button.setAccessibleName("Toggle microphone listener")
+        self._vad_button.clicked.connect(self._on_vad_button_clicked)
+        header.addWidget(self._vad_button)
+
+        self._tts_button = QPushButton()
+        self._tts_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._tts_button.setCheckable(True)
+        self._tts_button.setFlat(False)
+        self._tts_button.setDefault(False)
+        self._tts_button.setAutoDefault(False)
+        self._tts_button.setAccessibleName("Toggle text-to-speech playback")
+        self._tts_button.clicked.connect(self._on_tts_button_clicked)
+        header.addWidget(self._tts_button)
 
         self._export_button = QPushButton("Export profile")
         self._export_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -191,37 +207,65 @@ class ChatWindow(QWidget):
         self._input.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
     # ------------------------------------------------------------------
-    def set_voice_mode(self, enabled: bool) -> None:
-        if self._voice_mode == enabled:
+    def set_vad_enabled(self, enabled: bool) -> None:
+        if self._vad_enabled == enabled:
             return
-        self._voice_mode = enabled
-        self._apply_mode_styles()
+        self._vad_enabled = enabled
+        self._apply_vad_styles()
 
-    def _apply_mode_styles(self) -> None:
-        if self._voice_mode:
-            self._mode_button.setChecked(True)
-            self._mode_button.setStyleSheet(
-                "QPushButton { background-color: #1a73e8; color: white; border-radius: 4px; }"
-            )
-            self._mode_button.setToolTip("Switch to text chat")
-            if self._icon.isNull():
-                self._mode_button.setText("⌨")
+    def set_tts_enabled(self, enabled: bool) -> None:
+        if self._tts_enabled == enabled:
+            return
+        self._tts_enabled = enabled
+        self._apply_tts_styles()
+
+    def _apply_vad_styles(self) -> None:
+        if self._vad_enabled:
+            self._vad_button.setChecked(True)
+            self._vad_button.setToolTip("Disable microphone listener")
+            if self._persona_icon.isNull():
+                self._vad_button.setText("🎙")
+                self._vad_button.setIcon(QIcon())
             else:
-                self._mode_button.setText("")
-            self._controls_widget.setVisible(True)
+                self._vad_button.setText("")
+                self._vad_button.setIcon(self._persona_icon)
+                self._vad_button.setIconSize(QSize(24, 24))
             self._input.setPlaceholderText(self._voice_placeholder)
+        else:
+            self._vad_button.setChecked(False)
+            self._vad_button.setToolTip("Enable microphone listener")
+            if self._deaf_icon.isNull():
+                self._vad_button.setText("🙉")
+                self._vad_button.setIcon(QIcon())
+            else:
+                self._vad_button.setText("")
+                self._vad_button.setIcon(self._deaf_icon)
+                self._vad_button.setIconSize(QSize(24, 24))
+            self._input.setPlaceholderText(self._default_placeholder)
+
+    def _apply_tts_styles(self) -> None:
+        if self._tts_enabled:
+            self._tts_button.setChecked(True)
+            self._tts_button.setToolTip("Mute persona audio")
+            if self._speak_icon.isNull():
+                self._tts_button.setText("🔊")
+                self._tts_button.setIcon(QIcon())
+            else:
+                self._tts_button.setText("")
+                self._tts_button.setIcon(self._speak_icon)
+                self._tts_button.setIconSize(QSize(24, 24))
             self._history.setMinimumHeight(220)
             self.resize(420, 420)
         else:
-            self._mode_button.setChecked(False)
-            self._mode_button.setStyleSheet("")
-            self._mode_button.setToolTip("Switch to voice mode")
-            if self._icon.isNull():
-                self._mode_button.setText("🎤")
+            self._tts_button.setChecked(False)
+            self._tts_button.setToolTip("Enable persona audio")
+            if self._mute_icon.isNull():
+                self._tts_button.setText("🔇")
+                self._tts_button.setIcon(QIcon())
             else:
-                self._mode_button.setText("")
-            self._controls_widget.setVisible(True)
-            self._input.setPlaceholderText(self._default_placeholder)
+                self._tts_button.setText("")
+                self._tts_button.setIcon(self._mute_icon)
+                self._tts_button.setIconSize(QSize(24, 24))
             self._history.setMinimumHeight(320)
             self.resize(520, 640)
             QApplication.processEvents()
@@ -236,9 +280,8 @@ class ChatWindow(QWidget):
         if available.isNull():
             return
         frame = self.frameGeometry()
-        # Keep a small margin from the edges to match the floating logo placement.
         margin = 24
-        if self._voice_mode:
+        if self._tts_enabled:
             target_point = QPoint(available.right() - margin, available.top() + margin)
             frame.moveTopRight(target_point)
         else:
@@ -260,9 +303,11 @@ class ChatWindow(QWidget):
     def _update_send_enabled(self) -> None:
         self._send_button.setEnabled(bool(self._input.text().strip()))
 
-    def _on_mode_button_clicked(self) -> None:
-        target = not self._voice_mode
-        self.voice_mode_requested.emit(target)
+    def _on_vad_button_clicked(self) -> None:
+        self.vad_toggle_requested.emit(not self._vad_enabled)
+
+    def _on_tts_button_clicked(self) -> None:
+        self.tts_toggle_requested.emit(not self._tts_enabled)
 
     # ------------------------------------------------------------------
     def invoke(self, callback: Callable[[], None]) -> None:
@@ -271,8 +316,11 @@ class ChatWindow(QWidget):
         if callable(callback):
             self._invoke_callable.emit(callback)
 
-    def set_voice_mode_async(self, enabled: bool) -> None:
-        self.invoke(lambda: self.set_voice_mode(enabled))
+    def set_vad_enabled_async(self, enabled: bool) -> None:
+        self.invoke(lambda: self.set_vad_enabled(enabled))
+
+    def set_tts_enabled_async(self, enabled: bool) -> None:
+        self.invoke(lambda: self.set_tts_enabled(enabled))
 
     def close_async(self) -> None:
         self.invoke(self.close)
@@ -281,6 +329,17 @@ class ChatWindow(QWidget):
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.closed.emit()
         super().closeEvent(event)
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _load_icon(path: Optional[Path]) -> QIcon:
+        if path is None:
+            return QIcon()
+        try:
+            icon = QIcon(str(path))
+        except Exception:
+            return QIcon()
+        return icon
 
 
 __all__ = ["ChatWindow"]

@@ -31,6 +31,9 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 ICON_PATH = _PROJECT_ROOT / "assets" / "icon.ico"
+DEAF_ICON_PATH = _PROJECT_ROOT / "assets" / "deaf.ico"
+SPEAK_ICON_PATH = _PROJECT_ROOT / "assets" / "speak.ico"
+MUTE_ICON_PATH = _PROJECT_ROOT / "assets" / "mute.ico"
 
 from face_animation.logo import LogoAnimator
 from third_party.social_robot.llm.ollama import (
@@ -62,6 +65,7 @@ from utils.memory_lock import IdentityLock, IdentityLockError, probe_lock_path
 from utils.memory_orchestrator import MemoryOrchestrator
 from utils.memory_settings import load_identity_settings
 from utils.memory_paths import get_bot_memory_dir, get_bot_profile_export_path
+from utils.system import get_processing_sound_volume, set_processing_sound_volume
 
 
 logger = get_logger(__name__)
@@ -669,9 +673,24 @@ def main():
     app = QApplication.instance() or QApplication(sys.argv)
     identity_display = _identity_display(profile.name)
 
-    chat_window = ChatWindow(identity_display, icon_path=ICON_PATH)
-    chat_window.set_voice_mode(True)
+    chat_window = ChatWindow(
+        identity_display,
+        persona_icon_path=ICON_PATH,
+        deaf_icon_path=DEAF_ICON_PATH,
+        speak_icon_path=SPEAK_ICON_PATH,
+        mute_icon_path=MUTE_ICON_PATH,
+    )
+    chat_window.set_vad_enabled(False)
+    chat_window.set_tts_enabled(True)
     chat_window.show()
+
+    processing_volume_default = get_processing_sound_volume()
+    set_processing_sound_volume(0.5)
+
+    def _restore_processing_sound_volume() -> None:
+        set_processing_sound_volume(processing_volume_default)
+
+    atexit.register(_restore_processing_sound_volume)
 
     animation_style = (config.get("animation_style") or "logo").lower()
     if animation_style not in ("logo", ""):
@@ -700,7 +719,8 @@ def main():
     vad_listener: Optional[VADListener] = None
     vad_thread: Optional[threading.Thread] = None
     vad_suppressed = False
-    voice_mode_active = threading.Event()
+    vad_active = threading.Event()
+    tts_active = threading.Event()
     session_history: List[dict] = []
     last_bot_response: str = ""
     processing_lock = threading.Lock()
@@ -708,11 +728,16 @@ def main():
     shutdown_complete = threading.Event()
     failsafe_timer: Optional[threading.Timer] = None
 
-    def _ensure_animator_running() -> None:
-        animator.show_widget()
+    def _ensure_animator_visibility() -> None:
+        if tts_active.is_set():
+            animator.show_widget()
+        else:
+            animator.hide_widget()
 
-    def _suspend_animator() -> None:
-        animator.hide_widget()
+    def _set_animator_amplitude(level: float) -> None:
+        if not tts_active.is_set():
+            level = 0.0
+        animator.update_amplitude(level)
 
     def _export_profile_snapshot() -> None:
         orchestrator = _memory_orchestrator
@@ -772,14 +797,13 @@ def main():
                 input_medium="voice",
             )
 
-    def _enable_voice_mode() -> None:
+    def _enable_vad() -> None:
         nonlocal vad_listener, vad_thread, vad_suppressed
-        if voice_mode_active.is_set():
+        if vad_active.is_set():
             return
-        voice_mode_active.set()
-        chat_window.set_voice_mode(True)
-        _ensure_animator_running()
-        print("-> Voice mode enabled; starting the VAD listener...")
+        vad_active.set()
+        chat_window.set_vad_enabled_async(True)
+        print("-> Microphone listener enabled; starting the VAD listener...")
         vad_listener = VADListener(
             config=vad_config,
             device_index=None,
@@ -789,18 +813,13 @@ def main():
         vad_thread.start()
         vad_suppressed = False
 
-    def _disable_voice_mode() -> None:
+    def _disable_vad() -> None:
         nonlocal vad_listener, vad_thread, vad_suppressed
-        if not voice_mode_active.is_set():
+        if not vad_active.is_set():
             return
-        voice_mode_active.clear()
-        print("-> Voice mode disabled; returning to text chat.")
-
-        def _ui_teardown() -> None:
-            chat_window.set_voice_mode(False)
-            _suspend_animator()
-
-        chat_window.invoke(_ui_teardown)
+        vad_active.clear()
+        print("-> Microphone listener disabled; returning to text input.")
+        chat_window.set_vad_enabled_async(False)
         if vad_listener is not None:
             vad_listener.stop()
         if vad_thread is not None:
@@ -808,13 +827,29 @@ def main():
             vad_thread = None
         vad_listener = None
         vad_suppressed = False
+
+    def _enable_tts() -> None:
+        if tts_active.is_set():
+            return
+        tts_active.set()
+        chat_window.set_tts_enabled_async(True)
+        _ensure_animator_visibility()
+        print("-> Text-to-speech enabled; persona will speak replies.")
+
+    def _disable_tts() -> None:
+        if not tts_active.is_set():
+            return
+        tts_active.clear()
+        print("-> Text-to-speech disabled; persona will reply in text only.")
+        chat_window.set_tts_enabled_async(False)
         if tts_model.is_playing:
             tts_model.stop_playback()
-        animator.update_amplitude(0.0)
+        _set_animator_amplitude(0.0)
+        _ensure_animator_visibility()
 
     def _pause_vad_listener() -> None:
         nonlocal vad_listener, vad_suppressed
-        if vad_listener is None or not voice_mode_active.is_set():
+        if vad_listener is None or not vad_active.is_set():
             return
         try:
             vad_listener.disable_vad()
@@ -828,7 +863,7 @@ def main():
         if vad_listener is None:
             vad_suppressed = False
             return
-        if not voice_mode_active.is_set():
+        if not vad_active.is_set():
             vad_suppressed = False
             return
         try:
@@ -848,23 +883,30 @@ def main():
             with processing_lock:
                 _handle_user_request(
                     cleaned,
-                    source="voice" if voice_mode_active.is_set() else "text",
+                    source="voice" if vad_active.is_set() else "text",
                     input_medium="text",
                 )
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_voice_mode_requested(enabled: bool) -> None:
+    def _on_vad_toggle_requested(enabled: bool) -> None:
         if enabled:
-            _enable_voice_mode()
+            _enable_vad()
         else:
-            _disable_voice_mode()
+            _disable_vad()
+
+    def _on_tts_toggle_requested(enabled: bool) -> None:
+        if enabled:
+            _enable_tts()
+        else:
+            _disable_tts()
 
     chat_window.send_text.connect(_on_text_submitted)
-    chat_window.voice_mode_requested.connect(_on_voice_mode_requested)
+    chat_window.vad_toggle_requested.connect(_on_vad_toggle_requested)
+    chat_window.tts_toggle_requested.connect(_on_tts_toggle_requested)
     chat_window.closed.connect(lambda: shutdown_requested.set())
 
-    _enable_voice_mode()
+    _enable_tts()
 
     def _resolve_identity_name(candidate: str) -> Optional[str]:
         if not candidate:
@@ -879,6 +921,7 @@ def main():
     def _restart_with_identity(target_identity: str) -> None:
         print(f"-> Voice command switching to identity '{target_identity}'.")
         shutdown_requested.set()
+        _restore_processing_sound_volume()
         try:
             if vad_listener is not None:
                 vad_listener.stop()
@@ -926,10 +969,16 @@ def main():
 
         print(f"-> Ending conversation with '{profile.name}'.")
 
+        _restore_processing_sound_volume()
+
         try:
-            _disable_voice_mode()
+            _disable_tts()
         except Exception:
-            logger.exception("Failed to disable voice mode during shutdown request")
+            logger.exception("Failed to disable text-to-speech during shutdown request")
+        try:
+            _disable_vad()
+        except Exception:
+            logger.exception("Failed to disable microphone listener during shutdown request")
 
         logger.debug("Shutdown stage: stopping VAD listener")
         try:
@@ -1040,7 +1089,7 @@ def main():
 
         cleaned = transcript.strip()
         if not cleaned:
-            animator.update_amplitude(0.0)
+            _set_animator_amplitude(0.0)
             return
 
         logger.debug(
@@ -1109,7 +1158,7 @@ def main():
                     print("-> Documentation refresh complete.")
                 else:
                     print("-> Documentation refresh failed; check logs for details.")
-            animator.update_amplitude(0.0)
+            _set_animator_amplitude(0.0)
             return
 
         medium = input_medium or ("voice" if source == "voice" else None)
@@ -1128,7 +1177,7 @@ def main():
             )
         ):
             print("-> Ignoring self-echo from recent response.")
-            animator.update_amplitude(0.0)
+            _set_animator_amplitude(0.0)
             return
 
         if not shutdown_requested.is_set():
@@ -1140,7 +1189,7 @@ def main():
                     source,
                 )
                 _handle_conversation_start(start_match.keyword.payload)
-                animator.update_amplitude(0.0)
+                _set_animator_amplitude(0.0)
                 return
 
             if source == "command":
@@ -1152,12 +1201,12 @@ def main():
                         source,
                     )
                     _handle_conversation_end(end_match.keyword.payload)
-                    animator.update_amplitude(0.0)
+                    _set_animator_amplitude(0.0)
                     return
             elif source != "text":
-                if not voice_mode_active.is_set():
+                if not vad_active.is_set():
                     logger.debug(
-                        "Ignoring conversation end keyword via %s input because voice mode is inactive",
+                        "Ignoring conversation end keyword via %s input because the microphone listener is inactive",
                         source,
                     )
                 else:
@@ -1169,7 +1218,7 @@ def main():
                             source,
                         )
                         _handle_conversation_end(end_match.keyword.payload)
-                        animator.update_amplitude(0.0)
+                        _set_animator_amplitude(0.0)
                         return
 
         nonlocal use_orchestrator
@@ -1305,10 +1354,10 @@ def main():
             except OllamaUnavailableError as exc:
                 failure_message = str(exc)
                 print(f"-> Ollama error: {failure_message}")
-                animator.update_amplitude(0.0)
+                _set_animator_amplitude(0.0)
                 return
             if not llm_response.strip():
-                animator.update_amplitude(0.0)
+                _set_animator_amplitude(0.0)
                 return
 
             history_entry: dict
@@ -1401,28 +1450,28 @@ def main():
         chat_window.append_bot_message(display_response)
         last_bot_response = display_response
 
-        if not voice_mode_active.is_set():
-            animator.update_amplitude(0.0)
+        if not tts_active.is_set():
+            _set_animator_amplitude(0.0)
             return
 
         try:
             if not sanitized_response:
-                animator.update_amplitude(0.0)
+                _set_animator_amplitude(0.0)
                 return
             audio_data = tts_model.synthesize(sanitized_response)
         except Exception as exc:
             print("TTS error:", exc)
-            animator.update_amplitude(0.0)
+            _set_animator_amplitude(0.0)
             return
 
         def amplitude_callback(level: float) -> None:
-            animator.update_amplitude(level)
+            _set_animator_amplitude(level)
 
         def play_tts_in_thread() -> None:
             tts_model.play_audio_with_amplitude(audio_data, amplitude_callback)
             if vad_listener is not None:
                 vad_listener.set_aggressiveness(1)  # Restore VAD aggressiveness after bot playback
-            animator.update_amplitude(0.0)
+            _set_animator_amplitude(0.0)
 
         tts_thread = threading.Thread(target=play_tts_in_thread, daemon=True)
         tts_thread.start()
@@ -1532,9 +1581,13 @@ def main():
         logger.info("Shutdown cleanup starting for '%s'", profile.name)
         shutdown_complete.set()
         try:
-            _disable_voice_mode()
+            _disable_tts()
         except Exception:
-            logger.exception("Failed to disable voice mode during cleanup")
+            logger.exception("Failed to disable text-to-speech during cleanup")
+        try:
+            _disable_vad()
+        except Exception:
+            logger.exception("Failed to disable microphone listener during cleanup")
         try:
             if vad_listener is not None:
                 logger.debug("Cleanup stage: stopping VAD listener")
