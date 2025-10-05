@@ -284,26 +284,6 @@ def detect_conversation_end_keyword(text: str) -> Optional[KeywordMatch]:
     return find_first_keyword(text, _CONVERSATION_END_KEYWORDS)
 
 
-def get_conversation_start_keyword(payload: str) -> Optional[Keyword]:
-    """Retrieve a conversation-start keyword by its payload."""
-
-    normalized = payload.strip()
-    for keyword in _CONVERSATION_START_KEYWORDS:
-        if keyword.payload.lower() == normalized.lower():
-            return keyword
-    return None
-
-
-def get_conversation_end_keyword(payload: str) -> Optional[Keyword]:
-    """Retrieve a conversation-end keyword by its payload."""
-
-    normalized = payload.strip()
-    for keyword in _CONVERSATION_END_KEYWORDS:
-        if keyword.payload.lower() == normalized.lower():
-            return keyword
-    return None
-
-
 def _tokenize_for_fuzzy(text: str) -> list[str]:
     return [token for token in re.split(r"[^a-z0-9]+", text.lower()) if token]
 
@@ -362,6 +342,4 @@ __all__ = [
     "configure_identity_keywords",
     "detect_conversation_start_keyword",
     "detect_conversation_end_keyword",
-    "get_conversation_start_keyword",
-    "get_conversation_end_keyword",
 ]

@@ -101,8 +101,6 @@ The keyword registry keeps voice and command triggers in one place so assistants
 | `detect_conversation_end_keyword(text: str) -> Optional[KeywordMatch]` | Detects `goodbye <identity>` requests for the active conversation. |
 | `iter_keyword_matches(text: str, keywords: Iterable[Keyword]) -> Iterator[KeywordMatch]` | Generator that yields every keyword match found in the provided text. |
 | `get_vision_keyword(payload: str) -> Optional[Keyword]` | Retrieves the configured keyword metadata for `"screen"`, `"clipboard"`, or future vision payloads. |
-| `get_conversation_start_keyword(payload: str) -> Optional[Keyword]` | Returns the keyword definition for a conversation-start trigger associated with the provided identity payload. |
-| `get_conversation_end_keyword(payload: str) -> Optional[Keyword]` | Returns the keyword definition for a conversation-end trigger associated with the provided identity payload. |
 | `Keyword` / `KeywordMatch` | Lightweight dataclasses describing configured keywords and successful matches, including the compiled regex pattern for downstream substitutions. |
 
 ### Usage pattern
