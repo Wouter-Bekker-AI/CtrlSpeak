@@ -3,8 +3,6 @@
   "description": "Deep reasoning and tooling strategist",
   "read_prompt_from_file": true,
   "prompt_file": "system_prompt.txt",
-  "animation_style": "logo",
-  "logo_image": "TrueAI_Logo_Transparent_Final.png",
   "llm_model": "qwen3:14b",
   "llm_url": "http://localhost:11434/api/chat",
   "ollama_hardware": "gpu_only",

@@ -34,6 +34,7 @@ ICON_PATH = _PROJECT_ROOT / "assets" / "icon.ico"
 DEAF_ICON_PATH = _PROJECT_ROOT / "assets" / "deaf.ico"
 SPEAK_ICON_PATH = _PROJECT_ROOT / "assets" / "speak.ico"
 MUTE_ICON_PATH = _PROJECT_ROOT / "assets" / "mute.ico"
+LOGO_PATH = _PROJECT_ROOT / "assets" / "TrueAI_Logo_Transparent_Final.png"
 
 from face_animation.logo import LogoAnimator
 from third_party.social_robot.llm.ollama import (
@@ -692,24 +693,7 @@ def main():
 
     atexit.register(_restore_processing_sound_volume)
 
-    animation_style = (config.get("animation_style") or "logo").lower()
-    if animation_style not in ("logo", ""):
-        raise RuntimeError(
-            f"Unsupported animation_style '{animation_style}'. Only 'logo' is supported."
-        )
-
-    logo_image = config.get("logo_image")
-    logo_path: Optional[Path] = None
-    if logo_image:
-        candidate = profile.base_path / logo_image
-        if candidate.exists():
-            logo_path = candidate
-        else:
-            fallback = _PROJECT_ROOT / "assets" / Path(logo_image).name
-            if fallback.exists():
-                logo_path = fallback
-    if logo_path is None:
-        raise RuntimeError(f"Logo image not found: {logo_image}")
+    logo_path = LOGO_PATH
 
     animator = LogoAnimator(logo_path=logo_path)
     animator.setup_widget()
