@@ -848,12 +848,19 @@ def start_bot(
 
     load_settings()
     forced_langgraph = False
+    theme_updated = False
+    theme_pref = "dark"
     with settings_lock:
         use_langgraph = bool(settings.get("use_langgraph_memory_orchestrator", False))
         if _should_refresh_docs_on_start(target_identity) and not use_langgraph:
             use_langgraph = True
             settings["use_langgraph_memory_orchestrator"] = True
             forced_langgraph = True
+        theme_pref = str(settings.get("chat_theme", "dark") or "dark").lower()
+        if theme_pref not in {"light", "dark"}:
+            theme_pref = "dark"
+            settings["chat_theme"] = theme_pref
+            theme_updated = True
     if forced_langgraph:
         try:
             save_settings()
@@ -865,6 +872,11 @@ def start_bot(
             logger.exception(
                 "Failed to persist LangGraph orchestrator setting for %s", target_identity
             )
+    elif theme_updated:
+        try:
+            save_settings()
+        except Exception:
+            logger.exception("Failed to persist chat theme preference during bot launch")
     if use_langgraph:
         env["CTRLSPK_USE_LANGGRAPH_MEMORY_ORCHESTRATOR"] = "1"
 
@@ -873,6 +885,7 @@ def start_bot(
     memory_dir_arg = str(memory_root)
     env["CTRLSPK_BOT_MEMORY_ROOT"] = memory_dir_arg
     env["BOT_MEMORY_DIR"] = memory_dir_arg
+    env["CTRLSPK_CHAT_THEME"] = theme_pref
     if _identity_lock is not None:
         env["CTRLSPK_PARENT_LOCKED"] = "1"
         env["CTRLSPK_IDENTITY_LOCK_PATH"] = str(_identity_lock.lock_path)
@@ -892,6 +905,8 @@ def start_bot(
         cmd.extend(["--system-prompt", system_prompt])
     if memory_dir_arg:
         cmd.extend(["--memory-dir", memory_dir_arg])
+    if theme_pref:
+        cmd.extend(["--theme", theme_pref])
 
     logger.info("Starting SocialRobot: %s", " ".join(cmd))
     try:
@@ -1182,6 +1197,15 @@ def resume_bot_vad_listener() -> bool:
     """Ask SocialRobot to resume VAD capture after the push-to-talk hotkey ends."""
 
     return _send_bot_command("resume_vad")
+
+
+def update_bot_theme(theme: str) -> bool:
+    """Request that SocialRobot switch to the specified chat theme immediately."""
+
+    normalized = str(theme or "").strip().lower()
+    if normalized not in {"light", "dark"}:
+        normalized = "dark"
+    return _send_bot_command("set_theme", {"theme": normalized})
 
 
 def run_bot_test(

@@ -21,7 +21,11 @@ from utils.config_paths import get_logger
 from utils.image_store import is_image_request, load_identity_image
 from utils.io_atomic import atomic_append_lines, atomic_write_text
 from utils.metrics import MetricsRecorder
-from utils.memory_paths import get_bot_conversation_log, get_bot_traces_dir
+from utils.memory_paths import (
+    get_bot_conversation_log,
+    get_bot_profile_export_path,
+    get_bot_traces_dir,
+)
 from utils.memory_settings import load_identity_settings
 from utils.vector_memory import RetrievedMemory, VectorMemoryStore
 from tools.message_management import force_plaintext, requires_force_plaintext, strip_emoji
@@ -497,11 +501,18 @@ class MemoryPersistenceWorker:
     def _flush_vector_store(self, task: PersistenceTask) -> int:
         settings = task.settings
         evicted = 0
+        snapshot_users: set[str] = set()
         for update in task.profile_updates:
             try:
                 self.vector_store.upsert_profile_slot(**update)
             except Exception as exc:
                 logger.debug("Profile upsert failed: %s", exc)
+            else:
+                user_id = str(update.get("user_id") or "").strip()
+                if user_id:
+                    snapshot_users.add(user_id)
+        for user_id in snapshot_users:
+            self._write_profile_snapshot(user_id)
         if not settings.get("store_vector_memory", True):
             return evicted
         documents = task.vector_documents
@@ -525,6 +536,39 @@ class MemoryPersistenceWorker:
         )
         evicted += int(result.get("evicted", 0))
         return evicted
+
+    def _write_profile_snapshot(self, user_id: str) -> None:
+        normalized_user = str(user_id or "user").strip() or "user"
+        try:
+            slots = self.vector_store.read_all_profile(normalized_user)
+        except Exception:
+            logger.exception(
+                "Failed to read profile slots for snapshot export", extra={"identity": self.identity}
+            )
+            return
+        payload = {
+            "identity": self.identity,
+            "user_id": normalized_user,
+            "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "slots": [
+                {
+                    "attribute": (entry.get("metadata") or {}).get("attribute"),
+                    "value": (entry.get("metadata") or {}).get("value"),
+                    "status": (entry.get("metadata") or {}).get("status", "current"),
+                }
+                for entry in slots
+                if isinstance(entry, dict)
+            ],
+        }
+        export_path = get_bot_profile_export_path(self.identity)
+        try:
+            export_path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(export_path, json.dumps(payload, indent=2, ensure_ascii=False))
+        except Exception:
+            logger.exception(
+                "Failed to write profile snapshot",
+                extra={"identity": self.identity, "export_path": str(export_path)},
+            )
 
 
 class MemoryOrchestrator:

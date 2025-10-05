@@ -35,6 +35,12 @@ SUCCESS = "#5cf7c7"
 MUTED_BUTTON = "#162a43"
 MUTED_BUTTON_HOVER = "#1f3554"
 MUTED_BUTTON_DISABLED = "#0f1b2c"
+THEME_LIGHT_BG = "#f4f5f7"
+THEME_LIGHT_HOVER = "#e9eaed"
+THEME_LIGHT_PRESSED = "#dfe0e3"
+THEME_DARK_BG = "#0a1524"
+THEME_DARK_HOVER = "#132238"
+THEME_DARK_PRESSED = "#152c44"
 
 
 def apply_modern_theme(root: tk.Misc) -> ttk.Style:
@@ -112,6 +118,36 @@ def apply_modern_theme(root: tk.Misc) -> ttk.Style:
         "Danger.TButton",
         background=[("disabled", "#5a3240"), ("pressed", DANGER_PRESSED), ("active", DANGER_HOVER)],
         foreground=[("disabled", "#b37b8a")],
+    )
+
+    style.configure(
+        "ThemeLight.TButton",
+        background=THEME_LIGHT_BG,
+        foreground="#0c1f33",
+        borderwidth=0,
+        focusthickness=1,
+        focuscolor=ACCENT,
+        padding=(14, 8),
+    )
+    style.map(
+        "ThemeLight.TButton",
+        background=[("disabled", MUTED_BUTTON_DISABLED), ("pressed", THEME_LIGHT_PRESSED), ("active", THEME_LIGHT_HOVER)],
+        foreground=[("disabled", TEXT_SECONDARY)],
+    )
+
+    style.configure(
+        "ThemeDark.TButton",
+        background=THEME_DARK_BG,
+        foreground=TEXT_PRIMARY,
+        borderwidth=0,
+        focusthickness=1,
+        focuscolor=ACCENT,
+        padding=(14, 8),
+    )
+    style.map(
+        "ThemeDark.TButton",
+        background=[("disabled", MUTED_BUTTON_DISABLED), ("pressed", THEME_DARK_PRESSED), ("active", THEME_DARK_HOVER)],
+        foreground=[("disabled", TEXT_SECONDARY)],
     )
 
     # Radio buttons / checkbuttons

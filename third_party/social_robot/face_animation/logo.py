@@ -74,6 +74,7 @@ class FloatingLogo(QWidget):
         )
         self.label.setPixmap(scaled_pm)
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setFixedSize(width, height)
 
     def set_capture_callbacks(
         self,
@@ -171,6 +172,12 @@ class LogoAnimator(QObject):
         super().__init__()
         self.logo_path = logo_path
         self.initial_scale = scale
+        self._base_scale = scale
+        self._min_amplitude_delta = 0.012
+        self._max_amplitude_delta = 0.05
+        self._amplitude_factor = 0.18
+        self._amplitude_delta = 0.05
+        self._current_amplitude = 0.0
         self.on_top = on_top
         self.app: Optional[QApplication] = None
         self.widget: Optional[FloatingLogo] = None
@@ -198,8 +205,10 @@ class LogoAnimator(QObject):
             return
         self.original_pixmap = pixmap
 
-        # Calculate max window size based on max scale (e.g., 0.4)
-        max_scale = self.initial_scale + 0.1  # initial_scale (0.3) + max amplitude effect (0.1)
+        self._recompute_amplitude_delta()
+
+        # Calculate max window size based on the maximum amplitude-driven scale bump.
+        max_scale = self._base_scale + self._max_amplitude_delta
         max_width = max(1, int(self.original_pixmap.width() * max_scale))
         max_height = max(1, int(self.original_pixmap.height() * max_scale))
 
@@ -209,7 +218,8 @@ class LogoAnimator(QObject):
             on_look_at_screen=self._on_look_at_screen,
             on_look_at_clipboard=self._on_look_at_clipboard,
         )
-        self.widget.setFixedSize(max_width, max_height)
+        self.widget.setMinimumSize(1, 1)
+        self.widget.setMaximumSize(max_width, max_height)
         self.update_signal.connect(self.widget.set_scale)
         self.widget.set_scale(self.initial_scale)
 
@@ -224,6 +234,60 @@ class LogoAnimator(QObject):
 
         self.widget.hide()
 
+    def _apply_scale(self, scale: float) -> None:
+        if self.widget is None:
+            return
+        clamped = max(0.01, min(scale, 1.0))
+        self.widget.set_scale(clamped)
+
+    def set_base_scale(self, scale: float) -> None:
+        clamped = max(0.05, min(scale, 1.0))
+        self._base_scale = clamped
+        self._recompute_amplitude_delta()
+        self._apply_scale(clamped + self._current_amplitude * self._amplitude_delta)
+
+    def center_on_widget(self, target: QWidget) -> None:
+        if self.widget is None or target is None:
+            return
+        if not target.isVisible():
+            return
+        frame = target.frameGeometry()
+        if frame.isNull():
+            return
+        x = frame.center().x() - (self.widget.width() // 2)
+        y = frame.center().y() - (self.widget.height() // 2)
+        self.widget.move(x, y)
+
+    def anchor_to_widget_bottom_right(self, target: QWidget, margin: int = 24) -> None:
+        if self.widget is None or target is None:
+            return
+        if not target.isVisible():
+            return
+        rect = target.rect()
+        bottom_right = target.mapToGlobal(rect.bottomRight())
+        x = bottom_right.x() - self.widget.width() - margin
+        y = bottom_right.y() - self.widget.height() - margin
+        screen = QGuiApplication.primaryScreen()
+        if screen:
+            available = screen.availableGeometry()
+            if not available.isNull():
+                x = max(available.left(), min(x, available.right() - self.widget.width()))
+                y = max(available.top(), min(y, available.bottom() - self.widget.height()))
+        self.widget.move(x, y)
+
+    def move_to_screen_corner(self, padding: int = 20) -> None:
+        if self.widget is None:
+            return
+        screen = QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        screen_geo = screen.availableGeometry()
+        if screen_geo.isNull():
+            return
+        x = screen_geo.right() - self.widget.width() - padding
+        y = screen_geo.bottom() - self.widget.height() - padding
+        self.widget.move(x, y)
+
     def run(self) -> None:
         if not self.app:
             print("Error: setup_widget must be called before run.")
@@ -231,8 +295,17 @@ class LogoAnimator(QObject):
         self.app.exec()
 
     def update_amplitude(self, amplitude: float) -> None:
-        scale = self.initial_scale + (amplitude * 0.1)
+        clamped = max(0.0, min(amplitude, 1.0))
+        self._current_amplitude = clamped
+        scale = self._base_scale + (clamped * self._amplitude_delta)
         self.update_signal.emit(scale)
+
+    def _recompute_amplitude_delta(self) -> None:
+        target = self._base_scale * self._amplitude_factor
+        self._amplitude_delta = max(
+            self._min_amplitude_delta,
+            min(self._max_amplitude_delta, target),
+        )
 
     def stop(self) -> None:
         if self.widget is not None:
