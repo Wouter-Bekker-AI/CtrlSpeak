@@ -19,7 +19,6 @@ from audio.stt import FasterWhisperSTT
 from audio.remote_stt import RemoteSTT
 from audio.tts import KokoroTTS
 from audio.vad import VADListener, VADConfig
-os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 warnings.filterwarnings(
     "ignore",
     message=r"pkg_resources is deprecated as an API\..*",
@@ -33,7 +32,6 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 ICON_PATH = _PROJECT_ROOT / "assets" / "icon.ico"
 
-from face_animation.face import FaceAnimator, FaceSettings
 from face_animation.logo import LogoAnimator
 from third_party.social_robot.llm.ollama import (
     OllamaClient,
@@ -668,7 +666,6 @@ def main():
             ollama_client.unload()
         return
 
-    animation_style = config.get("animation_style")
     app = QApplication.instance() or QApplication(sys.argv)
     identity_display = _identity_display(profile.name)
 
@@ -676,44 +673,28 @@ def main():
     chat_window.set_voice_mode(True)
     chat_window.show()
 
-    animator_thread: Optional[threading.Thread] = None
-    animator: object
+    animation_style = (config.get("animation_style") or "logo").lower()
+    if animation_style not in ("logo", ""):
+        raise RuntimeError(
+            f"Unsupported animation_style '{animation_style}'. Only 'logo' is supported."
+        )
 
-    if animation_style == "logo":
-        logo_image = config.get("logo_image")
-        logo_path: Optional[Path] = None
-        if logo_image:
-            candidate = profile.base_path / logo_image
-            if candidate.exists():
-                logo_path = candidate
-            else:
-                fallback = _PROJECT_ROOT / "assets" / Path(logo_image).name
-                if fallback.exists():
-                    logo_path = fallback
-        if logo_path is None:
-            raise RuntimeError(f"Logo image not found: {logo_image}")
-        animator = LogoAnimator(logo_path=logo_path)
-        animator.setup_widget()
-        animator.hide_widget()
-    else:
-        face_settings = FaceSettings(window_size=(1920, 1080), rotation_degrees=0)
-        face_image_rotation = config.get("face_image_rotation")
-        if isinstance(face_image_rotation, (int, float)):
-            face_settings.face_image_rotation = float(face_image_rotation)
-        mouth_anchor = config.get("mouth_anchor")
-        if isinstance(mouth_anchor, list) and len(mouth_anchor) == 2:
-            face_settings.mouth_anchor = (float(mouth_anchor[0]), float(mouth_anchor[1]))
-        face_image = config.get("face_image")
-        if face_image:
-            face_image_path = profile.base_path / face_image
-            if face_image_path.exists():
-                face_settings.face_image_path = str(face_image_path)
-        mouth_image = config.get("mouth_image")
-        if mouth_image:
-            mouth_image_path = profile.base_path / mouth_image
-            if mouth_image_path.exists():
-                face_settings.mouth_image_path = str(mouth_image_path)
-        animator = FaceAnimator(settings=face_settings)
+    logo_image = config.get("logo_image")
+    logo_path: Optional[Path] = None
+    if logo_image:
+        candidate = profile.base_path / logo_image
+        if candidate.exists():
+            logo_path = candidate
+        else:
+            fallback = _PROJECT_ROOT / "assets" / Path(logo_image).name
+            if fallback.exists():
+                logo_path = fallback
+    if logo_path is None:
+        raise RuntimeError(f"Logo image not found: {logo_image}")
+
+    animator = LogoAnimator(logo_path=logo_path)
+    animator.setup_widget()
+    animator.hide_widget()
 
     vad_config = VADConfig(sample_rate=16000, frame_duration_ms=30, padding_duration_ms=360, aggressiveness=2, deactivation_ratio=0.9)
     vad_listener: Optional[VADListener] = None
@@ -728,17 +709,10 @@ def main():
     failsafe_timer: Optional[threading.Timer] = None
 
     def _ensure_animator_running() -> None:
-        nonlocal animator_thread
-        if isinstance(animator, FaceAnimator):
-            if animator_thread is None or not animator_thread.is_alive():
-                animator_thread = threading.Thread(target=animator.run, daemon=True)
-                animator_thread.start()
-        elif isinstance(animator, LogoAnimator):
-            animator.show_widget()
+        animator.show_widget()
 
     def _suspend_animator() -> None:
-        if isinstance(animator, LogoAnimator):
-            animator.hide_widget()
+        animator.hide_widget()
 
     def _export_profile_snapshot() -> None:
         orchestrator = _memory_orchestrator
@@ -980,17 +954,6 @@ def main():
                 logger.debug("Shutdown stage complete: animator stop requested")
         except Exception:
             logger.exception("Failed to stop animator during shutdown")
-
-        logger.debug("Shutdown stage: joining animator thread")
-        try:
-            if animator_thread and animator_thread.is_alive():
-                animator_thread.join(timeout=1.5)
-                if animator_thread.is_alive():
-                    logger.debug("Animator thread still running after timeout")
-                else:
-                    logger.debug("Animator thread joined successfully")
-        except Exception:
-            logger.exception("Failed while waiting for animator thread during shutdown")
 
         logger.debug("Shutdown stage: closing stdin control pipe")
         try:
@@ -1563,13 +1526,6 @@ def main():
     try:
         if app:
             app.exec()
-        elif animator_thread:
-            while animator_thread.is_alive():
-                animator_thread.join(timeout=0.5)
-                if not animator_thread.is_alive():
-                    break
-                if shutdown_requested.is_set():
-                    break
     except KeyboardInterrupt:
         print("Shutting down...")
     finally:
