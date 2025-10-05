@@ -3,8 +3,6 @@
   "description": "A helpful and friendly assistant",
   "read_prompt_from_file": true,
   "prompt_file": "system_prompt.txt",
-  "animation_style": "logo",
-  "logo_image": "TrueAI_Logo_Transparent_Final.png",
   "llm_model": "gemma3:12b",
   "llm_url": "http://localhost:11434/api/chat",
   "ollama_hardware": "gpu_only",
