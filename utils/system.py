@@ -8,6 +8,7 @@ import argparse
 import errno
 import http.client
 import json
+import math
 import os
 import socket
 import sys
@@ -146,6 +147,8 @@ processing_sound_data: Optional[bytes] = None
 processing_sound_settings: Optional[Dict[str, int]] = None
 _ready_sound_lock = threading.Lock()
 _ready_sound_played = False
+_processing_sound_volume = 1.0
+_processing_sound_volume_lock = threading.Lock()
 
 _shutdown_requested = threading.Event()
 
@@ -190,6 +193,7 @@ __all__ = [
     "create_recording_file_path", "cleanup_recording_file", "resource_path",
     "insert_text_into_focus", "set_force_sendinput", "is_console_window",
     "ServerInfo", "format_exception_details", "get_interaction_stage",
+    "set_processing_sound_volume", "get_processing_sound_volume",
     "request_application_shutdown",
 ]
 
@@ -280,7 +284,7 @@ def _resolve_identity_tts_settings(
 
 
 def _speak_lobby_goodbye() -> None:
-    """Play a goodbye message using the default identity's voice."""
+    """Play a goodbye message using the reception persona's voice."""
 
     try:
         from third_party.social_robot.audio.tts import KokoroTTS
@@ -289,7 +293,7 @@ def _speak_lobby_goodbye() -> None:
         return
 
     voice_name, kwargs = _resolve_identity_tts_settings(
-        "default", fallback_voice="af_heart", log_context="lobby goodbye"
+        "reception", fallback_voice="af_heart", log_context="lobby goodbye"
     )
 
     try:
@@ -518,6 +522,69 @@ def get_recent_waveform(ms: int = 500) -> np.ndarray:
         return out
     return data[-need:]
 
+
+def set_processing_sound_volume(scale: float) -> None:
+    """Set the playback volume multiplier for the processing chime."""
+
+    if not isinstance(scale, (int, float)):
+        return
+    if math.isnan(scale) or math.isinf(scale):
+        return
+    value = float(scale)
+    if value < 0.0:
+        value = 0.0
+    with _processing_sound_volume_lock:
+        global _processing_sound_volume
+        _processing_sound_volume = value
+
+
+def get_processing_sound_volume() -> float:
+    """Return the current playback volume multiplier for the processing chime."""
+
+    with _processing_sound_volume_lock:
+        return _processing_sound_volume
+
+
+def _apply_volume_to_chunk(chunk: bytes, bytes_per_sample: int, volume: float) -> bytes:
+    if not chunk:
+        return chunk
+    if abs(volume - 1.0) < 1e-6:
+        return chunk
+    if volume == 0.0:
+        return bytes(len(chunk))
+    if bytes_per_sample == 1:
+        arr = np.frombuffer(chunk, dtype=np.uint8).astype(np.float32)
+        arr = np.clip((arr - 128.0) * volume + 128.0, 0.0, 255.0).astype(np.uint8)
+        return arr.tobytes()
+    if bytes_per_sample == 2:
+        arr = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
+        arr = np.clip(arr * volume, -32768.0, 32767.0).astype(np.int16)
+        return arr.tobytes()
+    if bytes_per_sample == 4:
+        arr = np.frombuffer(chunk, dtype=np.int32).astype(np.float64)
+        arr = np.clip(arr * volume, -2147483648.0, 2147483647.0).astype(np.int32)
+        return arr.tobytes()
+    return chunk
+
+
+def _chunk_to_mono_float(chunk: bytes, bytes_per_sample: int, channels: int) -> Optional[np.ndarray]:
+    if not chunk:
+        return None
+    if bytes_per_sample == 1:
+        arr = (np.frombuffer(chunk, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    elif bytes_per_sample == 2:
+        arr = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+    elif bytes_per_sample == 4:
+        arr = np.frombuffer(chunk, dtype=np.int32).astype(np.float32) / 2147483648.0
+    else:
+        return None
+    if channels > 1:
+        try:
+            arr = arr.reshape(-1, channels).mean(axis=1)
+        except ValueError:
+            return None
+    return arr
+
 def generate_fallback_sound():
     duration = 0.5
     t = np.linspace(0.0, duration, int(PROCESSING_SAMPLE_RATE * duration), endpoint=False)
@@ -570,28 +637,30 @@ def _processing_sound_loop():
             if offset + chunk_bytes > nbytes:
                 offset = 0  # loop the sound
 
-            chunk = data[offset:offset + chunk_bytes]
+            original_chunk = data[offset:offset + chunk_bytes]
             offset += chunk_bytes
+
+            volume = get_processing_sound_volume()
+            chunk = _apply_volume_to_chunk(original_chunk, bytes_per_sample, volume)
 
             stream.write(chunk)
 
             try:
-                if bytes_per_sample == 2:
-                    arr = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
-                    if channels > 1:
-                        arr = arr.reshape(-1, channels).mean(axis=1)
-                    rms = float(np.sqrt(np.mean(arr * arr)))
-                    # update smoothed level
-                    global _processing_level, _proc_vis_samples
-                    with _processing_level_lock:
-                        _processing_level = (1.0 - alpha) * _processing_level + alpha * rms
-                    # keep recent mono samples for GUI wiggle
-                    with _proc_vis_lock:
-                        _proc_vis_buffers.append(arr.copy())
-                        _proc_vis_samples += arr.size
-                        while _proc_vis_samples > _PROC_VIS_MAX_SAMPLES and _proc_vis_buffers:
-                            popped = _proc_vis_buffers.popleft()
-                            _proc_vis_samples -= popped.size
+                arr = _chunk_to_mono_float(chunk, bytes_per_sample, channels)
+                if arr is None:
+                    continue
+                rms = float(np.sqrt(np.mean(arr * arr)))
+                # update smoothed level
+                global _processing_level, _proc_vis_samples
+                with _processing_level_lock:
+                    _processing_level = (1.0 - alpha) * _processing_level + alpha * rms
+                # keep recent mono samples for GUI wiggle
+                with _proc_vis_lock:
+                    _proc_vis_buffers.append(arr.copy())
+                    _proc_vis_samples += arr.size
+                    while _proc_vis_samples > _PROC_VIS_MAX_SAMPLES and _proc_vis_buffers:
+                        popped = _proc_vis_buffers.popleft()
+                        _proc_vis_samples -= popped.size
             except Exception:
                 logger.exception("Failed to update processing waveform metrics")
 
@@ -891,7 +960,7 @@ def handle_transcribed_text_from_hotkey(text: str) -> bool:
 
     maintenance_match = keywords.detect_memory_refresh_keyword(normalized)
     if maintenance_match:
-        target_identity = bot_integration.get_active_identity() or "assistant"
+        target_identity = bot_integration.get_active_identity() or "vision"
         payload = maintenance_match.keyword.payload.lower()
         if payload == "datetime":
             prefix = "[DateTimeMemory]"
@@ -1764,7 +1833,7 @@ def parse_cli_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--automation-flow", action="store_true", help="Run the automated end-to-end regression workflow")
     parser.add_argument("--start-server-only", action="store_true", help="Start the CtrlSpeak server and keep it running (for programmatic testing).")
     parser.add_argument("--health", action="store_true", help="Run CtrlSpeak health diagnostics and exit")
-    parser.add_argument("--health-identity", default="default", help="Identity to probe during health diagnostics")
+    parser.add_argument("--health-identity", default="reception", help="Identity to probe during health diagnostics")
     args, _ = parser.parse_known_args(argv[1:])
     return args
 

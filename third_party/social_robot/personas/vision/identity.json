@@ -1,0 +1,28 @@
+{
+  "name": "vision",
+  "description": "A helpful and friendly assistant",
+  "read_prompt_from_file": true,
+  "prompt_file": "system_prompt.txt",
+  "llm_model": "gemma3:12b",
+  "llm_url": "http://localhost:11434/api/chat",
+  "ollama_hardware": "gpu_only",
+  "ollama_options": {
+    "temperature": 0.7,
+    "num_ctx": 8192,
+    "num_gpu": 999,
+    "main_gpu": 0,
+    "gpu_split": [
+      0.6,
+      0.4
+    ]
+  },
+  "voice": "af_sky",
+  "tts": {
+    "onnx_provider": "CUDAExecutionProvider",
+    "device_id": 0
+  },
+  "require_text_cleaning": true,
+  "vision": true,
+  "tool": false,
+  "memory_dir": "{appdata}/bot_memory/vision"
+}

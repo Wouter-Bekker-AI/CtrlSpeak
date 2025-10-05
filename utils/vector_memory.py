@@ -48,8 +48,11 @@ def _iso(ts: datetime) -> str:
 def _sanitize_identity(identity: str) -> str:
     normalized = (identity or "").strip()
     if not normalized:
-        return "default"
-    return "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in normalized)[:255] or "default"
+        return "reception"
+    return (
+        "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in normalized)[:255]
+        or "reception"
+    )
 
 
 class _HashEmbeddingFunction(EmbeddingFunction[Iterable[str]]):

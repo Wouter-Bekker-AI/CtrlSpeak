@@ -36,6 +36,7 @@ from utils.bot_integration import (
     is_bot_running as _bot_is_running,
     list_available_identities as _list_bot_identities,
     get_active_identity as _bot_active_identity,
+    update_bot_theme as _update_bot_theme,
 )
 
 # ---- Model/CUDA helpers kept in utils.models to avoid GUI bloat ----
@@ -1459,6 +1460,28 @@ class ManagementWindow:
             command=self._clear_bot_memory,
         )
         self.clear_memory_button.pack(fill=tk.X, pady=4)
+
+        load_settings()
+        should_save_theme = False
+        with settings_lock:
+            theme_pref = str(settings.get("chat_theme", "dark") or "dark").lower()
+            if theme_pref not in {"light", "dark"}:
+                theme_pref = "dark"
+                settings["chat_theme"] = theme_pref
+                should_save_theme = True
+        if should_save_theme:
+            try:
+                save_settings()
+            except Exception:
+                logger.exception("Failed to persist default chat theme preference")
+        self.chat_theme_var = tk.StringVar(value=theme_pref)
+        self.theme_button = ttk.Button(
+            bot_buttons,
+            text="",
+            command=self._toggle_chat_theme,
+        )
+        self.theme_button.pack(fill=tk.X, pady=4)
+        self._refresh_theme_button()
         self._refresh_bot_button()
 
         # Device preferences
@@ -1745,6 +1768,36 @@ class ManagementWindow:
         except Exception:
             logger.exception("Failed to refresh bot toggle button state")
 
+    def _refresh_theme_button(self) -> None:
+        theme = self.chat_theme_var.get().lower()
+        if theme not in {"light", "dark"}:
+            theme = "light"
+            self.chat_theme_var.set(theme)
+        style = self._theme_button_style(theme)
+        label = "Theme: Light" if theme == "light" else "Theme: Dark"
+        try:
+            self.theme_button.configure(text=label, style=style)
+        except Exception:
+            logger.exception("Failed to update chat theme toggle appearance")
+
+    @staticmethod
+    def _theme_button_style(theme: str) -> str:
+        return "ThemeLight.TButton" if theme == "light" else "ThemeDark.TButton"
+
+    def _toggle_chat_theme(self) -> None:
+        current = self.chat_theme_var.get().lower()
+        new_value = "dark" if current == "light" else "light"
+        self.chat_theme_var.set(new_value)
+        with settings_lock:
+            settings["chat_theme"] = new_value
+        try:
+            save_settings()
+        except Exception:
+            logger.exception("Failed to save chat theme preference")
+        self._refresh_theme_button()
+        if not _update_bot_theme(new_value):
+            logger.debug("Theme command skipped or failed; bot may need restarting to reflect new style")
+
     def _toggle_bot(self) -> None:
         try:
             if _bot_is_running():
@@ -1784,7 +1837,7 @@ class ManagementWindow:
             if not identities:
                 self._bot_empty_label = ttk.Label(
                     frame,
-                    text="No assistants detected.",
+                    text="No personas detected.",
                     style="Caption.TLabel",
                 )
                 self._bot_empty_label.pack(anchor=tk.W)
@@ -1821,7 +1874,7 @@ class ManagementWindow:
     def _select_identity_and_start_bot(self) -> None:
         from pathlib import Path
 
-        identities_dir = Path(__file__).resolve().parent.parent / "third_party" / "social_robot" / "identities"
+        identities_dir = Path(__file__).resolve().parent.parent / "third_party" / "social_robot" / "personas"
         identities = [d.name for d in identities_dir.iterdir() if d.is_dir()] if identities_dir.exists() else []
 
         if not identities:
@@ -1858,7 +1911,7 @@ class ManagementWindow:
         from pathlib import Path
         import os
 
-        identities_dir = Path(__file__).resolve().parent.parent / "third_party" / "social_robot" / "identities"
+        identities_dir = Path(__file__).resolve().parent.parent / "third_party" / "social_robot" / "personas"
         identities = [d.name for d in identities_dir.iterdir() if d.is_dir()] if identities_dir.exists() else []
 
         if not identities:

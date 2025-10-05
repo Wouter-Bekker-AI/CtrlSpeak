@@ -48,7 +48,7 @@ def main(argv: list[str]) -> int:
     if getattr(args, "health", False):
         from utils.health import run_health_check
 
-        result = run_health_check(identity=getattr(args, "health_identity", "default"))
+        result = run_health_check(identity=getattr(args, "health_identity", "reception"))
         print(json.dumps(result, indent=2))
         return 0 if result.get("status") == "ok" else 1
 
@@ -159,7 +159,7 @@ def main(argv: list[str]) -> int:
     logger.debug("Ensuring operating mode is selected")
     ensure_mode_selected()
 
-    # Configure keyword registry for available Chat with Bot identities
+    # Configure keyword registry for available Chat with Bot personas
     try:
         available_identities = list_available_identities()
     except Exception:

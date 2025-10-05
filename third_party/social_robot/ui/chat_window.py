@@ -1,12 +1,13 @@
-"""PySide chat window that toggles between text and voice modes."""
+"""PySide chat window that exposes independent VAD and TTS toggles."""
 
 from __future__ import annotations
 
 import html
+import sys
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import QPoint, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, Signal, QTimer
 from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -22,12 +23,13 @@ from PySide6.QtWidgets import (
 
 
 class ChatWindow(QWidget):
-    """Simple chat UI for SocialRobot voice-first conversations."""
+    """Simple chat UI for SocialRobot conversations."""
 
     send_text = Signal(str)
-    voice_mode_requested = Signal(bool)
-    export_profile_requested = Signal()
+    vad_toggle_requested = Signal(bool)
+    tts_toggle_requested = Signal(bool)
     closed = Signal()
+    geometry_changed = Signal()
 
     _append_html = Signal(str)
     _invoke_callable = Signal(object)
@@ -35,26 +37,45 @@ class ChatWindow(QWidget):
     def __init__(
         self,
         identity_display: str,
-        icon_path: Path,
+        persona_icon_path: Path,
+        *,
+        deaf_icon_path: Optional[Path] = None,
+        speak_icon_path: Optional[Path] = None,
+        mute_icon_path: Optional[Path] = None,
         parent: Optional[QWidget] = None,
+        theme: str = "dark",
     ) -> None:
         super().__init__(parent)
-        self._voice_mode = False
         self._identity_display = identity_display
+        self.setObjectName("chatWindowRoot")
+        self.setAutoFillBackground(True)
 
-        self._icon = QIcon(str(icon_path))
-        if not self._icon.isNull():
-            self.setWindowIcon(self._icon)
+        self._persona_icon = self._load_icon(persona_icon_path)
+        self._deaf_icon = self._load_icon(deaf_icon_path)
+        self._speak_icon = self._load_icon(speak_icon_path)
+        self._mute_icon = self._load_icon(mute_icon_path)
+
+        if not self._persona_icon.isNull():
+            self.setWindowIcon(self._persona_icon)
 
         self.setWindowTitle(f"Chat with {identity_display}")
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+        self._vad_enabled = False
+        self._tts_enabled = False
+        normalized_theme = (theme or "dark").strip().lower()
+        self._theme = normalized_theme if normalized_theme in {"light", "dark"} else "dark"
+        self._status_color = "#5f6368"
+        self._title_label: Optional[QLabel] = None
+
         self._build_ui()
 
         self._append_html.connect(self._append_to_history)
-        self._update_send_enabled()
-        self._apply_mode_styles()
-
         self._invoke_callable.connect(self._dispatch_callable)
+        self._update_send_enabled()
+        self._apply_vad_styles()
+        self._apply_tts_styles()
+        self._apply_theme()
 
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -63,33 +84,35 @@ class ChatWindow(QWidget):
         layout.setSpacing(12)
 
         header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(12)
         title_label = QLabel(f"<b>Chat with {html.escape(self._identity_display)}</b>")
         title_label.setTextFormat(Qt.TextFormat.RichText)
         title_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         header.addWidget(title_label)
+        self._title_label = title_label
 
-        self._mode_button = QPushButton()
-        if self._icon.isNull():
-            self._mode_button.setText("🎤")
-        else:
-            self._mode_button.setIcon(self._icon)
-            self._mode_button.setIconSize(QSize(24, 24))
-        self._mode_button.setToolTip("Switch to voice mode")
-        self._mode_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._mode_button.setCheckable(True)
-        self._mode_button.setFlat(False)
-        self._mode_button.setDefault(False)
-        self._mode_button.setAutoDefault(False)
-        self._mode_button.setAccessibleName("Toggle microphone mode")
-        self._mode_button.clicked.connect(self._on_mode_button_clicked)
-        header.addWidget(self._mode_button)
+        self._vad_button = QPushButton()
+        self._vad_button.setObjectName("iconButton")
+        self._vad_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._vad_button.setCheckable(True)
+        self._vad_button.setFlat(False)
+        self._vad_button.setDefault(False)
+        self._vad_button.setAutoDefault(False)
+        self._vad_button.setAccessibleName("Toggle microphone listener")
+        self._vad_button.clicked.connect(self._on_vad_button_clicked)
+        header.addWidget(self._vad_button)
 
-        self._export_button = QPushButton("Export profile")
-        self._export_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._export_button.setToolTip("Save the remembered profile details to disk")
-        self._export_button.setAccessibleName("Export profile snapshot")
-        self._export_button.clicked.connect(self.export_profile_requested.emit)
-        header.addWidget(self._export_button)
+        self._tts_button = QPushButton()
+        self._tts_button.setObjectName("iconButton")
+        self._tts_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._tts_button.setCheckable(True)
+        self._tts_button.setFlat(False)
+        self._tts_button.setDefault(False)
+        self._tts_button.setAutoDefault(False)
+        self._tts_button.setAccessibleName("Toggle text-to-speech playback")
+        self._tts_button.clicked.connect(self._on_tts_button_clicked)
+        header.addWidget(self._tts_button)
 
         layout.addLayout(header)
 
@@ -101,6 +124,7 @@ class ChatWindow(QWidget):
         layout.addWidget(self._history)
 
         self._controls_widget = QWidget(self)
+        self._controls_widget.setObjectName("controlsPanel")
         controls_layout = QHBoxLayout(self._controls_widget)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(8)
@@ -114,6 +138,7 @@ class ChatWindow(QWidget):
         controls_layout.addWidget(self._input)
 
         self._send_button = QPushButton("Send", self._controls_widget)
+        self._send_button.setObjectName("sendButton")
         self._send_button.setDefault(True)
         self._send_button.clicked.connect(self._on_send_clicked)
         controls_layout.addWidget(self._send_button)
@@ -126,6 +151,7 @@ class ChatWindow(QWidget):
     def showEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         super().showEvent(event)
         self._move_to_active_corner()
+        QTimer.singleShot(0, lambda: self._apply_titlebar_theme(ensure_activation=True))
 
     # ------------------------------------------------------------------
     def append_user_message(self, text: str, *, medium: Optional[str] = None) -> None:
@@ -146,8 +172,9 @@ class ChatWindow(QWidget):
             return
         escaped_text = html.escape(text).replace("\n", "<br>")
         escaped_speaker = html.escape(speaker)
+        color = self._status_color
         self._append_html.emit(
-            f"<span style=\"color:#5f6368;\"><b>{escaped_speaker}:</b> {escaped_text}</span>"
+            f"<span style=\"color:{color};\"><b>{escaped_speaker}:</b> {escaped_text}</span>"
         )
 
     def _append_message(self, speaker: str, text: str) -> None:
@@ -190,43 +217,196 @@ class ChatWindow(QWidget):
     def focus_input(self) -> None:
         self._input.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
-    # ------------------------------------------------------------------
-    def set_voice_mode(self, enabled: bool) -> None:
-        if self._voice_mode == enabled:
-            return
-        self._voice_mode = enabled
-        self._apply_mode_styles()
+    def transcript_widget(self) -> QTextBrowser:
+        return self._history
 
-    def _apply_mode_styles(self) -> None:
-        if self._voice_mode:
-            self._mode_button.setChecked(True)
-            self._mode_button.setStyleSheet(
-                "QPushButton { background-color: #1a73e8; color: white; border-radius: 4px; }"
-            )
-            self._mode_button.setToolTip("Switch to text chat")
-            if self._icon.isNull():
-                self._mode_button.setText("⌨")
+    # ------------------------------------------------------------------
+    def set_vad_enabled(self, enabled: bool) -> None:
+        if self._vad_enabled == enabled:
+            return
+        self._vad_enabled = enabled
+        self._apply_vad_styles()
+
+    def set_tts_enabled(self, enabled: bool) -> None:
+        if self._tts_enabled == enabled:
+            return
+        self._tts_enabled = enabled
+        self._apply_tts_styles()
+
+    def set_theme(self, theme: str) -> None:
+        normalized = (theme or "").strip().lower()
+        if normalized not in {"light", "dark"}:
+            normalized = "dark"
+        if normalized == self._theme:
+            return
+        self._theme = normalized
+        self._apply_theme()
+
+    def set_theme_async(self, theme: str) -> None:
+        self.invoke(lambda: self.set_theme(theme))
+
+    def _apply_vad_styles(self) -> None:
+        if self._vad_enabled:
+            self._vad_button.setChecked(True)
+            self._vad_button.setToolTip("Disable microphone listener")
+            if self._persona_icon.isNull():
+                self._vad_button.setText("🎙")
+                self._vad_button.setIcon(QIcon())
             else:
-                self._mode_button.setText("")
-            self._controls_widget.setVisible(True)
+                self._vad_button.setText("")
+                self._vad_button.setIcon(self._persona_icon)
+                self._vad_button.setIconSize(QSize(24, 24))
             self._input.setPlaceholderText(self._voice_placeholder)
-            self._history.setMinimumHeight(220)
-            self.resize(420, 420)
         else:
-            self._mode_button.setChecked(False)
-            self._mode_button.setStyleSheet("")
-            self._mode_button.setToolTip("Switch to voice mode")
-            if self._icon.isNull():
-                self._mode_button.setText("🎤")
+            self._vad_button.setChecked(False)
+            self._vad_button.setToolTip("Enable microphone listener")
+            if self._deaf_icon.isNull():
+                self._vad_button.setText("🙉")
+                self._vad_button.setIcon(QIcon())
             else:
-                self._mode_button.setText("")
-            self._controls_widget.setVisible(True)
+                self._vad_button.setText("")
+                self._vad_button.setIcon(self._deaf_icon)
+                self._vad_button.setIconSize(QSize(24, 24))
             self._input.setPlaceholderText(self._default_placeholder)
-            self._history.setMinimumHeight(320)
-            self.resize(520, 640)
+
+    def _apply_tts_styles(self) -> None:
+        if self._tts_enabled:
+            self._tts_button.setChecked(True)
+            self._tts_button.setToolTip("Mute persona audio")
+            if self._speak_icon.isNull():
+                self._tts_button.setText("🔊")
+                self._tts_button.setIcon(QIcon())
+            else:
+                self._tts_button.setText("")
+                self._tts_button.setIcon(self._speak_icon)
+                self._tts_button.setIconSize(QSize(24, 24))
+        else:
+            self._tts_button.setChecked(False)
+            self._tts_button.setToolTip("Enable persona audio")
+            if self._mute_icon.isNull():
+                self._tts_button.setText("🔇")
+                self._tts_button.setIcon(QIcon())
+            else:
+                self._tts_button.setText("")
+                self._tts_button.setIcon(self._mute_icon)
+                self._tts_button.setIconSize(QSize(24, 24))
             QApplication.processEvents()
             self.focus_input()
         self._move_to_active_corner()
+
+    def _apply_theme(self) -> None:
+        if self._theme == "dark":
+            self._status_color = "#9aa0a6"
+            self.setStyleSheet(
+                """
+                QWidget#chatWindowRoot {
+                    background-color: #121212;
+                    color: #e8eaed;
+                }
+                QTextBrowser {
+                    background-color: #1e1e1e;
+                    color: #e8eaed;
+                    border: 1px solid #3c4043;
+                    border-radius: 8px;
+                    padding: 8px;
+                }
+                QLineEdit {
+                    background-color: #1e1e1e;
+                    color: #e8eaed;
+                    border: 1px solid #3c4043;
+                    border-radius: 6px;
+                    padding: 6px;
+                }
+                QLineEdit::placeholder {
+                    color: #9aa0a6;
+                }
+                QPushButton#sendButton {
+                    background-color: #8ab4f8;
+                    color: #202124;
+                    border-radius: 6px;
+                    padding: 8px 16px;
+                    font-weight: 600;
+                }
+                QPushButton#sendButton:disabled {
+                    background-color: #3c4043;
+                    color: #9aa0a6;
+                }
+                QPushButton#iconButton {
+                    background-color: #2d2f31;
+                    color: #e8eaed;
+                    border: 1px solid #3c4043;
+                    border-radius: 6px;
+                    padding: 6px;
+                    min-width: 36px;
+                    min-height: 36px;
+                }
+                QPushButton#iconButton:checked {
+                    background-color: #5f6368;
+                }
+                QWidget#controlsPanel {
+                    background-color: transparent;
+                }
+                """
+            )
+            if self._title_label is not None:
+                self._title_label.setStyleSheet("color: #e8eaed;")
+        else:
+            self._status_color = "#5f6368"
+            self.setStyleSheet(
+                """
+                QWidget#chatWindowRoot {
+                    background-color: #f1f3f4;
+                    color: #202124;
+                }
+                QTextBrowser {
+                    background-color: #ffffff;
+                    color: #202124;
+                    border: 1px solid #dadce0;
+                    border-radius: 8px;
+                    padding: 8px;
+                }
+                QLineEdit {
+                    background-color: #ffffff;
+                    color: #202124;
+                    border: 1px solid #dadce0;
+                    border-radius: 6px;
+                    padding: 6px;
+                }
+                QLineEdit::placeholder {
+                    color: #5f6368;
+                }
+                QPushButton#sendButton {
+                    background-color: #1a73e8;
+                    color: #ffffff;
+                    border-radius: 6px;
+                    padding: 8px 16px;
+                    font-weight: 600;
+                }
+                QPushButton#sendButton:disabled {
+                    background-color: #dadce0;
+                    color: #9aa0a6;
+                }
+                QPushButton#iconButton {
+                    background-color: #ffffff;
+                    color: #202124;
+                    border: 1px solid #dadce0;
+                    border-radius: 6px;
+                    padding: 6px;
+                    min-width: 36px;
+                    min-height: 36px;
+                }
+                QPushButton#iconButton:checked {
+                    background-color: #e8f0fe;
+                    border-color: #1a73e8;
+                }
+                QWidget#controlsPanel {
+                    background-color: transparent;
+                }
+                """
+            )
+            if self._title_label is not None:
+                self._title_label.setStyleSheet("color: #202124;")
+        self._apply_titlebar_theme(ensure_activation=True)
 
     def _move_to_active_corner(self) -> None:
         screen = QGuiApplication.primaryScreen()
@@ -236,15 +416,25 @@ class ChatWindow(QWidget):
         if available.isNull():
             return
         frame = self.frameGeometry()
-        # Keep a small margin from the edges to match the floating logo placement.
         margin = 24
-        if self._voice_mode:
-            target_point = QPoint(available.right() - margin, available.top() + margin)
-            frame.moveTopRight(target_point)
-        else:
-            target_point = QPoint(available.right() - margin, available.bottom() - margin)
-            frame.moveBottomRight(target_point)
+        target_point = QPoint(available.right() - margin, available.bottom() - margin)
+        frame.moveBottomRight(target_point)
         self.move(frame.topLeft())
+
+    def moveEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().moveEvent(event)
+        self.geometry_changed.emit()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().resizeEvent(event)
+        self.geometry_changed.emit()
+
+    def changeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().changeEvent(event)
+        if event is None:
+            return
+        if event.type() == QEvent.Type.WindowStateChange:
+            self.geometry_changed.emit()
 
     # ------------------------------------------------------------------
     def _on_send_clicked(self) -> None:
@@ -260,19 +450,29 @@ class ChatWindow(QWidget):
     def _update_send_enabled(self) -> None:
         self._send_button.setEnabled(bool(self._input.text().strip()))
 
-    def _on_mode_button_clicked(self) -> None:
-        target = not self._voice_mode
-        self.voice_mode_requested.emit(target)
+    def _on_vad_button_clicked(self) -> None:
+        self.vad_toggle_requested.emit(not self._vad_enabled)
+
+    def _on_tts_button_clicked(self) -> None:
+        self.tts_toggle_requested.emit(not self._tts_enabled)
 
     # ------------------------------------------------------------------
     def invoke(self, callback: Callable[[], None]) -> None:
         """Schedule ``callback`` to run on the UI thread."""
 
         if callable(callback):
-            self._invoke_callable.emit(callback)
+            try:
+                self._invoke_callable.emit(callback)
+            except RuntimeError:
+                # The widget may already be deleted during shutdown; ignore the
+                # signal failure so cleanup can continue gracefully.
+                return
 
-    def set_voice_mode_async(self, enabled: bool) -> None:
-        self.invoke(lambda: self.set_voice_mode(enabled))
+    def set_vad_enabled_async(self, enabled: bool) -> None:
+        self.invoke(lambda: self.set_vad_enabled(enabled))
+
+    def set_tts_enabled_async(self, enabled: bool) -> None:
+        self.invoke(lambda: self.set_tts_enabled(enabled))
 
     def close_async(self) -> None:
         self.invoke(self.close)
@@ -281,6 +481,80 @@ class ChatWindow(QWidget):
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.closed.emit()
         super().closeEvent(event)
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _load_icon(path: Optional[Path]) -> QIcon:
+        if path is None:
+            return QIcon()
+        try:
+            icon = QIcon(str(path))
+        except Exception:
+            return QIcon()
+        return icon
+
+    # ------------------------------------------------------------------
+    def _apply_titlebar_theme(self, *, ensure_activation: bool = False) -> None:
+        """Toggle the native title bar between light and dark modes when possible."""
+
+        if sys.platform != "win32":
+            return
+
+        window = self.windowHandle()
+        if window is None:
+            QTimer.singleShot(0, lambda: self._apply_titlebar_theme(ensure_activation=ensure_activation))
+            return
+
+        try:
+            import ctypes
+        except Exception:
+            return
+
+        try:
+            dwmapi = ctypes.windll.dwmapi
+        except Exception:
+            return
+
+        hwnd = int(window.winId())
+        use_dark = ctypes.c_int(1 if self._theme == "dark" else 0)
+        attribute_ids = (20, 19)  # Windows 11/late Windows 10, early Windows 10
+
+        for attribute_id in attribute_ids:
+            try:
+                result = dwmapi.DwmSetWindowAttribute(
+                    hwnd,
+                    attribute_id,
+                    ctypes.byref(use_dark),
+                    ctypes.sizeof(use_dark),
+                )
+            except Exception:
+                return
+            if result == 0:
+                break
+        else:
+            return
+
+        # Request rounded corners when available (Windows 11).
+        try:
+            corner_preference_attr = 33  # DWMWA_WINDOW_CORNER_PREFERENCE
+            dwmwcp_round = ctypes.c_int(2)  # DWMWCP_ROUND
+            dwmapi.DwmSetWindowAttribute(
+                hwnd,
+                corner_preference_attr,
+                ctypes.byref(dwmwcp_round),
+                ctypes.sizeof(dwmwcp_round),
+            )
+        except Exception:
+            pass
+
+        if ensure_activation and self.isVisible():
+            try:
+                window.requestActivate()
+            except Exception:
+                pass
+            self.raise_()
+            self.activateWindow()
+
 
 
 __all__ = ["ChatWindow"]

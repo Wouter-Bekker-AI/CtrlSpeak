@@ -204,6 +204,7 @@ def test_orchestrator_persists_and_retrieves(tmp_path, monkeypatch):
 def test_orchestrator_profile_write_and_read(tmp_path, monkeypatch):
     modules = _prepare(tmp_path, monkeypatch)
     orchestrator_module = modules["utils.memory_orchestrator"]
+    memory_paths = modules["utils.memory_paths"]
 
     identity_settings = {
         "store_vector_memory": True,
@@ -231,6 +232,13 @@ def test_orchestrator_profile_write_and_read(tmp_path, monkeypatch):
     slot = orchestrator.vector_store.read_profile_slot(orchestrator.profile_user_id, "name")
     assert slot is not None
     assert slot["metadata"]["value"] == "Alice"
+
+    export_path = memory_paths.get_bot_profile_export_path("Tester")
+    assert export_path.exists()
+    payload = json.loads(export_path.read_text(encoding="utf-8"))
+    assert payload["identity"] == "Tester"
+    assert payload["user_id"] == orchestrator.profile_user_id
+    assert any(slot_entry.get("value") == "Alice" for slot_entry in payload.get("slots", []))
 
     read_result = orchestrator.run_turn("what's my name?")
     assert read_result.response_text.lower().startswith("your name is alice")

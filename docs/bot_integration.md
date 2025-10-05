@@ -6,13 +6,15 @@ CtrlSpeak includes an optional "Chat with Bot" experience accessible from the ma
 - **Language Model (LLM)** - The recognized text is sent to the Ollama-compatible client inside SocialRobot. By default CtrlSpeak ships with a lightweight fallback response if no LLM endpoint is reachable, but you can supply your own by setting the `BOT_LLM_URL` and `BOT_LLM_MODEL` environment variables (or the matching CLI flags) before launching CtrlSpeak.
 - **Text cleanup** - SocialRobot checks each reply and only calls `tools.message_management.force_plaintext` when markdown bullets or control characters are present. The scrubbed text populates the chat transcript, memory persistence, and Kokoro playback; otherwise the untouched reply flows straight through.
 - **Text to Speech (TTS)** - The LLM response is converted to audio via Kokoro-ONNX. CtrlSpeak now ships the default receptionist persona with the cheerful `af_heart` voice; override it with `BOT_VOICE` or the `--voice` flag when you need a different Kokoro voice.
-- **Animated Face / Logo** - SocialRobot renders the default TrueAI transparent logo with amplitude-based scaling for visual feedback. Identity folders can still supply alternate assets under `third_party/social_robot/identities/<name>` when a different look is desired.
-- **Voice-first chat window** - Sessions now launch with voice mode active. A PySide chat window opens in the top-right corner beside the floating logo, immediately starts the VAD listener, plays replies aloud, and still shows the full transcript plus input box so typed messages remain available. The microphone toggle stays highlighted to indicate voice capture is running; clicking it drops back to text-only chat, hides the floating logo, repositions the window to the bottom-right corner, and keeps responses on screen without TTS playback. Any text you send while voice mode is active is processed exactly like spoken audio. Holding the right Ctrl push-to-talk hotkey temporarily pauses SocialRobot’s VAD listener so the manual transcription workflow can run without duplicate captures, and the listener resumes automatically when you release the key—even if the audio stream momentarily closes while the hotkey is pressed. Clicking the button again (or ending the session) re-enables voice mode, restores the top-right placement, and restarts live playback.
-- **Documentation preload** - Before the assistant, Einstein, or default personas become interactive, CtrlSpeak runs `refresh_document_memory` for the selected identity to hash bundled Markdown docs, evict any stale `category="documentation"` entries from the vector store, and insert fresh chunks when the content changed or the 24-hour cooldown expired. Progress is reported only in the terminal while the chat window stays hidden.
+- **Animated Logo** - SocialRobot renders the default TrueAI transparent logo with amplitude-based scaling for visual feedback. The chat window always loads `assets/TrueAI_Logo_Transparent_Final.png`, so every persona shares the same artwork without duplicating files inside each identity directory.
+- **Flexible chat window controls** – Sessions now launch with text-to-speech enabled and the always-on VAD listener disabled. The header exposes two toggles: the persona icon doubles as the VAD control (swapping with a deaf icon when the listener is off) and a speak/mute button governs TTS playback. Enabling TTS leaves the window anchored in the bottom-right corner and parks the animated logo near the transcript’s lower-right edge at roughly half scale; minimizing the window slides the logo back to the screen corner at full size until the chat window reopens. Muting TTS hides the logo while keeping the same window size and placement. VAD and TTS can be mixed in any combination (icon+mute for silent voice input, deaf+speak for typed requests with audio replies). Holding the right Ctrl push-to-talk hotkey still pauses an active listener until the key is released.
+- **Theme-aware chat window** – The chat UI honours the CtrlSpeak management window’s **Theme** toggle. Dark mode is now the default: it keeps the familiar header layout while tinting the native title bar (on Windows), boosts transcript contrast, and preserves button legibility during long sessions. Light mode now mirrors the dark layout’s rounded controls and icon button sizing so the two modes feel consistent. Toggling the button in the management window immediately streams the new theme to any running chat window without restarting the persona, automatically activates the window so the native title bar recolors right away, and the preference persists in AppData for future launches. Windows 11 operators also get rounded window corners when the OS exposes that capability.
+- **Automatic profile snapshots** – Personal details that the LangGraph orchestrator promotes into the profile store are now exported immediately. As soon as a slot is confirmed, the persistence worker serialises every current profile attribute into `${data_root}/bot_memory/<identity>/profile_snapshot.json`, overwriting the prior snapshot so support teams always see the latest memories without clicking an export button.
+- **Documentation preload** - Before the Vision, Einstein, or Reception personas become interactive, CtrlSpeak runs `refresh_document_memory` for the selected identity to hash bundled Markdown docs, evict any stale `category="documentation"` entries from the vector store, and insert fresh chunks when the content changed or the 24-hour cooldown expired. Progress is reported only in the terminal while the chat window stays hidden.
 
 ## Identity Profiles
 
-Personalities for the bot live under `third_party/social_robot/identities/<name>`. Each identity directory may contain:
+Personalities for the bot live under `third_party/social_robot/personas/<name>`. Each identity directory may contain:
 
 - `identity.json` - configuration for the profile (voice, model, prompt settings, optional memory directory).
 - `system_prompt.txt` (or another file referenced by the config) - the text injected as the LLM system prompt when the profile is loaded.
@@ -24,7 +26,7 @@ The loader understands the following `identity.json` keys:
 
 ```json
 {
-  "name": "default",
+  "name": "reception",
   "description": "TrueAI's cheerful CtrlSpeak receptionist",
   "read_prompt_from_file": true,
   "prompt_file": "system_prompt.txt",
@@ -33,7 +35,7 @@ The loader understands the following `identity.json` keys:
   "ollama_hardware": "gpu_only",
   "ollama_options": {
     "temperature": 0.9,
-    "num_ctx": 4000,
+    "num_ctx": 8000,
     "num_gpu": 999,
     "main_gpu": 0,
     "gpu_split": [0.6, 0.4]
@@ -44,9 +46,9 @@ The loader understands the following `identity.json` keys:
   },
   "voice": "af_heart",
   "require_text_cleaning": false,
-  "vision": true,
+  "vision": false,
   "tool": false,
-  "memory_dir": "{appdata}/bot_memory/default"
+  "memory_dir": "{appdata}/bot_memory/reception"
 }
 ```
 
@@ -83,12 +85,12 @@ CtrlSpeak ships with three ready-to-use personas. The matrix below consolidates 
 
 | Persona | Identity name | Primary role | Key capabilities | Key limitations |
 | --- | --- | --- | --- | --- |
-| Default receptionist | `default` | Welcomes users, answers CtrlSpeak usage questions, and routes requests to the right specialist. | Reads the bundled documentation set before every session and can describe other personas so it acts as a knowledgeable receptionist. | No vision capture and no tool calling; delegates advanced requests to the assistant or Einstein personas. |
-| Assistant | `assistant` | General-purpose helper for day-to-day requests. | Vision-enabled—can capture the screen or clipboard on request, references the documentation corpus, and delivers polished natural-language replies. | Tool calling remains disabled; for complex planning or actions it will escalate to Einstein. |
+| Reception | `reception` | Welcomes users, answers CtrlSpeak usage questions, and routes requests to the right specialist. | Reads the bundled documentation set before every session and can describe other personas so it acts as a knowledgeable receptionist. | No vision capture and no tool calling; delegates advanced requests to the Vision or Einstein personas. |
+| Vision | `vision` | General-purpose helper for day-to-day requests. | Vision-enabled—can capture the screen or clipboard on request, references the documentation corpus, and delivers polished natural-language replies. | Tool calling remains disabled; for complex planning or actions it will escalate to Einstein. |
 | Einstein | `einstein` | Deep-thinking strategist and automation specialist. | Runs with `/think` enabled for deliberate reasoning, delegates complex file or shell work to Goose via `goose_tool_query`, and keeps tool plans plus transcripts visible in the terminal for post-run auditing. | Vision capture stays disabled so it focuses on analysis and tooling; relies on other personas for pure receptionist duties. |
 
-- **assistant** – A Jarvis-inspired general helper backed by `gemma3:12b` with deterministic paragraph cleaning enabled.
-- **default** – TrueAI's upbeat front-desk receptionist persona that uses `gemma3:1b`, keeps vision disabled, and focuses on guiding people to the right bot or CtrlSpeak feature.
+- **vision** – A Jarvis-inspired general helper backed by `gemma3:12b` with deterministic paragraph cleaning enabled.
+- **reception** – TrueAI's upbeat front-desk receptionist persona that uses `gemma3:1b`, keeps vision disabled, and focuses on guiding people to the right bot or CtrlSpeak feature.
 - **einstein** – The deep-thinking and tool-planning specialist powered by `qwen3:14b`. CtrlSpeak appends `/think` to every Einstein turn (unless the user says `/no_think`) so Qwen3’s reasoning mode emits `<think>…</think>` plans before the final answer. The identity’s `identity.json` requests GPU-only execution, an 8 192 token context window, and the recommended sampling settings (`temperature` 0.6, `top_p` 0.95, `top_k` 20, `repeat_penalty` 1.1). Einstein also opts into `"hide_think": true`, which enables the `background_agents.manage_think` helper to strip `<think>` plans from the persisted chat history and Kokoro playback, drop the leading “Answer:” label before the visible reply, and immediately print a transient `Thinking...` placeholder in the chat window as soon as the user submits a message. If Qwen3 ever forgets to send the spoken answer and only returns the hidden plan, the orchestrator automatically follows up with a reminder and surfaces an apology when the retry still fails. Vision capture is disabled for this persona (`"vision": false`), so “look at my screen/clipboard” shortcuts only work with other identities. Stage the model in Ollama with a Modelfile equivalent to:
 
 ```
@@ -112,9 +114,9 @@ The additional boolean keys control multimodal, cleaning, and future extensibili
 - `vision` – Enables image capture tooling documented in [`docs/tooling.md`](tooling.md). When `true`, SocialRobot listens for the spoken “look at my screen” and “look at my clipboard” commands, exposes matching context-menu actions on the floating logo, and routes captured images to the LLM. When `false`, the commands are ignored, the context-menu items are hidden, and no images are taken.
 - `tool` – Grants access to the Goose automation helper documented in [`docs/tooling.md`](tooling.md#goose-automation-helper-toolsgoose_toolpy). Einstein enables it by default; other personas leave it `false` to avoid exposing the automation agent unnecessarily.
 
-CtrlSpeak now includes three bundled identities: `assistant` (vision enabled, text cleaning enabled), `default` (vision disabled, text cleaning disabled), and `einstein` (vision disabled, text cleaning enabled with Qwen3 reasoning defaults). Only Einstein has `tool: true`, giving it exclusive access to the Goose integration.
+CtrlSpeak now includes three bundled identities: `vision` (vision enabled, text cleaning enabled), `reception` (vision disabled, text cleaning disabled), and `einstein` (vision disabled, text cleaning enabled with Qwen3 reasoning defaults). Only Einstein has `tool: true`, giving it exclusive access to the Goose integration.
 
-All face, mouth, and logo assets now live inside the identity directories; the legacy `third_party/social_robot/images/` placeholders have been removed so new personas should bundle their own art alongside `identity.json`. Likewise, shared prompt templates are deprecated—store any reusable system prompts with the identity that consumes them so packaging stays self-contained.
+Logo artwork always comes from `assets/TrueAI_Logo_Transparent_Final.png`. Persona directories should no longer include PNG copies, and the resolver does not consider per-identity overrides. Likewise, shared prompt templates are deprecated—store any reusable system prompts with the identity that consumes them so packaging stays self-contained.
 
 ### Documentation ingestion workflow
 
@@ -123,15 +125,15 @@ The bundled personas keep their reference material up to date without overflowin
 1. `utils.bot_integration.start_bot` acquires the identity lock and calls both `refresh_document_memory(<identity>)` and `refresh_datetime_memory(<identity>)` for the bundled personas before SocialRobot launches. The documentation helper compares a SHA-256 hash of `README.md` plus the user-facing guides (`docs/bot_integration.md`, `docs/tooling.md`, `docs/user_flow.md`) against the tracker stored at `${data_root}/doc_memory/<identity>.json`, while the datetime helper snapshots the current local date, timezone, and locale under `${data_root}/datetime_memory/<identity>.json`. If each helper sees a matching hash inside the 24-hour cooldown, it logs a skip and continues immediately.
 2. When the content or snapshot changed—or the cooldown elapsed—the helpers delete the relevant `category="documentation"` or `category="temporal_context"` rows, respect the identity’s `max_vector_items`, TTL, and PII-redaction preferences, and insert the fresh payloads (documentation arrives as multiple chunks, the datetime snapshot as a single chunk).
 3. Terminal-only messages confirm the trigger (startup, keyword, hash change), report how many chunks were written, and indicate whether any older memories were evicted to honour the cap. The GUI and TTS layers remain silent.
-4. Operators can say or type “update documentation” or “update datetime” (including via the Ctrl hotkey workflow) to force a refresh immediately. Forced runs bypass the cooldown so emergency edits or timezone changes land before the next user turn. The hotkey path refreshes the active identity, while in-session requests refresh whichever persona is currently running inside SocialRobot. Questions that mention the current date, time, or timezone automatically lower the retrieval threshold for the temporal-context chunk so the assistant responds with the stored snapshot instead of only referencing the tracker file.
+4. Operators can say or type “update documentation” or “update datetime” (including via the Ctrl hotkey workflow) to force a refresh immediately. Forced runs bypass the cooldown so emergency edits or timezone changes land before the next user turn. The hotkey path refreshes the active identity, while in-session requests refresh whichever persona is currently running inside SocialRobot. Questions that mention the current date, time, or timezone automatically lower the retrieval threshold for the temporal-context chunk so Vision responds with the stored snapshot instead of only referencing the tracker file.
 
-Other identities can invoke the helper manually if they enable vector memory for documentation, but only the assistant, Einstein, and default personas do so automatically. Launching either persona also forces the LangGraph memory orchestrator on—even when `settings.json` never toggled the feature—so documentation retrieval always flows through the structured `assess_context → retrieve → plan_tools → call_tools → llm → persist` graph before the chat window becomes interactive.
+Other identities can invoke the helper manually if they enable vector memory for documentation, but only the Vision, Einstein, and Reception personas do so automatically. Launching either persona also forces the LangGraph memory orchestrator on—even when `settings.json` never toggled the feature—so documentation retrieval always flows through the structured `assess_context → retrieve → plan_tools → call_tools → llm → persist` graph before the chat window becomes interactive.
 
-Once the orchestrator is active, every user turn starts with a lightweight planner prompt that asks the LLM whether it wants additional context. The model must respond with `documentation`, `chat_history`, `date`, any comma-separated combination of those tokens, or `none`. A `none` answer skips the vector database entirely; otherwise the retrieval node limits its query to the requested buckets so documentation and temporal context are only attached when the model explicitly requests them. Questions about CtrlSpeak usage typically elicit `documentation`, while requests like “what’s my name?” surface `chat_history` so the assistant replays the correct conversation memories.
+Once the orchestrator is active, every user turn starts with a lightweight planner prompt that asks the LLM whether it wants additional context. The model must respond with `documentation`, `chat_history`, `date`, any comma-separated combination of those tokens, or `none`. A `none` answer skips the vector database entirely; otherwise the retrieval node limits its query to the requested buckets so documentation and temporal context are only attached when the model explicitly requests them. Questions about CtrlSpeak usage typically elicit `documentation`, while requests like “what’s my name?” surface `chat_history` so the persona replays the correct conversation memories.
 
 If the planner claims `none` but the user explicitly mentions the documentation, prior conversation history, or the current date/time, the orchestrator now overrides the plan based on those heuristics and still performs the relevant lookup. That safeguard catches prompts such as “look at our chat history” or “explain how to use this program” even when the planner misses the cue.
 
-When the assistant or default persona receives an utterance that sounds like a “how do I use CtrlSpeak?” request (or when retrieval would otherwise return nothing), the LangGraph orchestrator relaxes the similarity check for `category="documentation"` memories and guarantees at least one documentation chunk appears in the retrieved context. Those passages are forwarded to the LLM inside a dedicated `Documentation excerpts` system message so the persona understands the text is canonical guidance and can quote it directly.
+When the Vision or Reception persona receives an utterance that sounds like a “how do I use CtrlSpeak?” request (or when retrieval would otherwise return nothing), the LangGraph orchestrator relaxes the similarity check for `category="documentation"` memories and guarantees at least one documentation chunk appears in the retrieved context. Those passages are forwarded to the LLM inside a dedicated `Documentation excerpts` system message so the persona understands the text is canonical guidance and can quote it directly.
 
 Every turn prints a terminal-only status line such as `[Memory] Vector store queried (plan=documentation, results=2, documentation=1, temporal=1).` or `[Memory] Vector store not queried (plan=none).` so operators can confirm both the planner’s decision and whether the vector database contributed context for the pending reply. Goose-enabled personas also emit a concise turn-by-turn trace—user request receipt, the prompt sent to the LLM, any Goose tool prompt dispatched, the tool result returned to the model, and the final answer supplied to chat—so you can follow each automation step without enabling verbose logging. The GUI and TTS surfaces remain silent.
 
@@ -149,22 +151,22 @@ SocialRobot loads [`tools/keywords.py`](tooling.md) at startup and registers one
 
 - **look at my screen** – Captures a screenshot via `tools/vision.py` when the active identity has `vision: true`.
 - **look at my clipboard** – Pulls the most recent image from the system clipboard and forwards it like a screenshot.
-- **update documentation** – Forces the active identity (assistant or default) to reload Markdown documentation immediately, bypassing the cooldown and logging status only to the terminal.
+- **update documentation** – Forces the active identity (Vision or Reception) to reload Markdown documentation immediately, bypassing the cooldown and logging status only to the terminal.
 - **update datetime** – Forces the active identity to refresh the temporal-context snapshot (current date, timezone, locale/country hints) immediately, bypassing the cooldown and logging status only to the terminal.
 - **chat with `<identity>`** – Immediately relaunches SocialRobot with the target persona through the transcription server so the parent process coordinates the shutdown and restart (requests that target the already-active identity are ignored).
 - **goodbye `<identity>`** – Immediately ends the current conversation when delivered through voice (including the stdin control channel) so the parent process controls the teardown. Before the shutdown begins, CtrlSpeak speaks a short “goodbye” using the active persona’s voice. SocialRobot then disables voice mode and unwinds the audio stack but leaves the chat window running so the user can close it manually; typed “goodbye …” phrases remain regular chat messages.
 
-The push-to-talk workflow (hold the right Ctrl key while speaking) shares the same keyword registry. When VAD is idle because no bot session is active, saying “chat with assistant” through the hotkey launches that identity and skips text injection entirely. If another persona is already running, the helper first asks it to exit cooperatively via `utils.bot_integration.request_goodbye()` and falls back to `stop_bot()` only when the child process fails to exit within the timeout. Spoken “goodbye <identity>” commands are intercepted in the CtrlSpeak main process (the transcription server), which issues the same graceful-then-hard stop sequence used by the tray menu while leaving the chat window for the user to close. Each shutdown stage emits debug-level entries under `third_party.social_robot.main` in `${data_root}/logs/ctrlspeak.log` (for example, `%APPDATA%\CtrlSpeak\logs\ctrlspeak.log` on Windows), so you can see exactly which component executed when diagnosing a stalled goodbye. All of these phrases are matched fuzzily, so punctuation or light speech-to-text substitutions (for example, “chat was assistant”) still trigger the expected behaviour unless a document explicitly opts out.
+The push-to-talk workflow (hold the right Ctrl key while speaking) shares the same keyword registry. When VAD is idle because no bot session is active, saying “chat with vision” through the hotkey launches that identity and skips text injection entirely. If another persona is already running, the helper first asks it to exit cooperatively via `utils.bot_integration.request_goodbye()` and falls back to `stop_bot()` only when the child process fails to exit within the timeout. Spoken “goodbye <identity>” commands are intercepted in the CtrlSpeak main process (the transcription server), which issues the same graceful-then-hard stop sequence used by the tray menu while leaving the chat window for the user to close. Each shutdown stage emits debug-level entries under `third_party.social_robot.main` in `${data_root}/logs/ctrlspeak.log` (for example, `%APPDATA%\CtrlSpeak\logs\ctrlspeak.log` on Windows), so you can see exactly which component executed when diagnosing a stalled goodbye. All of these phrases are matched fuzzily, so punctuation or light speech-to-text substitutions (for example, “chat was vision” or “chat was receptionist”) still trigger the expected behaviour unless a document explicitly opts out.
 
 > **Do not** move the goodbye/chat keyword detection back into SocialRobot or another worker thread. Keeping the logic in the CtrlSpeak main process is a hard requirement so the parent can enforce the proven shutdown path. Route any future conversation controls through the same helpers described above and send explicit stdin commands to the bot only after the parent has taken ownership of the request.
 
-When you add new keywords, update `tools/keywords.py`, refresh [`docs/tooling.md`](tooling.md), and adjust the system prompts for any identities that should advertise the new commands. The assistant prompt bundled with CtrlSpeak now explicitly mentions the clipboard trigger and instructs the model to guide users toward the exact phrases when they hint at wanting a capture.
+When you add new keywords, update `tools/keywords.py`, refresh [`docs/tooling.md`](tooling.md), and adjust the system prompts for any identities that should advertise the new commands. The Vision prompt bundled with CtrlSpeak now explicitly mentions the clipboard trigger and instructs the model to guide users toward the exact phrases when they hint at wanting a capture.
 
 ## LangGraph orchestration and persistence
 
 Setting `use_langgraph_memory_orchestrator: true` in `settings.json` (or exporting `CTRLSPK_USE_LANGGRAPH_MEMORY_ORCHESTRATOR=1`) routes every conversation turn through `utils.memory_orchestrator`:
 
-> **Bundled personas:** When you start the assistant, Einstein, or default personas, CtrlSpeak automatically flips this setting on (persisting it back to `settings.json`) so documentation ingestion and retrieval always use the LangGraph path even on pristine installs.
+> **Bundled personas:** When you start the Vision, Einstein, or Reception personas, CtrlSpeak automatically flips this setting on (persisting it back to `settings.json`) so documentation ingestion and retrieval always use the LangGraph path even on pristine installs.
 
 1. **assess_context** – ask the LLM which context buckets (`documentation`, `chat_history`, `date`, or `none`) it wants for the turn and cache the response.
 2. **retrieve** – query Chroma for up to `retrieval_top_k` memories above `retrieval_threshold`, limited to the planner’s requested categories; empty stores or low scores short-circuit.
@@ -203,7 +205,7 @@ To integrate with your own automation, call:
 
 ```python
 from utils.bot_integration import run_bot_test
-run_bot_test("assets/test_16k_mono.wav", identity="default")
+run_bot_test("assets/test_16k_mono.wav", identity="reception")
 ```
 
 The helper reuses an existing server when you pass `stt_url=...`, and you can forward identity-specific overrides such as `prompt_file`, `system_prompt`, or `voice`.
@@ -214,7 +216,7 @@ Kokoro relies on ONNX Runtime. Because the root `requirements.txt` installs `onn
 
 1. Set the identity’s `tts` block to request the provider you want (`"onnx_provider": "CUDAExecutionProvider"` and an optional `"device_id"`). The default personas already do this with `device_id: 0`.
 2. Alternatively, export `BOT_TTS_PROVIDER`, `BOT_TTS_DEVICE_ID`, or `BOT_TTS_PROVIDERS` before launching Chat with Bot to override the identity defaults without touching JSON.
-3. Launch the assistant and watch `nvidia-smi`—you should see a small memory bump on the specified GPU when TTS audio is generated. Successful GPU initialisation prints `-> Kokoro TTS using GPU providers: [...]` so you can confirm it at a glance.
+3. Launch Vision and watch `nvidia-smi`—you should see a small memory bump on the specified GPU when TTS audio is generated. Successful GPU initialisation prints `-> Kokoro TTS using GPU providers: [...]` so you can confirm it at a glance.
 
 If the chosen provider is unavailable (for example because the machine lacks `cufft64_11.dll` or cuDNN), CtrlSpeak logs which providers were skipped and emits a `Falling back to CPU` warning before proceeding. You can continue to control visibility with `CUDA_VISIBLE_DEVICES` or similar environment variables when you need to hide GPUs from ONNX Runtime entirely.
 
@@ -222,7 +224,7 @@ If the chosen provider is unavailable (for example because the machine lacks `cu
 
 | Variable | Purpose |
 | --- | --- |
-| `BOT_IDENTITY` | Name of the identity directory to load (default `default`). |
+| `BOT_IDENTITY` | Name of the identity directory to load (default `reception`). |
 | `BOT_IDENTITIES_DIR` | Override the base directory that holds identity folders. |
 | `BOT_PROMPT_FILE` | Explicit prompt file path to use when launching SocialRobot. |
 | `BOT_SYSTEM_PROMPT` | Inline system prompt string (used when not reading from a file). |
@@ -280,8 +282,8 @@ Use the **Clear Bot Memory** button in the management window when you need to wi
 1. Start CtrlSpeak in Client + Server mode.
 2. Right-click the tray icon, choose **Manage CtrlSpeak**, then use the Assistants card to review identity availability badges and click **Chat with Bot**.【F:utils/gui.py†L1424-L1455】
 3. The management UI toggles the bot: click once to launch, again to stop. The active persona's badge switches to **active** while other identities remain marked **available**.【F:utils/gui.py†L1730-L1812】
-4. The chat window opens with voice mode already active. Speak immediately or type into the input box—typed messages follow the same path as speech. The highlighted microphone button keeps the VAD listener running, positions the window in the top-right corner next to the floating logo, and plays replies aloud. Click the microphone if you need to fall back to text-only chat; the button disables voice capture, moves the window to the bottom-right corner, and leaves TTS off until you re-enable it. Holding the right Ctrl push-to-talk hotkey pauses the VAD listener during the manual transcription workflow and it resumes automatically after you release the key—even if the audio stream briefly closes while the hotkey is down.
-5. When voice mode is active you can right-click the transparent logo to open its context menu. Choose **Look at my Screen** to capture the desktop or **Look at my Clipboard** to forward the latest snip stored in the clipboard. Both actions mirror the spoken commands and share the tooling documented in [`docs/tooling.md`](tooling.md). The menu still includes **Quit** when you need to close the bot quickly.
+4. The chat window opens with TTS already active and the always-on VAD listener disabled. The persona badge shows the deaf icon until you enable the microphone; the adjacent speak/mute button controls whether replies are synthesized aloud. Turning TTS on keeps the window anchored in the bottom-right corner and tucks the floating logo against the transcript’s lower-right corner at about half scale; minimizing the chat window slides the logo back to the desktop’s bottom-right corner at full size until you restore the window. Muting hides the logo without altering the window’s size or position. Toggle the VAD button whenever you want hands-free input—typed and spoken turns continue to share the same downstream processing. Holding the right Ctrl push-to-talk hotkey still pauses the VAD listener while the key is pressed.
+5. The floating logo (and its context menu) only appears while TTS is enabled. Right-click it to trigger **Look at my Screen** or **Look at my Clipboard**, mirroring the spoken commands documented in [`docs/tooling.md`](tooling.md). The menu still includes **Quit** for quick shutdowns.
 
 The SocialRobot process keeps running if you close the management window—you can reopen it later without interrupting the conversation. To shut the bot down, either click **Stop Chat with Bot** in the management window or choose **Quit** from the floating logo's context menu.
 

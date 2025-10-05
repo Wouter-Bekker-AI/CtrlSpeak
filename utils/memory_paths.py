@@ -21,9 +21,9 @@ _PROFILE_EXPORT = "profile_snapshot.json"
 def _sanitize_identity(identity: str) -> str:
     normalized = (identity or "").strip()
     if not normalized:
-        return "default"
+        return "reception"
     sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", normalized)
-    return sanitized[:255] or "default"
+    return sanitized[:255] or "reception"
 
 
 def get_bot_memory_dir(identity: str) -> Path:

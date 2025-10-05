@@ -318,6 +318,20 @@ def _collect_keyword_phrases() -> set[str]:
         from tools import keywords
 
         for keyword in keywords.ALL_KEYWORDS:
+            category = (keyword.category or "").strip().lower()
+
+            if category == "conversation_start":
+                payload = keyword.payload.strip()
+                if payload:
+                    phrases.add(f"chat with {payload.lower()}")
+                continue
+
+            if category == "conversation_end":
+                payload = keyword.payload.strip()
+                if payload:
+                    phrases.add(f"goodbye {payload.lower()}")
+                continue
+
             for target in keyword.fuzzy_targets:
                 cleaned = target.strip()
                 if cleaned:

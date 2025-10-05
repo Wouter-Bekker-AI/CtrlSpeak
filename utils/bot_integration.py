@@ -50,8 +50,8 @@ def _ensure_server_defaults() -> None:
 logger = get_logger(__name__)
 
 _SOCIAL_ROBOT_ROOT = Path(__file__).resolve().parents[1] / "third_party" / "social_robot"
-_DEFAULT_IDENTITIES_ROOT = _SOCIAL_ROBOT_ROOT / "identities"
-_DEFAULT_IDENTITY_NAME = "default"
+_DEFAULT_PERSONAS_ROOT = _SOCIAL_ROBOT_ROOT / "personas"
+_DEFAULT_IDENTITY_NAME = "reception"
 _DEFAULT_LLM_MODEL = "gemma3:1b"
 _DEFAULT_LLM_URL = "http://localhost:11434/api/chat"
 _BACKGROUND_AGENTS_ROOT = Path(__file__).resolve().parents[1] / "background_agents"
@@ -63,7 +63,7 @@ _active_identity: Optional[str] = None
 _identity_lock: Optional[IdentityLock] = None
 
 _OLLAMA_HARDWARE_CHOICES = {"cpu_only", "cpu_and_gpu", "gpu_only"}
-_DOC_REFRESH_IDENTITIES = {"assistant", "default", "einstein"}
+_DOC_REFRESH_IDENTITIES = {"vision", "reception", "einstein"}
 _PRELAUNCH_REFRESHERS = (
     ("documentation memory", refresh_document_memory),
     ("date/time memory", refresh_datetime_memory),
@@ -95,15 +95,15 @@ def _prepare_identity_memories(identity: str) -> bool:
 
 
 def list_available_identities(identities_dir: Optional[str] = None) -> list[str]:
-    """Return the sorted list of SocialRobot identity folder names."""
+    """Return the sorted list of SocialRobot persona folder names."""
 
     root = _resolve_identities_root(identities_dir)
     try:
         return sorted(entry.name for entry in root.iterdir() if entry.is_dir())
     except FileNotFoundError:
-        logger.warning("Identities directory %s does not exist", root)
+        logger.warning("Persona directory %s does not exist", root)
     except Exception:
-        logger.exception("Failed to enumerate identities under %s", root)
+        logger.exception("Failed to enumerate personas under %s", root)
     return []
 
 
@@ -133,8 +133,8 @@ def _resolve_identities_root(identities_dir: Optional[str]) -> Path:
         try:
             return Path(candidate).expanduser().resolve()
         except Exception:
-            logger.exception("Failed to resolve identities directory %s", candidate)
-    return _DEFAULT_IDENTITIES_ROOT
+            logger.exception("Failed to resolve persona directory %s", candidate)
+    return _DEFAULT_PERSONAS_ROOT
 
 
 def _load_identity_config(identity: str, identities_dir: Optional[str]) -> tuple[dict, Path]:
@@ -397,7 +397,7 @@ def _download_ollama_model_with_gui(
             return
         cancel_requested.set()
         try:
-            ui_update_lockout_message("Cancelling assistant model download…")
+            ui_update_lockout_message("Cancelling persona model download…")
         except Exception:
             logger.exception("Failed to update lockout message while cancelling Ollama download")
         if process.is_alive():
@@ -410,16 +410,14 @@ def _download_ollama_model_with_gui(
         except Exception:
             logger.exception("Failed to enqueue Ollama download cancellation notification")
 
-    pretty_name = (identity_display or "assistant").strip() or "assistant"
-    if pretty_name.lower().endswith("assistant"):
-        assistant_label = pretty_name
+    pretty_name = (identity_display or "Vision").strip() or "Vision"
+    if pretty_name.lower().endswith("persona"):
+        persona_label = pretty_name
     else:
-        assistant_label = f"{pretty_name} assistant"
+        persona_label = f"{pretty_name} persona"
 
-    window_label = f"{assistant_label} model ({model_name})"
-    initial_message = (
-        f"We're downloading the {model_name} model for the {assistant_label}."
-    )
+    window_label = f"{persona_label} model ({model_name})"
+    initial_message = f"We're downloading the {model_name} model for the {persona_label}."
 
     def _monitor_model_availability() -> None:
         """Poll Ollama so the UI can finish even if streaming never signals EOF."""
@@ -435,7 +433,7 @@ def _download_ollama_model_with_gui(
 
             if state is True:
                 try:
-                    progress_queue.put_nowait(("stage", f"Preparing the {assistant_label}…"))
+                    progress_queue.put_nowait(("stage", f"Preparing the {persona_label}…"))
                 except Exception:
                     logger.exception("Failed to enqueue Ollama preparation stage update")
                 try:
@@ -498,15 +496,15 @@ def _download_ollama_model_with_gui(
 
         try:
             if lockout_open:
-                ui_close_lockout_window(f"The {assistant_label} model is ready.")
+                ui_close_lockout_window(f"The {persona_label} model is ready.")
         except Exception:
             logger.exception("Failed to close lockout window after Ollama download success")
         return True
 
     if status == "cancelled":
-        message = f"The {assistant_label} model download was cancelled."
+        message = f"The {persona_label} model download was cancelled."
     else:
-        message = error_message or f"CtrlSpeak could not download the {assistant_label} model."
+        message = error_message or f"CtrlSpeak could not download the {persona_label} model."
 
     try:
         if lockout_open:
@@ -737,11 +735,11 @@ def start_bot(
         if not identities_root.is_absolute():
             identities_root = robot_dir / identities_root
     else:
-        identities_root = robot_dir / "identities"
+        identities_root = robot_dir / "personas"
     try:
         identities_root = identities_root.resolve()
     except FileNotFoundError:
-        logger.exception("Failed to resolve SocialRobot identities root at %s", identities_root)
+        logger.exception("Failed to resolve SocialRobot personas root at %s", identities_root)
 
     (
         resolved_llm_url,
@@ -850,12 +848,19 @@ def start_bot(
 
     load_settings()
     forced_langgraph = False
+    theme_updated = False
+    theme_pref = "dark"
     with settings_lock:
         use_langgraph = bool(settings.get("use_langgraph_memory_orchestrator", False))
         if _should_refresh_docs_on_start(target_identity) and not use_langgraph:
             use_langgraph = True
             settings["use_langgraph_memory_orchestrator"] = True
             forced_langgraph = True
+        theme_pref = str(settings.get("chat_theme", "dark") or "dark").lower()
+        if theme_pref not in {"light", "dark"}:
+            theme_pref = "dark"
+            settings["chat_theme"] = theme_pref
+            theme_updated = True
     if forced_langgraph:
         try:
             save_settings()
@@ -867,6 +872,11 @@ def start_bot(
             logger.exception(
                 "Failed to persist LangGraph orchestrator setting for %s", target_identity
             )
+    elif theme_updated:
+        try:
+            save_settings()
+        except Exception:
+            logger.exception("Failed to persist chat theme preference during bot launch")
     if use_langgraph:
         env["CTRLSPK_USE_LANGGRAPH_MEMORY_ORCHESTRATOR"] = "1"
 
@@ -875,6 +885,7 @@ def start_bot(
     memory_dir_arg = str(memory_root)
     env["CTRLSPK_BOT_MEMORY_ROOT"] = memory_dir_arg
     env["BOT_MEMORY_DIR"] = memory_dir_arg
+    env["CTRLSPK_CHAT_THEME"] = theme_pref
     if _identity_lock is not None:
         env["CTRLSPK_PARENT_LOCKED"] = "1"
         env["CTRLSPK_IDENTITY_LOCK_PATH"] = str(_identity_lock.lock_path)
@@ -894,6 +905,8 @@ def start_bot(
         cmd.extend(["--system-prompt", system_prompt])
     if memory_dir_arg:
         cmd.extend(["--memory-dir", memory_dir_arg])
+    if theme_pref:
+        cmd.extend(["--theme", theme_pref])
 
     logger.info("Starting SocialRobot: %s", " ".join(cmd))
     try:
@@ -1186,6 +1199,15 @@ def resume_bot_vad_listener() -> bool:
     return _send_bot_command("resume_vad")
 
 
+def update_bot_theme(theme: str) -> bool:
+    """Request that SocialRobot switch to the specified chat theme immediately."""
+
+    normalized = str(theme or "").strip().lower()
+    if normalized not in {"light", "dark"}:
+        normalized = "dark"
+    return _send_bot_command("set_theme", {"theme": normalized})
+
+
 def run_bot_test(
     wav_path: str,
     llm_url: Optional[str] = None,
@@ -1237,11 +1259,11 @@ def run_bot_test(
         if not identities_root.is_absolute():
             identities_root = robot_dir / identities_root
     else:
-        identities_root = robot_dir / "identities"
+        identities_root = robot_dir / "personas"
     try:
         identities_root = identities_root.resolve()
     except FileNotFoundError:
-        logger.exception("Failed to resolve SocialRobot identities root at %s", identities_root)
+        logger.exception("Failed to resolve SocialRobot personas root at %s", identities_root)
 
     (
         resolved_llm_url,

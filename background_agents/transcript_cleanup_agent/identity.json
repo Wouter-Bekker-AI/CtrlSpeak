@@ -5,9 +5,10 @@
   "default_threshold": 0.84,
   "phrase_thresholds": {
     "look at my clipboard": 0.88,
-    "chat with assistant": 0.86,
-    "chat with default": 0.86,
-    "goodbye assistant": 0.86
+    "chat with vision": 0.86,
+    "chat with reception": 0.86,
+    "goodbye vision": 0.86,
+    "goodbye reception": 0.86
   },
   "log_file": "transcript_cleanup.log",
   "max_log_bytes": 262144,

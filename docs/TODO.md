@@ -3,10 +3,10 @@
 This living backlog tracks follow-up work the developer wants to schedule for CtrlSpeak. Update it whenever new ideas surface or when items are completed.
 
 ## Pending Work
-- Add a "look at my cursor" / "look at my mouse" keyword that captures a 640×480 image centered on the cursor and passes it to the assistant agent.
+- Add a "look at my cursor" / "look at my mouse" keyword that captures a 640×480 image centered on the cursor and passes it to the Vision persona.
 - Integrate a Qwen3 model with tooling support, starting with Gemini CLI interactions and web search actions.
 - Extend automated tests to cover additional LangGraph tool nodes once external integrations land (current coverage focuses on retrieval gating, async persistence, and embedder upgrades).
-- Build a parsing tool that can read local files to gather contextual information for the assistant.
+- Build a parsing tool that can read local files to gather contextual information for Vision.
 - Consolidate end-user documentation into a single "CtrlSpeak user manual" once the current guides are stable so only one file needs to be injected into vector memory.
 - Extend Einstein's tooling surface even further:
   - Add a guarded command runner for quick local checks (for example, `ruff` or targeted pytest subsets) so validation stays automated.

@@ -10,7 +10,6 @@ import tempfile
 import threading
 import atexit
 import warnings
-from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Pattern
 
@@ -19,7 +18,6 @@ from audio.stt import FasterWhisperSTT
 from audio.remote_stt import RemoteSTT
 from audio.tts import KokoroTTS
 from audio.vad import VADListener, VADConfig
-os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 warnings.filterwarnings(
     "ignore",
     message=r"pkg_resources is deprecated as an API\..*",
@@ -32,8 +30,11 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 ICON_PATH = _PROJECT_ROOT / "assets" / "icon.ico"
+DEAF_ICON_PATH = _PROJECT_ROOT / "assets" / "deaf.ico"
+SPEAK_ICON_PATH = _PROJECT_ROOT / "assets" / "speak.ico"
+MUTE_ICON_PATH = _PROJECT_ROOT / "assets" / "mute.ico"
+LOGO_PATH = _PROJECT_ROOT / "assets" / "TrueAI_Logo_Transparent_Final.png"
 
-from face_animation.face import FaceAnimator, FaceSettings
 from face_animation.logo import LogoAnimator
 from third_party.social_robot.llm.ollama import (
     OllamaClient,
@@ -59,17 +60,18 @@ from utils.image_store import (
     load_identity_image,
     write_identity_image_from_base64,
 )
-from utils.io_atomic import AtomicWriteError, atomic_append_lines, atomic_write_text
+from utils.io_atomic import AtomicWriteError, atomic_append_lines
 from utils.memory_lock import IdentityLock, IdentityLockError, probe_lock_path
 from utils.memory_orchestrator import MemoryOrchestrator
 from utils.memory_settings import load_identity_settings
-from utils.memory_paths import get_bot_memory_dir, get_bot_profile_export_path
+from utils.memory_paths import get_bot_memory_dir
+from utils.system import get_processing_sound_volume, set_processing_sound_volume
 
 
 logger = get_logger(__name__)
 
-IDENTITIES_ROOT = Path(__file__).resolve().parent / "identities"
-DEFAULT_IDENTITY_NAME = "default"
+PERSONAS_ROOT = Path(__file__).resolve().parent / "personas"
+DEFAULT_IDENTITY_NAME = "reception"
 DEFAULT_SYSTEM_PROMPT = "You are a cheerful robotic companion speaking concisely."
 
 CONVERSATION_MAX_BYTES = 10 * 1024 * 1024
@@ -205,14 +207,14 @@ class IdentityProfile:
 def _resolve_identities_root(arg_value: Optional[str]) -> Path:
     if arg_value:
         return Path(arg_value).expanduser().resolve()
-    return IDENTITIES_ROOT
+    return PERSONAS_ROOT
 
 
 def _list_identity_names(root: Path) -> list[str]:
     try:
         return sorted(p.name for p in root.iterdir() if p.is_dir())
     except Exception as exc:
-        print(f"-> Failed to enumerate identities under {root}: {exc}")
+        print(f"-> Failed to enumerate personas under {root}: {exc}")
         return []
 
 def _load_identity_config(root: Path, name: str) -> tuple[dict, Path]:
@@ -506,6 +508,11 @@ def parse_args():
         "--tts-providers",
         help="JSON list of provider entries to pass directly to onnxruntime (advanced).",
     )
+    p.add_argument(
+        "--theme",
+        choices=["light", "dark"],
+        default=os.getenv("CTRLSPK_CHAT_THEME", os.getenv("BOT_THEME", "dark")),
+    )
     p.add_argument("--test-wav", help="Path to a WAV file to process for testing (bypasses VAD/mic).")
     return p.parse_args()
 
@@ -550,6 +557,9 @@ def save_history(memory_path: Optional[Path], entries: List[dict]) -> None:
 
 def main():
     args = parse_args()
+    chat_theme = (args.theme or "dark").lower()
+    if chat_theme not in {"light", "dark"}:
+        chat_theme = "dark"
     profile, config = resolve_identity(args)
 
     _ensure_identity_lock(profile.name)
@@ -668,58 +678,41 @@ def main():
             ollama_client.unload()
         return
 
-    animation_style = config.get("animation_style")
     app = QApplication.instance() or QApplication(sys.argv)
     identity_display = _identity_display(profile.name)
 
-    chat_window = ChatWindow(identity_display, icon_path=ICON_PATH)
-    chat_window.set_voice_mode(True)
+    chat_window = ChatWindow(
+        identity_display,
+        persona_icon_path=ICON_PATH,
+        deaf_icon_path=DEAF_ICON_PATH,
+        speak_icon_path=SPEAK_ICON_PATH,
+        mute_icon_path=MUTE_ICON_PATH,
+        theme=chat_theme,
+    )
+    chat_window.set_vad_enabled(False)
+    chat_window.set_tts_enabled(True)
     chat_window.show()
 
-    animator_thread: Optional[threading.Thread] = None
-    animator: object
+    processing_volume_default = get_processing_sound_volume()
+    set_processing_sound_volume(0.5)
 
-    if animation_style == "logo":
-        logo_image = config.get("logo_image")
-        logo_path: Optional[Path] = None
-        if logo_image:
-            candidate = profile.base_path / logo_image
-            if candidate.exists():
-                logo_path = candidate
-            else:
-                fallback = _PROJECT_ROOT / "assets" / Path(logo_image).name
-                if fallback.exists():
-                    logo_path = fallback
-        if logo_path is None:
-            raise RuntimeError(f"Logo image not found: {logo_image}")
-        animator = LogoAnimator(logo_path=logo_path)
-        animator.setup_widget()
-        animator.hide_widget()
-    else:
-        face_settings = FaceSettings(window_size=(1920, 1080), rotation_degrees=0)
-        face_image_rotation = config.get("face_image_rotation")
-        if isinstance(face_image_rotation, (int, float)):
-            face_settings.face_image_rotation = float(face_image_rotation)
-        mouth_anchor = config.get("mouth_anchor")
-        if isinstance(mouth_anchor, list) and len(mouth_anchor) == 2:
-            face_settings.mouth_anchor = (float(mouth_anchor[0]), float(mouth_anchor[1]))
-        face_image = config.get("face_image")
-        if face_image:
-            face_image_path = profile.base_path / face_image
-            if face_image_path.exists():
-                face_settings.face_image_path = str(face_image_path)
-        mouth_image = config.get("mouth_image")
-        if mouth_image:
-            mouth_image_path = profile.base_path / mouth_image
-            if mouth_image_path.exists():
-                face_settings.mouth_image_path = str(mouth_image_path)
-        animator = FaceAnimator(settings=face_settings)
+    def _restore_processing_sound_volume() -> None:
+        set_processing_sound_volume(processing_volume_default)
+
+    atexit.register(_restore_processing_sound_volume)
+
+    logo_path = LOGO_PATH
+
+    animator = LogoAnimator(logo_path=logo_path)
+    animator.setup_widget()
+    animator.hide_widget()
 
     vad_config = VADConfig(sample_rate=16000, frame_duration_ms=30, padding_duration_ms=360, aggressiveness=2, deactivation_ratio=0.9)
     vad_listener: Optional[VADListener] = None
     vad_thread: Optional[threading.Thread] = None
     vad_suppressed = False
-    voice_mode_active = threading.Event()
+    vad_active = threading.Event()
+    tts_active = threading.Event()
     session_history: List[dict] = []
     last_bot_response: str = ""
     processing_lock = threading.Lock()
@@ -727,55 +720,40 @@ def main():
     shutdown_complete = threading.Event()
     failsafe_timer: Optional[threading.Timer] = None
 
-    def _ensure_animator_running() -> None:
-        nonlocal animator_thread
-        if isinstance(animator, FaceAnimator):
-            if animator_thread is None or not animator_thread.is_alive():
-                animator_thread = threading.Thread(target=animator.run, daemon=True)
-                animator_thread.start()
-        elif isinstance(animator, LogoAnimator):
+    def _position_logo() -> None:
+        if not tts_active.is_set():
+            return
+
+        def _apply() -> None:
+            transcript = chat_window.transcript_widget()
+            if not chat_window.isVisible() or chat_window.isMinimized():
+                animator.set_base_scale(animator.initial_scale)
+                animator.move_to_screen_corner()
+            elif transcript is not None:
+                animator.set_base_scale(animator.initial_scale * 0.5)
+                animator.anchor_to_widget_bottom_right(transcript, margin=16)
+            else:
+                animator.set_base_scale(animator.initial_scale)
+                animator.move_to_screen_corner()
             animator.show_widget()
 
-    def _suspend_animator() -> None:
-        if isinstance(animator, LogoAnimator):
-            animator.hide_widget()
+        chat_window.invoke(_apply)
 
-    def _export_profile_snapshot() -> None:
-        orchestrator = _memory_orchestrator
-        if orchestrator is None:
-            chat_window.append_status_message("Memory", "Profile export unavailable; memory offline.")
-            return
-        try:
-            slots = orchestrator.vector_store.read_all_profile(orchestrator.profile_user_id)
-        except Exception:
-            logger.exception("Failed to read profile slots for export")
-            chat_window.append_status_message("Memory", "Failed to read profile slots.")
-            return
-        payload = {
-            "identity": profile.name,
-            "user_id": orchestrator.profile_user_id,
-            "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            "slots": [
-                {
-                    "attribute": (entry.get("metadata") or {}).get("attribute"),
-                    "value": (entry.get("metadata") or {}).get("value"),
-                    "status": (entry.get("metadata") or {}).get("status", "current"),
-                }
-                for entry in slots
-                if isinstance(entry, dict)
-            ],
-        }
-        export_path = get_bot_profile_export_path(profile.name)
-        try:
-            export_path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_text(export_path, json.dumps(payload, indent=2, ensure_ascii=False))
-        except Exception:
-            logger.exception("Failed to write profile snapshot")
-            chat_window.append_status_message("Memory", "Failed to export profile snapshot.")
-            return
-        chat_window.append_status_message("Memory", f"Profile exported to {export_path}")
+    def _ensure_animator_visibility() -> None:
+        if tts_active.is_set():
+            _position_logo()
+        else:
+            chat_window.invoke(animator.hide_widget)
 
-    chat_window.export_profile_requested.connect(_export_profile_snapshot)
+    def _recenter_logo() -> None:
+        if not tts_active.is_set():
+            return
+        _position_logo()
+
+    def _set_animator_amplitude(level: float) -> None:
+        if not tts_active.is_set():
+            level = 0.0
+        animator.update_amplitude(level)
 
     def on_speech_detected(raw_bytes: bytes) -> None:
         nonlocal vad_listener
@@ -798,14 +776,13 @@ def main():
                 input_medium="voice",
             )
 
-    def _enable_voice_mode() -> None:
+    def _enable_vad() -> None:
         nonlocal vad_listener, vad_thread, vad_suppressed
-        if voice_mode_active.is_set():
+        if vad_active.is_set():
             return
-        voice_mode_active.set()
-        chat_window.set_voice_mode(True)
-        _ensure_animator_running()
-        print("-> Voice mode enabled; starting the VAD listener...")
+        vad_active.set()
+        chat_window.set_vad_enabled_async(True)
+        print("-> Microphone listener enabled; starting the VAD listener...")
         vad_listener = VADListener(
             config=vad_config,
             device_index=None,
@@ -815,18 +792,13 @@ def main():
         vad_thread.start()
         vad_suppressed = False
 
-    def _disable_voice_mode() -> None:
+    def _disable_vad() -> None:
         nonlocal vad_listener, vad_thread, vad_suppressed
-        if not voice_mode_active.is_set():
+        if not vad_active.is_set():
             return
-        voice_mode_active.clear()
-        print("-> Voice mode disabled; returning to text chat.")
-
-        def _ui_teardown() -> None:
-            chat_window.set_voice_mode(False)
-            _suspend_animator()
-
-        chat_window.invoke(_ui_teardown)
+        vad_active.clear()
+        print("-> Microphone listener disabled; returning to text input.")
+        chat_window.set_vad_enabled_async(False)
         if vad_listener is not None:
             vad_listener.stop()
         if vad_thread is not None:
@@ -834,13 +806,29 @@ def main():
             vad_thread = None
         vad_listener = None
         vad_suppressed = False
+
+    def _enable_tts() -> None:
+        if tts_active.is_set():
+            return
+        tts_active.set()
+        chat_window.set_tts_enabled_async(True)
+        _ensure_animator_visibility()
+        print("-> Text-to-speech enabled; persona will speak replies.")
+
+    def _disable_tts() -> None:
+        if not tts_active.is_set():
+            return
+        tts_active.clear()
+        print("-> Text-to-speech disabled; persona will reply in text only.")
+        chat_window.set_tts_enabled_async(False)
         if tts_model.is_playing:
             tts_model.stop_playback()
-        animator.update_amplitude(0.0)
+        _set_animator_amplitude(0.0)
+        _ensure_animator_visibility()
 
     def _pause_vad_listener() -> None:
         nonlocal vad_listener, vad_suppressed
-        if vad_listener is None or not voice_mode_active.is_set():
+        if vad_listener is None or not vad_active.is_set():
             return
         try:
             vad_listener.disable_vad()
@@ -854,7 +842,7 @@ def main():
         if vad_listener is None:
             vad_suppressed = False
             return
-        if not voice_mode_active.is_set():
+        if not vad_active.is_set():
             vad_suppressed = False
             return
         try:
@@ -874,23 +862,31 @@ def main():
             with processing_lock:
                 _handle_user_request(
                     cleaned,
-                    source="voice" if voice_mode_active.is_set() else "text",
+                    source="voice" if vad_active.is_set() else "text",
                     input_medium="text",
                 )
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_voice_mode_requested(enabled: bool) -> None:
+    def _on_vad_toggle_requested(enabled: bool) -> None:
         if enabled:
-            _enable_voice_mode()
+            _enable_vad()
         else:
-            _disable_voice_mode()
+            _disable_vad()
+
+    def _on_tts_toggle_requested(enabled: bool) -> None:
+        if enabled:
+            _enable_tts()
+        else:
+            _disable_tts()
 
     chat_window.send_text.connect(_on_text_submitted)
-    chat_window.voice_mode_requested.connect(_on_voice_mode_requested)
+    chat_window.vad_toggle_requested.connect(_on_vad_toggle_requested)
+    chat_window.tts_toggle_requested.connect(_on_tts_toggle_requested)
+    chat_window.geometry_changed.connect(_recenter_logo)
     chat_window.closed.connect(lambda: shutdown_requested.set())
 
-    _enable_voice_mode()
+    _enable_tts()
 
     def _resolve_identity_name(candidate: str) -> Optional[str]:
         if not candidate:
@@ -905,6 +901,7 @@ def main():
     def _restart_with_identity(target_identity: str) -> None:
         print(f"-> Voice command switching to identity '{target_identity}'.")
         shutdown_requested.set()
+        _restore_processing_sound_volume()
         try:
             if vad_listener is not None:
                 vad_listener.stop()
@@ -952,10 +949,16 @@ def main():
 
         print(f"-> Ending conversation with '{profile.name}'.")
 
+        _restore_processing_sound_volume()
+
         try:
-            _disable_voice_mode()
+            _disable_tts()
         except Exception:
-            logger.exception("Failed to disable voice mode during shutdown request")
+            logger.exception("Failed to disable text-to-speech during shutdown request")
+        try:
+            _disable_vad()
+        except Exception:
+            logger.exception("Failed to disable microphone listener during shutdown request")
 
         logger.debug("Shutdown stage: stopping VAD listener")
         try:
@@ -980,17 +983,6 @@ def main():
                 logger.debug("Shutdown stage complete: animator stop requested")
         except Exception:
             logger.exception("Failed to stop animator during shutdown")
-
-        logger.debug("Shutdown stage: joining animator thread")
-        try:
-            if animator_thread and animator_thread.is_alive():
-                animator_thread.join(timeout=1.5)
-                if animator_thread.is_alive():
-                    logger.debug("Animator thread still running after timeout")
-                else:
-                    logger.debug("Animator thread joined successfully")
-        except Exception:
-            logger.exception("Failed while waiting for animator thread during shutdown")
 
         logger.debug("Shutdown stage: closing stdin control pipe")
         try:
@@ -1077,7 +1069,7 @@ def main():
 
         cleaned = transcript.strip()
         if not cleaned:
-            animator.update_amplitude(0.0)
+            _set_animator_amplitude(0.0)
             return
 
         logger.debug(
@@ -1146,7 +1138,7 @@ def main():
                     print("-> Documentation refresh complete.")
                 else:
                     print("-> Documentation refresh failed; check logs for details.")
-            animator.update_amplitude(0.0)
+            _set_animator_amplitude(0.0)
             return
 
         medium = input_medium or ("voice" if source == "voice" else None)
@@ -1165,7 +1157,7 @@ def main():
             )
         ):
             print("-> Ignoring self-echo from recent response.")
-            animator.update_amplitude(0.0)
+            _set_animator_amplitude(0.0)
             return
 
         if not shutdown_requested.is_set():
@@ -1177,7 +1169,7 @@ def main():
                     source,
                 )
                 _handle_conversation_start(start_match.keyword.payload)
-                animator.update_amplitude(0.0)
+                _set_animator_amplitude(0.0)
                 return
 
             if source == "command":
@@ -1189,12 +1181,12 @@ def main():
                         source,
                     )
                     _handle_conversation_end(end_match.keyword.payload)
-                    animator.update_amplitude(0.0)
+                    _set_animator_amplitude(0.0)
                     return
             elif source != "text":
-                if not voice_mode_active.is_set():
+                if not vad_active.is_set():
                     logger.debug(
-                        "Ignoring conversation end keyword via %s input because voice mode is inactive",
+                        "Ignoring conversation end keyword via %s input because the microphone listener is inactive",
                         source,
                     )
                 else:
@@ -1206,7 +1198,7 @@ def main():
                             source,
                         )
                         _handle_conversation_end(end_match.keyword.payload)
-                        animator.update_amplitude(0.0)
+                        _set_animator_amplitude(0.0)
                         return
 
         nonlocal use_orchestrator
@@ -1342,10 +1334,10 @@ def main():
             except OllamaUnavailableError as exc:
                 failure_message = str(exc)
                 print(f"-> Ollama error: {failure_message}")
-                animator.update_amplitude(0.0)
+                _set_animator_amplitude(0.0)
                 return
             if not llm_response.strip():
-                animator.update_amplitude(0.0)
+                _set_animator_amplitude(0.0)
                 return
 
             history_entry: dict
@@ -1438,28 +1430,28 @@ def main():
         chat_window.append_bot_message(display_response)
         last_bot_response = display_response
 
-        if not voice_mode_active.is_set():
-            animator.update_amplitude(0.0)
+        if not tts_active.is_set():
+            _set_animator_amplitude(0.0)
             return
 
         try:
             if not sanitized_response:
-                animator.update_amplitude(0.0)
+                _set_animator_amplitude(0.0)
                 return
             audio_data = tts_model.synthesize(sanitized_response)
         except Exception as exc:
             print("TTS error:", exc)
-            animator.update_amplitude(0.0)
+            _set_animator_amplitude(0.0)
             return
 
         def amplitude_callback(level: float) -> None:
-            animator.update_amplitude(level)
+            _set_animator_amplitude(level)
 
         def play_tts_in_thread() -> None:
             tts_model.play_audio_with_amplitude(audio_data, amplitude_callback)
             if vad_listener is not None:
                 vad_listener.set_aggressiveness(1)  # Restore VAD aggressiveness after bot playback
-            animator.update_amplitude(0.0)
+            _set_animator_amplitude(0.0)
 
         tts_thread = threading.Thread(target=play_tts_in_thread, daemon=True)
         tts_thread.start()
@@ -1542,6 +1534,14 @@ def main():
                     )
                     with processing_lock:
                         _handle_conversation_start(target_identity)
+            elif command == "set_theme":
+                requested_theme = str(payload.get("theme") or "").strip().lower()
+                if requested_theme:
+                    logger.debug(
+                        "stdin control command received: set_theme %s",
+                        requested_theme,
+                    )
+                    chat_window.set_theme_async(requested_theme)
             elif command == "goodbye":
                 target_identity = str(payload.get("identity") or "")
                 if target_identity:
@@ -1563,22 +1563,19 @@ def main():
     try:
         if app:
             app.exec()
-        elif animator_thread:
-            while animator_thread.is_alive():
-                animator_thread.join(timeout=0.5)
-                if not animator_thread.is_alive():
-                    break
-                if shutdown_requested.is_set():
-                    break
     except KeyboardInterrupt:
         print("Shutting down...")
     finally:
         logger.info("Shutdown cleanup starting for '%s'", profile.name)
         shutdown_complete.set()
         try:
-            _disable_voice_mode()
+            _disable_tts()
         except Exception:
-            logger.exception("Failed to disable voice mode during cleanup")
+            logger.exception("Failed to disable text-to-speech during cleanup")
+        try:
+            _disable_vad()
+        except Exception:
+            logger.exception("Failed to disable microphone listener during cleanup")
         try:
             if vad_listener is not None:
                 logger.debug("Cleanup stage: stopping VAD listener")

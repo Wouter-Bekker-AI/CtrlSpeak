@@ -11,16 +11,31 @@
     "look at my club board",
     "look at my clip board"
   ],
-  "chat with default": [
+  "chat with reception": [
     "chat with defunct",
-    "chat with defaultt"
+    "chat with default",
+    "chat with defaultt",
+    "chat with receptionist",
+    "chat was receptionist",
+    "chat was reception"
   ],
-  "chat with assistant": [
+  "chat with vision": [
+    "chat with assistant",
     "chat with assissant",
-    "chat with assistent"
+    "chat with assistent",
+    "chat was vision"
   ],
-  "goodbye assistant": [
+  "goodbye vision": [
+    "goodbye assistant",
     "good bye assistant",
-    "good bye, assistant"
+    "good bye, assistant",
+    "good bye vision",
+    "good bye, vision"
+  ],
+  "goodbye reception": [
+    "goodbye default",
+    "good bye reception",
+    "good bye, reception",
+    "goodbye receptionist"
   ]
 }
