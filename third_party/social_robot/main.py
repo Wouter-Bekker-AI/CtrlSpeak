@@ -10,7 +10,6 @@ import tempfile
 import threading
 import atexit
 import warnings
-from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Pattern
 
@@ -61,11 +60,11 @@ from utils.image_store import (
     load_identity_image,
     write_identity_image_from_base64,
 )
-from utils.io_atomic import AtomicWriteError, atomic_append_lines, atomic_write_text
+from utils.io_atomic import AtomicWriteError, atomic_append_lines
 from utils.memory_lock import IdentityLock, IdentityLockError, probe_lock_path
 from utils.memory_orchestrator import MemoryOrchestrator
 from utils.memory_settings import load_identity_settings
-from utils.memory_paths import get_bot_memory_dir, get_bot_profile_export_path
+from utils.memory_paths import get_bot_memory_dir
 from utils.system import get_processing_sound_volume, set_processing_sound_volume
 
 
@@ -509,6 +508,11 @@ def parse_args():
         "--tts-providers",
         help="JSON list of provider entries to pass directly to onnxruntime (advanced).",
     )
+    p.add_argument(
+        "--theme",
+        choices=["light", "dark"],
+        default=os.getenv("CTRLSPK_CHAT_THEME", os.getenv("BOT_THEME", "dark")),
+    )
     p.add_argument("--test-wav", help="Path to a WAV file to process for testing (bypasses VAD/mic).")
     return p.parse_args()
 
@@ -553,6 +557,9 @@ def save_history(memory_path: Optional[Path], entries: List[dict]) -> None:
 
 def main():
     args = parse_args()
+    chat_theme = (args.theme or "dark").lower()
+    if chat_theme not in {"light", "dark"}:
+        chat_theme = "dark"
     profile, config = resolve_identity(args)
 
     _ensure_identity_lock(profile.name)
@@ -680,6 +687,7 @@ def main():
         deaf_icon_path=DEAF_ICON_PATH,
         speak_icon_path=SPEAK_ICON_PATH,
         mute_icon_path=MUTE_ICON_PATH,
+        theme=chat_theme,
     )
     chat_window.set_vad_enabled(False)
     chat_window.set_tts_enabled(True)
@@ -712,53 +720,40 @@ def main():
     shutdown_complete = threading.Event()
     failsafe_timer: Optional[threading.Timer] = None
 
+    def _position_logo() -> None:
+        if not tts_active.is_set():
+            return
+
+        def _apply() -> None:
+            transcript = chat_window.transcript_widget()
+            if not chat_window.isVisible() or chat_window.isMinimized():
+                animator.set_base_scale(animator.initial_scale)
+                animator.move_to_screen_corner()
+            elif transcript is not None:
+                animator.set_base_scale(animator.initial_scale * 0.5)
+                animator.anchor_to_widget_bottom_right(transcript, margin=16)
+            else:
+                animator.set_base_scale(animator.initial_scale)
+                animator.move_to_screen_corner()
+            animator.show_widget()
+
+        chat_window.invoke(_apply)
+
     def _ensure_animator_visibility() -> None:
         if tts_active.is_set():
-            animator.show_widget()
+            _position_logo()
         else:
-            animator.hide_widget()
+            chat_window.invoke(animator.hide_widget)
+
+    def _recenter_logo() -> None:
+        if not tts_active.is_set():
+            return
+        _position_logo()
 
     def _set_animator_amplitude(level: float) -> None:
         if not tts_active.is_set():
             level = 0.0
         animator.update_amplitude(level)
-
-    def _export_profile_snapshot() -> None:
-        orchestrator = _memory_orchestrator
-        if orchestrator is None:
-            chat_window.append_status_message("Memory", "Profile export unavailable; memory offline.")
-            return
-        try:
-            slots = orchestrator.vector_store.read_all_profile(orchestrator.profile_user_id)
-        except Exception:
-            logger.exception("Failed to read profile slots for export")
-            chat_window.append_status_message("Memory", "Failed to read profile slots.")
-            return
-        payload = {
-            "identity": profile.name,
-            "user_id": orchestrator.profile_user_id,
-            "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            "slots": [
-                {
-                    "attribute": (entry.get("metadata") or {}).get("attribute"),
-                    "value": (entry.get("metadata") or {}).get("value"),
-                    "status": (entry.get("metadata") or {}).get("status", "current"),
-                }
-                for entry in slots
-                if isinstance(entry, dict)
-            ],
-        }
-        export_path = get_bot_profile_export_path(profile.name)
-        try:
-            export_path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_text(export_path, json.dumps(payload, indent=2, ensure_ascii=False))
-        except Exception:
-            logger.exception("Failed to write profile snapshot")
-            chat_window.append_status_message("Memory", "Failed to export profile snapshot.")
-            return
-        chat_window.append_status_message("Memory", f"Profile exported to {export_path}")
-
-    chat_window.export_profile_requested.connect(_export_profile_snapshot)
 
     def on_speech_detected(raw_bytes: bytes) -> None:
         nonlocal vad_listener
@@ -888,6 +883,7 @@ def main():
     chat_window.send_text.connect(_on_text_submitted)
     chat_window.vad_toggle_requested.connect(_on_vad_toggle_requested)
     chat_window.tts_toggle_requested.connect(_on_tts_toggle_requested)
+    chat_window.geometry_changed.connect(_recenter_logo)
     chat_window.closed.connect(lambda: shutdown_requested.set())
 
     _enable_tts()
@@ -1538,6 +1534,14 @@ def main():
                     )
                     with processing_lock:
                         _handle_conversation_start(target_identity)
+            elif command == "set_theme":
+                requested_theme = str(payload.get("theme") or "").strip().lower()
+                if requested_theme:
+                    logger.debug(
+                        "stdin control command received: set_theme %s",
+                        requested_theme,
+                    )
+                    chat_window.set_theme_async(requested_theme)
             elif command == "goodbye":
                 target_identity = str(payload.get("identity") or "")
                 if target_identity:

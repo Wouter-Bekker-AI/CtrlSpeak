@@ -27,6 +27,7 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "device_preference": "cpu",
     "input_device": None,
     "model_name": "small",
+    "chat_theme": "dark",
     "use_langgraph_memory_orchestrator": False,
 }
 
