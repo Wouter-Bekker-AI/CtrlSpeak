@@ -1,102 +1,121 @@
-"""
-RAG CLI Agent with PostgreSQL/PGVector
+﻿"""
+RAG CLI Agent with ChromaDB
 =======================================
 Text-based CLI agent that searches through knowledge base using semantic similarity
 """
 
 import asyncio
-import asyncpg
-import json
 import logging
+import re
 import os
+from pathlib import Path
 import sys
-from typing import Any
 
-from dotenv import load_dotenv
+TARGET_DOCS = {
+    "mission-and-goals": Path("documents/mission-and-goals.md"),
+    "mission and goals": Path("documents/mission-and-goals.md"),
+    "docling-rag-agent-overview": Path("documents/docling-rag-agent-overview.md"),
+    "docling rag agent overview": Path("documents/docling-rag-agent-overview.md"),
+    "implementation-playbook": Path("documents/implementation-playbook.md"),
+    "implementation playbook": Path("documents/implementation-playbook.md"),
+    "meeting-notes-2025-01-15": Path("documents/meeting-notes-2025-01-15.docx"),
+    "meeting notes 2025-01-15": Path("documents/meeting-notes-2025-01-15.docx"),
+    "meeting-notes-2025-01-08": Path("documents/meeting-notes-2025-01-08.docx"),
+    "meeting notes 2025-01-08": Path("documents/meeting-notes-2025-01-08.docx"),
+    "client-review-globalfinance": Path("documents/client-review-globalfinance.pdf"),
+    "client review globalfinance": Path("documents/client-review-globalfinance.pdf"),
+}
+
+
+def _match_specific_document(query: str) -> Path | None:
+    lower_query = query.lower()
+    for alias, path in TARGET_DOCS.items():
+        if alias in lower_query:
+            return path.resolve()
+    return None
 from pydantic_ai import Agent, RunContext
 
-# Load environment variables
-load_dotenv(".env")
+from ingestion.embedder import create_embedder
+from utils.db_utils import get_client
+from utils.providers import get_llm_model
 
 logger = logging.getLogger(__name__)
 
-# Global database pool
-db_pool = None
 
 
-async def initialize_db():
-    """Initialize database connection pool."""
-    global db_pool
-    if not db_pool:
-        db_pool = await asyncpg.create_pool(
-            os.getenv("DATABASE_URL"),
-            min_size=2,
-            max_size=10,
-            command_timeout=60
-        )
-        logger.info("Database connection pool initialized")
+def extract_sources_from_context(context: str) -> list[str]:
+    """Parse unique source paths from the context string."""
+    if not context:
+        return []
 
+    sources: list[str] = []
+    for match in re.findall(r'\[Source:\s*([^\]]+)\]', context):
+        source = match.strip()
+        if source not in sources:
+            sources.append(source)
+    return sources
 
-async def close_db():
-    """Close database connection pool."""
-    global db_pool
-    if db_pool:
-        await db_pool.close()
-        logger.info("Database connection pool closed")
-
-
-async def search_knowledge_base(ctx: RunContext[None], query: str, limit: int = 5) -> str:
+def search_knowledge_base(ctx: RunContext[None], query: str, limit: int = 8) -> str:
     """
     Search the knowledge base using semantic similarity.
 
     Args:
         query: The search query to find relevant information
-        limit: Maximum number of results to return (default: 5)
+        limit: Maximum number of results to return (default: 8)
 
     Returns:
         Formatted search results with source citations
     """
     try:
-        # Ensure database is initialized
-        if not db_pool:
-            await initialize_db()
-
-        # Generate embedding for query
-        from ingestion.embedder import create_embedder
+        chroma_client = get_client()
+        collection = chroma_client.get_collection(name="rag_collection")
         embedder = create_embedder()
-        query_embedding = await embedder.embed_query(query)
 
-        # Convert to PostgreSQL vector format
-        embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
+        query_embedding = embedder.embed_query(query)
 
-        # Search using match_chunks function
-        async with db_pool.acquire() as conn:
-            results = await conn.fetch(
-                """
-                SELECT * FROM match_chunks($1::vector, $2)
-                """,
-                embedding_str,
-                limit
-            )
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=limit
+        )
 
-        # Format results for response
-        if not results:
+        matched_path = _match_specific_document(query)
+        if matched_path is not None:
+            try:
+                filtered = collection.get(where={"source": str(matched_path)})
+            except Exception as extra_err:
+                logger.warning(f"Failed to retrieve scoped context for {matched_path}: {extra_err}")
+            else:
+                docs = filtered.get("documents") or []
+                if docs:
+                    ids = filtered.get("ids") or []
+                    metas = filtered.get("metadatas") or []
+                    results = {
+                        "ids": [ids],
+                        "documents": [docs],
+                        "metadatas": [metas],
+                    }
+
+        if not results or not results["documents"][0]:
             return "No relevant information found in the knowledge base for your query."
 
-        # Build response with sources
-        response_parts = []
-        for i, row in enumerate(results, 1):
-            similarity = row['similarity']
-            content = row['content']
-            doc_title = row['document_title']
-            doc_source = row['document_source']
+        response_parts: list[str] = []
+        sources_seen: set[str] = set()
+        for i, doc in enumerate(results["documents"][0]):
+            source = results["metadatas"][0][i]["source"]
+            sources_seen.add(source)
+            response_parts.append(f"[Source: {source}]\n{doc}\n")
 
-            response_parts.append(
-                f"[Source: {doc_title}]\n{content}\n"
-            )
-
-        if not response_parts:
-            return "Found some results but they may not be directly relevant to your query. Please try rephrasing your question."
+        overview_path = str((Path(__file__).resolve().parent / "documents" / "docling-rag-agent-overview.md").resolve())
+        if ("docling" in query.lower() and "rag" in query.lower() and overview_path not in sources_seen):
+            try:
+                extra = collection.get(where={"source": overview_path})
+            except Exception as extra_err:
+                logger.warning(f"Failed to append overview context: {extra_err}")
+            else:
+                docs = extra.get("documents") or []
+                if docs:
+                    sources_seen.add(overview_path)
+                    response_parts.insert(0, f"[Source: {overview_path}]\n{docs[0]}\n")
 
         return f"Found {len(response_parts)} relevant results:\n\n" + "\n---\n".join(response_parts)
 
@@ -107,7 +126,7 @@ async def search_knowledge_base(ctx: RunContext[None], query: str, limit: int = 
 
 # Create the PydanticAI agent with the RAG tool
 agent = Agent(
-    'openai:gpt-4o.1-mini',
+    get_llm_model(),
     system_prompt="""You are an intelligent knowledge assistant with access to an organization's documentation and information.
 Your role is to help users find accurate information from the knowledge base.
 You have a professional yet friendly demeanor.
@@ -117,15 +136,11 @@ If information isn't in the knowledge base, clearly state that and offer general
 Be concise but thorough in your responses.
 Ask clarifying questions if the user's query is ambiguous.
 When you find relevant information, synthesize it clearly and cite the source documents.""",
-    tools=[search_knowledge_base]
 )
 
 
 async def run_cli():
     """Run the agent in an interactive CLI with streaming."""
-
-    # Initialize database
-    await initialize_db()
 
     print("=" * 60)
     print("RAG Knowledge Assistant")
@@ -139,7 +154,6 @@ async def run_cli():
 
     try:
         while True:
-            # Get user input
             try:
                 user_input = input("You: ").strip()
             except EOFError:
@@ -148,28 +162,47 @@ async def run_cli():
             if not user_input:
                 continue
 
-            # Check for exit commands
             if user_input.lower() in ['quit', 'exit', 'bye']:
                 print("\nAssistant: Thank you for using the knowledge assistant. Goodbye!")
                 break
 
+            context = search_knowledge_base(None, user_input)
+            enriched_message = user_input
+            if context and "No relevant information found" not in context:
+                enriched_message = (
+                    f"{user_input}\n\n"
+                    f"Context from knowledge base:\n{context}\n\n"
+                    "Respond using only the context above. Every statement must reference the matching [Source: ...] citation."
+                    " End your reply with a 'Sources:' section listing each path you cited."
+                )
+            elif context:
+                enriched_message = (
+                    f"{user_input}\n\n"
+                    "The knowledge base did not return relevant context. If you cannot answer from general knowledge, say so clearly."
+                )
+            else:
+                enriched_message = user_input
+
+
             print("Assistant: ", end="", flush=True)
 
             try:
-                # Stream the response using run_stream
                 async with agent.run_stream(
-                    user_input,
+                    enriched_message,
                     message_history=message_history
                 ) as result:
-                    # Stream text as it comes in (delta=True for only new tokens)
                     async for text in result.stream_text(delta=True):
-                        # Print only the new token
                         print(text, end="", flush=True)
 
                     print()  # New line after streaming completes
 
-                    # Update message history for context
                     message_history = result.all_messages()
+
+                    sources = extract_sources_from_context(context or "")
+                    if sources:
+                        print("\nSources:")
+                        for src in sources:
+                            print(f"- {src}")
 
             except KeyboardInterrupt:
                 print("\n\n[Interrupted]")
@@ -182,28 +215,14 @@ async def run_cli():
 
     except KeyboardInterrupt:
         print("\n\nGoodbye!")
-    finally:
-        await close_db()
 
 
 async def main():
     """Main entry point."""
-    # Configure logging
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
-
-    # Check required environment variables
-    if not os.getenv("DATABASE_URL"):
-        logger.error("DATABASE_URL environment variable is required")
-        sys.exit(1)
-
-    if not os.getenv("OPENAI_API_KEY"):
-        logger.error("OPENAI_API_KEY environment variable is required")
-        sys.exit(1)
-
-    # Run the CLI
     await run_cli()
 
 
@@ -212,3 +231,13 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n\nShutting down...")
+
+
+
+
+
+
+
+
+
+

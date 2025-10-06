@@ -1,0 +1,8 @@
+pydantic-ai
+chromadb
+sentence-transformers
+openai-whisper
+python-dotenv
+docling[vlm]
+litellm
+uv

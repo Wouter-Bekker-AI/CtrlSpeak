@@ -88,7 +88,7 @@ class DoclingHybridChunker:
         self.config = config
 
         # Initialize tokenizer for token-aware chunking
-        model_id = "sentence-transformers/all-MiniLM-L6-v2"
+        model_id = "jinaai/jina-embeddings-v2-base-en"
         logger.info(f"Initializing tokenizer: {model_id}")
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
 
