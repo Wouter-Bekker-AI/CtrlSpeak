@@ -7,7 +7,7 @@ Both flavours support Windows 10/11, enforce a single running instance, expose a
 ## Repository Layout
 
 - `main.py` – application entry point.
-- `background_agents/` – orchestrator-managed services that run alongside Chat with Bot. These agents refresh ingested documentation, stage current date/time snapshots, filter `<think>` plans, and perform other maintenance tasks automatically whenever the LangGraph workflow requires them.
+- `background_agents/` – orchestrator-managed services that run alongside Chat with Bot. These agents stage current date/time snapshots, filter `<think>` plans, and perform other maintenance tasks automatically. The former documentation ingestion workflow is paused while we prepare the Docling RAG integration.
 - `assets/` – static resources such as the tray icon (`icon.ico`), the welcome video (`TrueAI_Intro_Video.mp4`), the fun-fact rotation list (`fun_facts.txt`), and the processing chime (`loading.wav`).
 - `utils/` – implementation modules (GUI, models, networking, configuration helpers, etc.).
 - `utils/build_exe.py` – helper script that runs PyInstaller with the correct data files.
@@ -94,7 +94,7 @@ Vector memory lives in `chroma/`, which is backed by a single-writer Chroma coll
 | `vector_ttl_days` | `null` | Optional time-to-live per embedding (in days). |
 | `pii_redaction` | `false` | Redacts light PII (emails, phone numbers, IDs) before embedding. |
 
-Each Chat with Bot turn flows through a LangGraph orchestrator (`use_langgraph_memory_orchestrator` setting) that sequences retrieval → planning → tool execution → LLM → persistence. Retrieval no-ops when the store is empty or below the similarity threshold, and asynchronous embedding/upsert keeps TTS playback responsive. Per-turn traces and a CSV metrics feed (`retrieval_hits`, `avg_similarity`, `persist_latency_ms`, `evictions`, `lock_wait_ms`) accumulate under `traces/` for observability.
+When enabled via the `use_langgraph_memory_orchestrator` setting, each Chat with Bot turn flows through a LangGraph orchestrator that sequences retrieval → planning → tool execution → LLM → persistence. Documentation retrieval is currently disabled while we migrate to the Docling RAG agent, so the orchestrator focuses on structured conversation handling and Goose tooling. Per-turn traces and a CSV metrics feed (`retrieval_hits`, `avg_similarity`, `persist_latency_ms`, `evictions`, `lock_wait_ms`) accumulate under `traces/` for observability whenever the orchestrator is active.
 
 To avoid corruption, CtrlSpeak acquires `${data_root}/.locks/<identity>.lock` before launching SocialRobot. If another process already owns the identity, the launcher prints “Identity in use. Close the running session before starting another.” and aborts. The management window’s **Clear Bot Memory** action targets the AppData-backed directories, deleting the JSONL log (and rotated archives) plus the `screenshots/`, `chroma/`, and `traces/` folders so packaged builds stay read-only.
 

@@ -111,6 +111,7 @@ def _install_runtime_stubs() -> None:
         bot_stub.stop_bot = lambda: None
         bot_stub.request_goodbye = lambda **_kwargs: True
         bot_stub.clear_identity_memory = lambda *_args, **_kwargs: None
+        bot_stub.update_bot_theme = lambda *_args, **_kwargs: True
         bot_stub.list_available_identities = lambda: []
         bot_stub.get_identity_settings = lambda identity: {
             "store_vector_memory": True,
