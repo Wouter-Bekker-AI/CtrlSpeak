@@ -1,349 +1,101 @@
 # Docling RAG Agent
 
-An intelligent text-based CLI agent that provides conversational access to a knowledge base stored in PostgreSQL with PGVector. Uses RAG (Retrieval Augmented Generation) to search through embedded documents and provide contextual, accurate responses with source citations. Supports multiple document formats including audio files with Whisper transcription.
+This directory contains a standalone retrieval-augmented generation (RAG) workflow that powers CtrlSpeak's documentation helper. It ingests local documents with [Docling](https://github.com/docling-ai/docling), indexes them in a persistent [ChromaDB](https://www.trychroma.com/) store, and serves responses through a streaming CLI backed by an Ollama-hosted language model.
 
-## 🎓 New to Docling?
+## Highlights
 
-**Start with the tutorials!** Check out the [`docling_basics/`](./docling_basics/) folder for progressive examples that teach Docling fundamentals:
+- 💬 **Streaming CLI agent** built with `pydantic-ai`.
+- 🔍 **Semantic retrieval** over a local Chroma collection.
+- 🧠 **SentenceTransformer embeddings** (`jinaai/jina-embeddings-v2-base-en`).
+- 🎙️ **Offline Whisper transcription** for `.mp3` sources.
+- 📁 **Hybrid Docling chunking** for PDFs, Office docs, HTML, Markdown, and text files.
+- ♻️ **Local persistence** under `chroma_storage/` (configurable via `CHROMA_PERSIST_DIR`).
+- ⚙️ **Ollama integration** through the OpenAI-compatible HTTP API (default model `gemma3:1b`).
 
-1. **Simple PDF Conversion** - Basic document processing
-2. **Multiple Format Support** - PDF, Word, PowerPoint handling
-3. **Audio Transcription** - Speech-to-text with Whisper
-4. **Hybrid Chunking** - Intelligent chunking for RAG systems
+## Requirements
 
-These tutorials provide the foundation for understanding how this full RAG agent works. [**→ Go to Docling Basics**](./docling_basics/)
+- Python 3.9 or later.
+- A running [Ollama](https://ollama.com/) instance with the desired model pulled locally (for example `ollama pull gemma3:1b`).
+- System packages required by `whisper`, `chromadb`, and `sentence-transformers` (installing the Python requirements will prompt for the necessary wheels and optional GPU support).
 
-## Features
-
-- 💬 Interactive text-based CLI with streaming responses
-- 🔍 Semantic search through vector-embedded documents
-- 📚 Context-aware responses using RAG pipeline
-- 🎯 Source citation for all information provided
-- 🔄 Real-time streaming text output as tokens arrive
-- 💾 PostgreSQL/PGVector for scalable knowledge storage
-- 🧠 Conversation history maintained across turns
-- 🎙️ Audio transcription with Whisper ASR (MP3 files)
-
-## Prerequisites
-
-- Python 3.9 or later
-- PostgreSQL with PGVector extension (Supabase, Neon, self-hosted Postgres, etc.)
-- API Keys:
-  - OpenAI API key (for embeddings and LLM)
-
-## Quick Start
-
-### 1. Install Dependencies
+Install dependencies into the active CtrlSpeak virtual environment (or any Python environment of your choice):
 
 ```bash
-# Install dependencies using UV
-uv sync
+pip install -r third_party/docling-rag-agent/requirements.txt
 ```
 
-### 2. Set Up Environment Variables
+> The root `requirements.txt` already pins these libraries for CtrlSpeak itself, so you only need the command above when running the agent in isolation.
 
-Copy `.env.example` to `.env` and fill in your credentials:
+## Environment variables
+
+These knobs are optional but allow you to tune the runtime:
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `OLLAMA_BASE_URL` | Base URL for Ollama's OpenAI-compatible endpoint. The agent appends `/v1` automatically when missing. | `http://localhost:11434` |
+| `CHROMA_PERSIST_DIR` | Directory to store the Chroma collection. | `<repo>/third_party/docling-rag-agent/chroma_storage` |
+
+## Ingesting documents
+
+Place source files in the `documents/` directory (subfolders are allowed). Supported formats include Markdown, plain text, PDF, Word, PowerPoint, Excel, HTML, and MP3 audio.
+
+Run the ingestion pipeline to convert, chunk, and embed your corpus:
 
 ```bash
-cp .env.example .env
+python -m ingestion.ingest
 ```
 
-Required variables:
-- `DATABASE_URL` - PostgreSQL connection string with PGVector extension
-  - Example: `postgresql://user:password@localhost:5432/dbname`
-  - Supabase: `postgresql://postgres.[project-ref]:[password]@aws-0-[region].pooler.supabase.com:5432/postgres`
-  - Neon: `postgresql://[user]:[password]@[endpoint].neon.tech/[dbname]`
+Useful flags:
 
-- `OPENAI_API_KEY` - OpenAI API key for embeddings and LLM
-  - Get from: https://platform.openai.com/api-keys
+- `--documents <path>` – point at a different source directory.
+- `--no-clean` – append to the existing `rag_collection` instead of deleting it first.
+- `--chunk-size` / `--chunk-overlap` – control chunking granularity.
+- `--no-semantic` – disable Docling's semantic chunking heuristics.
+- `--verbose` – enable debug logging for conversion and embedding.
 
-Optional variables:
-- `LLM_CHOICE` - OpenAI model to use (default: `gpt-4o-mini`)
-- `EMBEDDING_MODEL` - Embedding model (default: `text-embedding-3-small`)
+The pipeline automatically loads a local Whisper model for MP3 transcription and a SentenceTransformer model for embeddings. Ingestion progress and summary statistics are printed to the console.
 
-### 3. Configure Database
+To reset the index completely, delete the `chroma_storage/` directory (or whichever path you set via `CHROMA_PERSIST_DIR`) before rerunning the pipeline.
 
-You must set up your PostgreSQL database with the PGVector extension and create the required schema:
+## Running the CLI agent
 
-1. **Enable PGVector extension** in your database (most cloud providers have this pre-installed)
-   ```sql
-   CREATE EXTENSION IF NOT EXISTS vector;
-   ```
-
-2. **Run the schema file** to create tables and functions:
-   ```bash
-   # In the SQL editor in Supabase/Neon, run:
-   sql/schema.sql
-
-   # Or using psql
-   psql $DATABASE_URL < sql/schema.sql
-   ```
-
-The schema file (`sql/schema.sql`) creates:
-- `documents` table for storing original documents with metadata
-- `chunks` table for text chunks with 1536-dimensional embeddings
-- `match_chunks()` function for vector similarity search
-
-### 4. Ingest Documents
-
-Add your documents to the `documents/` folder. **Multiple formats supported via Docling**:
-
-**Supported Formats:**
-- 📄 **PDF** (`.pdf`)
-- 📝 **Word** (`.docx`, `.doc`)
-- 📊 **PowerPoint** (`.pptx`, `.ppt`)
-- 📈 **Excel** (`.xlsx`, `.xls`)
-- 🌐 **HTML** (`.html`, `.htm`)
-- 📋 **Markdown** (`.md`, `.markdown`)
-- 📃 **Text** (`.txt`)
-- 🎵 **Audio** (`.mp3`) - transcribed with Whisper
+Launch the interactive CLI once documents are ingested:
 
 ```bash
-# Ingest all supported documents in the documents/ folder
-# NOTE: By default, this CLEARS existing data before ingestion
-uv run python -m ingestion.ingest --documents documents/
-
-# Adjust chunk size (default: 1000)
-uv run python -m ingestion.ingest --documents documents/ --chunk-size 800
+python cli.py
 ```
 
-**⚠️ Important:** The ingestion process **automatically deletes all existing documents and chunks** from the database before adding new documents. This ensures a clean state and prevents duplicate data.
+The agent:
 
-The ingestion pipeline will:
-1. **Auto-detect file type** and use Docling for PDFs, Office docs, HTML, and audio
-2. **Transcribe audio files** using Whisper Turbo ASR with timestamps
-3. **Convert to Markdown** for consistent processing
-4. **Split into semantic chunks** with configurable size
-5. **Generate embeddings** using OpenAI
-6. **Store in PostgreSQL** with PGVector for similarity search
+1. Embeds each user query with the shared SentenceTransformer model.
+2. Retrieves the top matches from Chroma (or a targeted document when the prompt references it explicitly).
+3. Streams the synthesized response from the Ollama-backed LLM with inline source attributions.
+4. Maintains a local conversation history so follow-up prompts remain contextual.
 
-### 5. Run the Agent
+Use `help`, `stats`, or `clear` inside the CLI for built-in commands. Type `exit`/`quit` (or press `Ctrl+C`) to leave the session.
 
-```bash
-# Run the Docling RAG Agent CLI
-uv run python cli.py
-```
-
-**Features:**
-- 🎨 **Colored output** for better readability
-- 📊 **Session statistics** (`stats` command)
-- 🔄 **Clear history** (`clear` command)
-- 💡 **Built-in help** (`help` command)
-- ✅ **Database health check** on startup
-- 🔍 **Real-time streaming** responses
-
-**Available commands:**
-- `help` - Show help information
-- `clear` - Clear conversation history
-- `stats` - Show session statistics
-- `exit` or `quit` - Exit the CLI
-
-**Example interaction:**
-```
-============================================================
-🤖 Docling RAG Knowledge Assistant
-============================================================
-AI-powered document search with streaming responses
-Type 'exit', 'quit', or Ctrl+C to exit
-Type 'help' for commands
-============================================================
-
-✓ Database connection successful
-✓ Knowledge base ready: 20 documents, 156 chunks
-Ready to chat! Ask me anything about the knowledge base.
-
-You: What topics are covered in the knowledge base?
-🤖 Assistant: Based on the knowledge base, the main topics include...
-
-────────────────────────────────────────────────────────────
-You: quit
-👋 Thank you for using the knowledge assistant. Goodbye!
-```
-
-## Architecture
-
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│   CLI User  │────▶│  RAG Agent   │────▶│ PostgreSQL  │
-│   (Input)   │     │ (PydanticAI) │     │  PGVector   │
-└─────────────┘     └──────────────┘     └─────────────┘
-                           │
-                    ┌──────┴──────┐
-                    │             │
-              ┌─────▼────┐  ┌────▼─────┐
-              │  OpenAI  │  │  OpenAI  │
-              │   LLM    │  │Embeddings│
-              └──────────┘  └──────────┘
-```
-
-## Audio Transcription Feature
-
-Audio files are automatically transcribed using **OpenAI Whisper Turbo** model:
-
-**How it works:**
-1. When ingesting audio files (MP3 supported currently), Docling uses Whisper ASR
-2. Whisper generates accurate transcriptions with timestamps
-3. Transcripts are formatted as markdown with time markers
-4. Audio content becomes fully searchable through the RAG system
-
-**Benefits:**
-- 🎙️ **Speech-to-text**: Convert podcasts, interviews, lectures into searchable text
-- ⏱️ **Timestamps**: Track when specific content was mentioned
-- 🔍 **Semantic search**: Find audio content by topic or keywords
-- 🤖 **Fully automatic**: Drop audio files in `documents/` folder and run ingestion
-
-**Model details:**
-- Model: `openai/whisper-large-v3-turbo`
-- Optimized for: Speed and accuracy balance
-- Languages: Multilingual support (90+ languages)
-- Output format: Markdown with timestamps like `[time: 0.0-4.0] Transcribed text here`
-
-**Example transcript format:**
-```markdown
-[time: 0.0-4.0] Welcome to our podcast on AI and machine learning.
-[time: 5.28-9.96] Today we'll discuss retrieval augmented generation systems.
-```
-
-## Key Components
-
-### RAG Agent
-
-The main agent (`rag_agent.py`) that:
-- Manages database connections with connection pooling
-- Handles interactive CLI with streaming responses
-- Performs knowledge base searches via RAG
-- Tracks conversation history for context
-
-### search_knowledge_base Tool
-
-Function tool registered with the agent that:
-- Generates query embeddings using OpenAI
-- Searches using PGVector cosine similarity
-- Returns top-k most relevant chunks
-- Formats results with source citations
-
-Example tool definition:
-```python
-async def search_knowledge_base(
-    ctx: RunContext[None],
-    query: str,
-    limit: int = 5
-) -> str:
-    """Search the knowledge base using semantic similarity."""
-    # Generate embedding for query
-    # Search PostgreSQL with PGVector
-    # Format and return results
-```
-
-### Database Schema
-
-- `documents`: Stores original documents with metadata
-  - `id`, `title`, `source`, `content`, `metadata`, `created_at`, `updated_at`
-
-- `chunks`: Stores text chunks with vector embeddings
-  - `id`, `document_id`, `content`, `embedding` (vector(1536)), `chunk_index`, `metadata`, `token_count`
-
-- `match_chunks()`: PostgreSQL function for vector similarity search
-  - Uses cosine similarity (`1 - (embedding <=> query_embedding)`)
-  - Returns chunks with similarity scores above threshold
-
-## Performance Optimization
-
-### Database Connection Pooling
-```python
-db_pool = await asyncpg.create_pool(
-    DATABASE_URL,
-    min_size=2,
-    max_size=10,
-    command_timeout=60
-)
-```
-
-### Embedding Cache
-The embedder includes built-in caching for frequently searched queries, reducing API calls and latency.
-
-### Streaming Responses
-Token-by-token streaming provides immediate feedback to users while the LLM generates responses:
-```python
-async with agent.run_stream(user_input, message_history=history) as result:
-    async for text in result.stream_text(delta=False):
-        print(f"\rAssistant: {text}", end="", flush=True)
-```
-
-## Docker Deployment
-
-### Using Docker Compose
-
-```bash
-# Start all services
-docker-compose up -d
-
-# Ingest documents
-docker-compose --profile ingestion up ingestion
-
-# View logs
-docker-compose logs -f rag-agent
-```
-
-## API Reference
-
-### search_knowledge_base Tool
-
-```python
-async def search_knowledge_base(
-    ctx: RunContext[None],
-    query: str,
-    limit: int = 5
-) -> str:
-    """
-    Search the knowledge base using semantic similarity.
-
-    Args:
-        query: The search query to find relevant information
-        limit: Maximum number of results to return (default: 5)
-
-    Returns:
-        Formatted search results with source citations
-    """
-```
-
-### Database Functions
-
-```sql
--- Vector similarity search
-SELECT * FROM match_chunks(
-    query_embedding::vector(1536),
-    match_count INT,
-    similarity_threshold FLOAT DEFAULT 0.7
-)
-```
-
-Returns chunks with:
-- `id`: Chunk UUID
-- `content`: Text content
-- `embedding`: Vector embedding
-- `similarity`: Cosine similarity score (0-1)
-- `document_title`: Source document title
-- `document_source`: Source document path
-
-## Project Structure
+## Project structure
 
 ```
 docling-rag-agent/
-├── cli.py                   # Enhanced CLI with colors and features (recommended)
-├── rag_agent.py             # Basic CLI agent with PydanticAI
+├── cli.py                 # Streaming CLI entry point
+├── rag_agent.py           # Minimal agent example without CLI extras
 ├── ingestion/
-│   ├── ingest.py            # Document ingestion pipeline
-│   ├── embedder.py          # Embedding generation with caching
-│   └── chunker.py           # Document chunking logic
+│   ├── ingest.py          # End-to-end ingestion pipeline
+│   ├── chunker.py         # Hybrid/semantic chunking utilities
+│   └── embedder.py        # SentenceTransformer wrapper
 ├── utils/
-│   ├── providers.py         # OpenAI model/client configuration
-│   ├── db_utils.py          # Database connection pooling
-│   └── models.py            # Pydantic models for config
-├── sql/
-│   └── schema.sql           # PostgreSQL schema with PGVector
-├── documents/               # Sample documents for ingestion
-├── pyproject.toml           # Project dependencies
-├── .env.example             # Environment variables template
-└── README.md                # This file
+│   ├── db_utils.py        # Chroma persistence helpers
+│   └── providers.py       # Ollama provider/model helpers
+├── documents/             # Sample source documents
+├── docling_basics/        # Introductory Docling tutorials
+├── requirements.txt       # Standalone dependency list
+├── pyproject.toml         # Optional project metadata for uv/pip
+└── uv.lock                # Dependency lock generated by uv
 ```
+
+## Next steps
+
+- Refresh the `documents/` folder with your own content and rerun ingestion as the knowledge base evolves.
+- Swap in a different Ollama model by exporting `OLLAMA_BASE_URL` or editing the default in `utils/providers.py`.
+- Integrate the CLI or `rag_agent.Agent` into other CtrlSpeak services to reuse the shared Chroma index.
