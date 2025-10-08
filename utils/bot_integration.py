@@ -14,7 +14,6 @@ from urllib.parse import urlparse, urlunparse
 import requests
 
 from background_agents.datetime_memory_agent import refresh_datetime_memory
-from background_agents.document_memory_agent import refresh_document_memory
 from utils.config_paths import get_logger, settings, settings_lock
 from utils.system import (
     CLIENT_ONLY_BUILD,
@@ -63,34 +62,28 @@ _active_identity: Optional[str] = None
 _identity_lock: Optional[IdentityLock] = None
 
 _OLLAMA_HARDWARE_CHOICES = {"cpu_only", "cpu_and_gpu", "gpu_only"}
-_DOC_REFRESH_IDENTITIES = {"vision", "reception", "einstein"}
-_PRELAUNCH_REFRESHERS = (
-    ("documentation memory", refresh_document_memory),
-    ("date/time memory", refresh_datetime_memory),
-)
-
-
-def _should_refresh_docs_on_start(identity: str) -> bool:
-    return identity.strip().lower() in _DOC_REFRESH_IDENTITIES
 
 
 def _prepare_identity_memories(identity: str) -> bool:
-    for description, helper in _PRELAUNCH_REFRESHERS:
-        try:
-            if not helper(identity, reason="startup"):
-                logger.error(
-                    "Aborting launch because %s preparation failed for %s",
-                    description,
-                    identity,
-                )
-                return False
-        except Exception:
-            logger.exception(
-                "Unexpected error while preparing %s for %s",
-                description,
+    """Prepare lightweight background memories for ``identity``.
+
+    Documentation ingestion has been retired, so the only remaining
+    prelaunch task is ensuring the temporal snapshot stays fresh.
+    """
+
+    try:
+        if not refresh_datetime_memory(identity, reason="startup"):
+            logger.error(
+                "Aborting launch because date/time preparation failed for %s",
                 identity,
             )
             return False
+    except Exception:
+        logger.exception(
+            "Unexpected error while preparing date/time memory for %s",
+            identity,
+        )
+        return False
     return True
 
 
@@ -786,10 +779,9 @@ def start_bot(
     except Exception:
         logger.debug("Failed to record lock wait metric", exc_info=True)
 
-    if _should_refresh_docs_on_start(target_identity):
-        if not _prepare_identity_memories(target_identity):
-            _release_identity_lock()
-            return False
+    if not _prepare_identity_memories(target_identity):
+        _release_identity_lock()
+        return False
 
     if _identity_requires_text_cleaning(target_identity, identities_dir):
         if _TTS_PREPROCESSOR_DIR.exists():
@@ -847,32 +839,16 @@ def start_bot(
         env["BOT_IDENTITIES_DIR"] = identities_dir
 
     load_settings()
-    forced_langgraph = False
     theme_updated = False
     theme_pref = "dark"
     with settings_lock:
         use_langgraph = bool(settings.get("use_langgraph_memory_orchestrator", False))
-        if _should_refresh_docs_on_start(target_identity) and not use_langgraph:
-            use_langgraph = True
-            settings["use_langgraph_memory_orchestrator"] = True
-            forced_langgraph = True
         theme_pref = str(settings.get("chat_theme", "dark") or "dark").lower()
         if theme_pref not in {"light", "dark"}:
             theme_pref = "dark"
             settings["chat_theme"] = theme_pref
             theme_updated = True
-    if forced_langgraph:
-        try:
-            save_settings()
-            logger.info(
-                "Enabled LangGraph memory orchestrator for %s identity to guarantee documentation retrieval.",
-                target_identity,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to persist LangGraph orchestrator setting for %s", target_identity
-            )
-    elif theme_updated:
+    if theme_updated:
         try:
             save_settings()
         except Exception:
