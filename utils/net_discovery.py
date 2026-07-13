@@ -15,6 +15,66 @@ logger = get_logger(__name__)
 DISCOVERY_INTERVAL_SECONDS = 5.0
 DISCOVERY_ENTRY_TTL = 15.0
 SERVER_BROADCAST_SIGNATURE = "CTRLSPEAK_SERVER"
+DEFAULT_DISCOVERY_PORT = 54363
+_DISCOVERY_PORT_CACHE: Optional[int] = None
+
+def _can_bind_udp(port: int) -> bool:
+    if port <= 0 or port > 65535:
+        return False
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind(("", port))
+        return True
+    except OSError as exc:
+        logger.warning("Discovery port %s unavailable: %s", port, exc)
+        return False
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            logger.exception("Failed to close discovery port probe socket")
+
+def get_discovery_port() -> int:
+    """Return a discovery port that is safe to bind on this host."""
+    global _DISCOVERY_PORT_CACHE
+    if _DISCOVERY_PORT_CACHE is not None:
+        return _DISCOVERY_PORT_CACHE
+
+    with settings_lock:
+        raw_port = settings.get("discovery_port", DEFAULT_DISCOVERY_PORT)
+    try:
+        desired = int(raw_port)
+    except (TypeError, ValueError):
+        desired = DEFAULT_DISCOVERY_PORT
+
+    candidates = [
+        desired,
+        DEFAULT_DISCOVERY_PORT,
+        54364,
+        54365,
+        54370,
+        55000,
+        55100,
+    ]
+
+    chosen = None
+    for port in candidates:
+        if port is None:
+            continue
+        if _can_bind_udp(port):
+            chosen = port
+            break
+
+    if chosen is None:
+        chosen = desired
+
+    if chosen != desired:
+        with settings_lock:
+            settings["discovery_port"] = chosen
+        save_settings()
+
+    _DISCOVERY_PORT_CACHE = chosen
+    return chosen
 
 @dataclass
 class ServerInfo:
@@ -172,8 +232,7 @@ def ensure_preferred_server_registered(probe: bool = False) -> Optional[ServerIn
 
 def send_discovery_query(timeout: float = 1.0) -> None:
     """Broadcast a discovery query on the configured discovery port."""
-    with settings_lock:
-        port = int(settings.get("discovery_port", 54330))
+    port = get_discovery_port()
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)

@@ -19,7 +19,7 @@ ASSETS_DIR_NAME = "assets"
 DEFAULT_SETTINGS: Dict[str, object] = {
     "mode": None,                    # "client" | "client_server"
     "server_port": 65432,
-    "discovery_port": 54330,
+    "discovery_port": 54363,
     "preferred_server_host": None,
     "preferred_server_port": None,
     "device_preference": "cpu",

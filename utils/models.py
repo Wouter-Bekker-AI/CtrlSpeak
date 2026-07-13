@@ -13,6 +13,9 @@ import requests
 import platform
 import hashlib
 import importlib
+import re
+import uuid
+import wave
 from datetime import datetime
 from pathlib import Path
 from queue import Empty
@@ -54,7 +57,7 @@ from utils.system import (
 )
 from utils.system import get_best_server, CLIENT_ONLY_BUILD
 from utils.ui_theme import apply_modern_theme
-from utils.config_paths import get_logger, asset_path
+from utils.config_paths import get_logger, asset_path, get_temp_dir
 
 
 # ---------------- Env / defaults ----------------
@@ -2249,12 +2252,79 @@ def initialize_transcriber(
 
 # ---------------- Transcription API ----------------
 def collect_text_from_segments(segments) -> str:
+    def _normalize_piece(text: str) -> str:
+        cleaned = text.strip().lower()
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        cleaned = re.sub(r"[\"'“”‘’]+$", "", cleaned)
+        cleaned = re.sub(r"[\\s\\.,!?;:]+$", "", cleaned)
+        return cleaned
+
     pieces = []
     for s in segments:
         t = s.text.strip()
         if t:
             pieces.append(t)
+    while len(pieces) >= 2:
+        if _normalize_piece(pieces[-1]) == _normalize_piece(pieces[-2]):
+            pieces.pop()
+            continue
+        break
     return " ".join(pieces)
+
+
+def _wav_duration_seconds(path: Path) -> Optional[float]:
+    try:
+        with wave.open(str(path), "rb") as wf:
+            frames = wf.getnframes()
+            rate = wf.getframerate()
+        if rate <= 0:
+            return None
+        return frames / float(rate)
+    except Exception:
+        return None
+
+
+def _split_wav_into_chunks(
+    path: Path,
+    max_seconds: float = 50.0,
+    overlap_seconds: float = 5.0,
+) -> List[Path]:
+    try:
+        with wave.open(str(path), "rb") as wf:
+            nframes = wf.getnframes()
+            framerate = wf.getframerate()
+            channels = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+
+            if framerate <= 0:
+                return [path]
+
+            total_seconds = nframes / float(framerate)
+            if total_seconds <= max_seconds * 1.05:
+                return [path]
+
+            chunk_frames = int(max_seconds * framerate)
+            overlap_frames = int(overlap_seconds * framerate)
+            step = max(chunk_frames - overlap_frames, chunk_frames)
+
+            chunk_paths: List[Path] = []
+            start = 0
+            while start < nframes:
+                wf.setpos(start)
+                frames = wf.readframes(min(chunk_frames, nframes - start))
+                if not frames:
+                    break
+                out_path = get_temp_dir() / f"recording-chunk-{uuid.uuid4().hex}.wav"
+                with wave.open(str(out_path), "wb") as out_wf:
+                    out_wf.setnchannels(channels)
+                    out_wf.setsampwidth(sampwidth)
+                    out_wf.setframerate(framerate)
+                    out_wf.writeframes(frames)
+                chunk_paths.append(out_path)
+                start += step
+            return chunk_paths or [path]
+    except Exception:
+        return [path]
 
 
 def transcribe_local(file_path: str, play_feedback: bool = True, allow_client: bool = False, preferred_device: Optional[str] = None) -> Optional[str]:
@@ -2266,9 +2336,27 @@ def transcribe_local(file_path: str, play_feedback: bool = True, allow_client: b
         return None
     if play_feedback:
         start_processing_feedback()
+    decode_kwargs = dict(
+        beam_size=5,
+        vad_filter=True,
+        temperature=0.2,
+        task="translate",
+        condition_on_previous_text=False,
+        compression_ratio_threshold=2.4,
+        log_prob_threshold=-1.0,
+        no_speech_threshold=0.6,
+    )
+    chunk_paths: List[Path] = []
     try:
-        segments, _ = model.transcribe(file_path, beam_size=5, vad_filter=True, temperature=0.2, task="translate")
-        text = collect_text_from_segments(segments)
+        source_path = Path(file_path)
+        chunk_paths = _split_wav_into_chunks(source_path)
+        text_parts: List[str] = []
+        for chunk_path in chunk_paths:
+            segments, _ = model.transcribe(str(chunk_path), **decode_kwargs)
+            chunk_text = collect_text_from_segments(segments)
+            if chunk_text:
+                text_parts.append(chunk_text)
+        text = " ".join(text_parts).strip()
         if text:
             with settings_lock:
                 port = int(settings.get("server_port", 65432))
@@ -2294,6 +2382,14 @@ def transcribe_local(file_path: str, play_feedback: bool = True, allow_client: b
         notify_error("Transcription failed", format_exception_details(exc))
         return None
     finally:
+        if chunk_paths:
+            source_path = Path(file_path)
+            for chunk_path in chunk_paths:
+                if chunk_path != source_path and chunk_path.exists():
+                    try:
+                        chunk_path.unlink(missing_ok=True)
+                    except Exception:
+                        logger.exception("Failed to remove temp chunk %s", chunk_path)
         if play_feedback:
             stop_processing_feedback()
 

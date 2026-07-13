@@ -760,8 +760,7 @@ def prompt_initial_mode(parent: Optional[tk.Misc] = None) -> Optional[str]:
         if discovery_listener_local is not None:
             return discovery_listener_local
         try:
-            with settings_lock:
-                port = int(settings.get("discovery_port", 54330))
+            port = net_discovery.get_discovery_port()
             listener = net_discovery.DiscoveryListener(port)
             listener.start()
             discovery_listener_local = listener

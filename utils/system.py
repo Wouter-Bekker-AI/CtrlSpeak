@@ -159,7 +159,7 @@ from utils.net_discovery import (
     ServerInfo, DiscoveryListener,
     get_preferred_server_settings, set_preferred_server, clear_preferred_server,
     parse_server_target, probe_server, register_manual_server,
-    ensure_preferred_server_registered, send_discovery_query,
+    ensure_preferred_server_registered, send_discovery_query, get_discovery_port,
     manual_discovery_refresh as _nd_manual_discovery_refresh,  # we'll wrap this
     get_best_server as _nd_get_best_server,
     get_advertised_host_ip,
@@ -853,7 +853,7 @@ def start_server() -> None:
         return
     with settings_lock:
         port = int(settings.get("server_port", 65432))
-        discovery_port = int(settings.get("discovery_port", 54330))
+        discovery_port = get_discovery_port()
     logger.info("Starting CtrlSpeak server on port %s (discovery %s)", port, discovery_port)
     try:
         server_httpd = ThreadingHTTPServer(("0.0.0.0", port), TranscriptionRequestHandler)
@@ -1096,7 +1096,7 @@ def start_discovery_listener() -> None:
         )
         return
     with settings_lock:
-        port = int(settings.get("discovery_port", 54330))
+        port = get_discovery_port()
     logger.info("Starting discovery listener on UDP port %s", port)
     discovery_listener = DiscoveryListener(port); discovery_listener.start()
 
