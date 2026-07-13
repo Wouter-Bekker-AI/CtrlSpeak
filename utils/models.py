@@ -880,7 +880,7 @@ def _download_cuda_runtime(progress_queue: MPQueue | None = None) -> None:
         downloaded = 0
         overall_total = total_known
         session = requests.Session()
-        session.headers.setdefault("User-Agent", "CtrlSpeak/0.6.0")
+        session.headers.setdefault("User-Agent", "CtrlSpeak/0.3.0")
 
         try:
             for entry in metadata:
@@ -1703,7 +1703,7 @@ def _model_download_worker(model_name: str, queue: MPQueue) -> None:
         downloaded = 0
 
         session = requests.Session()
-        session.headers.setdefault("User-Agent", "CtrlSpeak/0.6.0")
+        session.headers.setdefault("User-Agent", "CtrlSpeak/0.3.0")
         CHUNK_SIZE = 1 << 18  # 256 KiB
         try:
             for index, (rel_path, size_hint) in enumerate(file_entries, start=1):
@@ -2462,7 +2462,7 @@ def transcribe_remote(file_path: str, play_feedback: bool = True) -> Optional[st
                 logger.exception("Failed to close HTTP connection after remote transcription")
 
 
-def transcribe_audio(file_path: str, play_feedback: bool = True) -> Optional[str]:
+def _transcribe_bundled_audio(file_path: str, play_feedback: bool = True) -> Optional[str]:
     with settings_lock:
         mode = settings.get("mode")
     if mode == "client_server":
@@ -2474,7 +2474,21 @@ def transcribe_audio(file_path: str, play_feedback: bool = True) -> Optional[str
         return None
 
 
+def transcribe_audio_result(file_path: str, play_feedback: bool = True):
+    """Return text plus API audit metadata when available."""
+    from utils.transcription_backend import get_runtime_backend_config, transcribe_selected
 
+    config = get_runtime_backend_config()
+    return transcribe_selected(
+        Path(file_path),
+        config=config,
+        bundled_transcriber=lambda path: _transcribe_bundled_audio(str(path), play_feedback=play_feedback),
+    )
+
+
+def transcribe_audio(file_path: str, play_feedback: bool = True) -> Optional[str]:
+    result = transcribe_audio_result(file_path, play_feedback=play_feedback)
+    return result.text if result else None
 
 
 

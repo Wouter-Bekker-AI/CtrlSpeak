@@ -16,13 +16,19 @@ from utils.system import (
     settings, settings_lock,
     start_discovery_listener,
     parse_cli_args, transcribe_cli,
+    apply_backend_cli_config,
     CLIENT_ONLY_BUILD,
     start_server,
     run_tray,
     apply_auto_setup,
 )
 
-from utils.gui import show_splash_screen, ensure_mode_selected, ensure_management_ui_thread
+from utils.gui import (
+    show_splash_screen,
+    ensure_mode_selected,
+    ensure_management_ui_thread,
+    show_startup_error,
+)
 from utils.models import (
     initialize_transcriber,
     ensure_model_ready_for_local_server,
@@ -30,6 +36,20 @@ from utils.models import (
 )
 
 logger = get_logger(__name__)
+
+
+def _report_invalid_backend_configuration(exc: Exception) -> None:
+    message = f"Invalid backend configuration: {exc}"
+    logger.error(message)
+    try:
+        if sys.stderr is not None:
+            print(message, file=sys.stderr)
+    except Exception:
+        logger.debug("Could not write startup configuration error to stderr", exc_info=True)
+    try:
+        show_startup_error("Invalid backend configuration", str(exc))
+    except Exception:
+        logger.exception("Could not display startup configuration error")
 
 
 def main(argv: list[str]) -> int:
@@ -62,6 +82,24 @@ def main(argv: list[str]) -> int:
     # Load settings early
     logger.info("Loading configuration settings")
     load_settings()
+
+    from utils.transcription_backend import (
+        BackendPersistenceError,
+        activate_runtime_backend_config,
+        get_backend_config,
+        uses_bundled_runtime,
+    )
+    try:
+        if apply_backend_cli_config(args):
+            return 0
+        backend_config = get_backend_config()
+        activate_runtime_backend_config(backend_config)
+    except (ValueError, BackendPersistenceError) as exc:
+        _report_invalid_backend_configuration(exc)
+        return 2
+
+    bundled_runtime = uses_bundled_runtime(backend_config)
+    logger.info("Selected transcription backend: %s", backend_config.backend)
 
     if getattr(args, "cuda_only", False):
         from utils.models import (
@@ -100,14 +138,16 @@ def main(argv: list[str]) -> int:
     logger.debug("Ensuring management UI thread is initialized")
     ensure_management_ui_thread()
 
-    # Ensure mode selected (client or client_server)
-    logger.debug("Ensuring operating mode is selected")
-    ensure_mode_selected()
+    # Legacy client/server mode applies only to the bundled backend.
+    if bundled_runtime:
+        logger.debug("Ensuring operating mode is selected")
+        ensure_mode_selected()
 
-    # Auto-install the default speech model on first launch
-    if not ensure_initial_model_installation():
-        logger.error("Initial model installation failed or was aborted")
-        return 0
+    # API mode is deliberately independent of bundled model assets.
+    if bundled_runtime:
+        if not ensure_initial_model_installation():
+            logger.error("Initial model installation failed or was aborted")
+            return 0
 
     # Determine the selected mode now that setup is complete
     with settings_lock:
@@ -115,22 +155,23 @@ def main(argv: list[str]) -> int:
     logger.info("CtrlSpeak running in '%s' mode", mode)
 
     # Automatically prepare local transcription assets when running the server locally
-    if mode == "client_server":
+    if bundled_runtime and mode == "client_server":
         logger.info("Preparing local transcription assets for server mode")
         if not ensure_model_ready_for_local_server():
             logger.error("Failed to prepare local model for server mode")
             return 0
 
     # Start discovery listener for client mode visibility
-    logger.debug("Starting discovery listener")
-    start_discovery_listener()
+    if bundled_runtime:
+        logger.debug("Starting discovery listener")
+        start_discovery_listener()
 
-    if mode == "client_server":
+    if bundled_runtime and mode == "client_server":
         logger.info("Initializing transcriber in background for warm-up")
         initialize_transcriber(interactive=False)   # warm-up local model when assets are ready
         logger.info("Starting local transcription server")
         start_server()
-    elif mode == "client":
+    elif bundled_runtime and mode == "client":
         logger.debug("Client mode selected; allowing discovery broadcast to populate")
         time.sleep(1.0)  # small delay so discovery has time to populate
 

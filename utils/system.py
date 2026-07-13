@@ -97,7 +97,7 @@ def get_processing_waveform(n: int = 512) -> np.ndarray:
 
 
 # ---------------- Public constants ----------------
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.3.0"
 SPLASH_DURATION_MS = 1000
 ERROR_LOG_FILENAME = "CtrlSpeak-error.log"
 LOCK_FILENAME = "CtrlSpeak.lock"
@@ -151,7 +151,7 @@ if TYPE_CHECKING:
 # Win32 text insertion / clipboard
 from utils.winio import (
     insert_text_into_focus, set_force_sendinput, is_console_window,
-    set_clipboard_text,
+    set_clipboard_text, snapshot_active_text_field,
 )
 
 # LAN discovery (single source of truth for ServerInfo)
@@ -179,6 +179,157 @@ __all__ = [
 # Keep a single shared discovery listener and last_connected_server here
 discovery_listener: Optional[DiscoveryListener] = None
 last_connected_server: Optional[ServerInfo] = None
+
+# Observer-only edit feedback hooks. The coordinator is lazy so importing the
+# headless system module never performs clipboard or network work.
+_feedback_coordinator = None
+_feedback_modifiers: set[str] = set()
+_feedback_capture_in_progress = False
+
+
+def _capture_active_feedback_field() -> str | None:
+    global _feedback_capture_in_progress
+    _feedback_capture_in_progress = True
+    try:
+        return snapshot_active_text_field()
+    finally:
+        _feedback_capture_in_progress = False
+
+
+def _get_feedback_coordinator():
+    global _feedback_coordinator
+    if _feedback_coordinator is None:
+        from utils.feedback_capture import ActiveFieldSnapshotProvider, FeedbackCaptureCoordinator
+
+        _feedback_coordinator = FeedbackCaptureCoordinator(
+            snapshot_provider=ActiveFieldSnapshotProvider(_capture_active_feedback_field),
+            submit_feedback=_submit_confirmed_feedback,
+        )
+    return _feedback_coordinator
+
+
+def _submit_confirmed_feedback(
+    transcription_id: str,
+    final_text: str,
+    capture_method: str,
+    metadata: dict[str, object],
+    feedback_target,
+) -> None:
+    from utils.transcription_backend import ApiBackendError, ApiTranscriptionClient, BackendConfig
+
+    client_metadata = {"client": "CtrlSpeak", "version": APP_VERSION, **metadata}
+    if feedback_target.backend == "bundled":
+        from utils.local_corrections import get_local_correction_library
+
+        try:
+            approval = get_local_correction_library().approve_exact_override(
+                transcription_id,
+                confirmed_text=final_text,
+                capture_method=capture_method,
+                client_metadata=client_metadata,
+            )
+            if approval is None:
+                notify(
+                    "Confirmed edit feedback could not be matched to its local transcription.",
+                    title="CtrlSpeak Feedback",
+                )
+        except Exception as exc:
+            logger.exception("Failed to save confirmed edit feedback locally")
+            notify(
+                f"Confirmed edit feedback could not be saved locally. {exc}",
+                title="CtrlSpeak Feedback",
+            )
+        return
+
+    if feedback_target.backend != "api" or not feedback_target.api_url:
+        logger.error("Pending feedback has an invalid backend target: %r", feedback_target.backend)
+        return
+    config = BackendConfig(
+        backend="api",
+        api_url=feedback_target.api_url,
+        api_token=feedback_target.api_token,
+        feedback_capture_method=capture_method,
+    )
+    try:
+        ApiTranscriptionClient(config).submit_feedback(
+            transcription_id,
+            final_text=final_text,
+            capture_method=capture_method,
+            client_metadata=client_metadata,
+        )
+    except ApiBackendError as exc:
+        notify(
+            f"Confirmed edit feedback could not be sent to {feedback_target.api_url}. {exc}",
+            title="CtrlSpeak Feedback",
+        )
+
+
+def observe_feedback_key_event(
+    key_name: str,
+    action: str,
+    modifiers: frozenset[str] = frozenset(),
+) -> None:
+    """Observe but never consume, replay, or synthesize a key event."""
+    from utils.feedback_capture import KeyEvent
+
+    _get_feedback_coordinator().handle_key_event(KeyEvent(key_name, action, modifiers))
+
+
+def track_feedback_injection(result) -> None:
+    from utils.transcription_backend import get_runtime_backend_config
+
+    _get_feedback_coordinator().track_injection(
+        result,
+        capture_method=get_runtime_backend_config().feedback_capture_method,
+    )
+
+
+def inject_transcription_result(result) -> None:
+    """Insert once, then make that successful injection eligible for feedback."""
+    insert_text_into_focus(result.text)
+    track_feedback_injection(result)
+
+
+def _pynput_key_name(key) -> str:
+    key_type = getattr(keyboard, "Key", None)
+    if key_type is not None:
+        for name in ("enter", "shift", "shift_l", "shift_r", "ctrl", "ctrl_l", "ctrl_r", "alt", "alt_l", "alt_r"):
+            if key == getattr(key_type, name, object()):
+                return name
+    char = getattr(key, "char", None)
+    if isinstance(char, str):
+        return char.lower()
+    return str(key).lower().replace("key.", "")
+
+
+def _observe_pynput_press(key) -> None:
+    if _feedback_capture_in_progress:
+        return
+    name = _pynput_key_name(key)
+    modifier_name = (
+        "shift" if name in {"shift", "shift_l", "shift_r"}
+        else "ctrl" if name in {"ctrl", "ctrl_l", "ctrl_r"}
+        else "alt" if name in {"alt", "alt_l", "alt_r"}
+        else None
+    )
+    if modifier_name:
+        _feedback_modifiers.add(modifier_name)
+    observe_feedback_key_event(name, "press", frozenset(_feedback_modifiers - ({modifier_name} if modifier_name else set())))
+
+
+def _observe_pynput_release(key) -> None:
+    if _feedback_capture_in_progress:
+        return
+    name = _pynput_key_name(key)
+    modifier_name = (
+        "shift" if name in {"shift", "shift_l", "shift_r"}
+        else "ctrl" if name in {"ctrl", "ctrl_l", "ctrl_r"}
+        else "alt" if name in {"alt", "alt_l", "alt_r"}
+        else None
+    )
+    observe_feedback_key_event(name, "release", frozenset(_feedback_modifiers))
+    if modifier_name:
+        _feedback_modifiers.discard(modifier_name)
 
 # ---------------- Notifications / logging ----------------
 def notify(message: str, title: str = "CtrlSpeak") -> None:
@@ -649,6 +800,11 @@ def record_audio(target_path: Path) -> None:
 def _client_hotkey_available() -> bool:
     """Return True when the Ctrl+R hotkey may start a recording."""
 
+    from utils.transcription_backend import get_runtime_backend_config
+
+    if get_runtime_backend_config().backend == "api":
+        return True
+
     with settings_lock:
         mode = settings.get("mode")
 
@@ -666,6 +822,7 @@ def _client_hotkey_available() -> bool:
 
 def on_press(key):
     global recording, recording_thread, recording_file_path
+    _observe_pynput_press(key)
     if not client_enabled:
         return
     if key == keyboard.Key.ctrl_r and not recording:
@@ -683,8 +840,9 @@ def on_press(key):
 
 
 def on_release(key):
-    from utils.models import transcribe_audio
+    from utils.models import transcribe_audio_result
     global recording, recording_thread, recording_file_path
+    _observe_pynput_release(key)
     if key == keyboard.Key.ctrl_r:
         if recording:
             recording = False
@@ -702,14 +860,18 @@ def on_release(key):
                 start_processing_feedback()
             except Exception:
                 logger.exception("Failed to start processing feedback loop")
+            result = None
             text = None
             try:
                 if path and path.exists() and path.stat().st_size > 0:
-                    text = transcribe_audio(str(path))
+                    result = transcribe_audio_result(str(path))
+                    text = result.text if result else None
             except Exception as exc:
                 notify_error("Transcription failed", format_exception_details(exc)); text = None
             if text:
-                try: insert_text_into_focus(text)
+                try:
+                    if result is not None:
+                        inject_transcription_result(result)
                 except Exception as exc: notify_error("Text insertion failed", format_exception_details(exc))
             try:
                 stop_processing_feedback()
@@ -756,9 +918,15 @@ def start_client_listener() -> None:
     with listener_lock:
         if listener is not None: return
         client_enabled = True
-        listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+        listener = keyboard.Listener(
+            on_press=on_press,
+            on_release=on_release,
+            suppress=False,
+        )
         listener.start()
-    threading.Thread(target=_refresh_best_server_async, daemon=True).start()
+    from utils.transcription_backend import uses_bundled_runtime
+    if uses_bundled_runtime():
+        threading.Thread(target=_refresh_best_server_async, daemon=True).start()
     schedule_management_refresh()
 
 def stop_client_listener() -> None:
@@ -767,6 +935,7 @@ def stop_client_listener() -> None:
     cleanup_path: Optional[Path] = None
     should_hide_waveform = False
     with listener_lock:
+        _feedback_modifiers.clear()
         client_enabled = False
         if listener is not None:
             listener.stop(); listener = None
@@ -951,11 +1120,14 @@ def run_tray():
     start_client_listener()
     with settings_lock:
         mode = settings.get("mode")
+    from utils.transcription_backend import get_runtime_backend_config
+    backend = get_runtime_backend_config().backend
+    tray_mode = mode if backend == "bundled" else "api"
     menu_items = [
         pystray.MenuItem("Manage CtrlSpeak", open_management_dialog),
         pystray.MenuItem("Quit", on_exit),
     ]
-    icon = pystray.Icon("CtrlSpeak", create_icon_image(), f"CtrlSpeak ({mode})", menu=pystray.Menu(*menu_items))
+    icon = pystray.Icon("CtrlSpeak", create_icon_image(), f"CtrlSpeak ({tray_mode})", menu=pystray.Menu(*menu_items))
     def _run_icon() -> None:
         try:
             icon.run()
@@ -1134,6 +1306,20 @@ def parse_cli_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--auto-setup", choices=["client", "client_server"], help="Configure CtrlSpeak without prompts")
     parser.add_argument("--force-sendinput", action="store_true", help="Force SendInput-based insertion (debug)")
     parser.add_argument(
+        "--backend",
+        choices=["bundled", "api"],
+        help="Persistently select the bundled model or configured HTTP API backend",
+    )
+    parser.add_argument(
+        "--api-url",
+        help="Persist the API base URL (token is intentionally configured via settings or CTRLSPEAK_API_TOKEN)",
+    )
+    parser.add_argument(
+        "--backend-status",
+        action="store_true",
+        help="Print backend status without disclosing the bearer token and exit",
+    )
+    parser.add_argument(
         "--download-cuda-only",
         "--setup-cuda",
         action="store_true",
@@ -1144,33 +1330,66 @@ def parse_cli_args(argv: list[str]) -> argparse.Namespace:
     args, _ = parser.parse_known_args(argv[1:])
     return args
 
+
+def apply_backend_cli_config(args: argparse.Namespace) -> bool:
+    """Apply safe CLI backend overrides and return whether status-only was requested."""
+    from utils.transcription_backend import get_backend_status, save_backend_config
+
+    backend_override = getattr(args, "backend", None)
+    url_override = getattr(args, "api_url", None)
+    if backend_override is not None or url_override is not None:
+        with settings_lock:
+            backend = backend_override or str(settings.get("transcription_backend") or "bundled")
+            api_url = url_override or str(settings.get("api_url") or "http://127.0.0.1:8765")
+            token = settings.get("api_token")
+            capture_method = str(
+                settings.get("feedback_capture_method") or "active_field_on_enter"
+            )
+        save_backend_config(
+            backend=backend,
+            api_url=api_url,
+            api_token=str(token) if token else None,
+            feedback_capture_method=capture_method,
+        )
+    status_only = bool(getattr(args, "backend_status", False))
+    if status_only:
+        print(get_backend_status())
+    return status_only
+
 def transcribe_cli(target: str) -> int:
     from utils.models import initialize_transcriber, transcribe_audio
+    from utils.transcription_backend import ApiBackendError, get_runtime_backend_config
     file_path = Path(target).expanduser()
     if not file_path.is_file():
         print(f"Audio file not found: {file_path}", file=sys.stderr); return 1
     discovery_started = False
     try:
-        with settings_lock:
-            mode = settings.get("mode")
-        if mode == "client_server":
-            if initialize_transcriber() is None:
-                print("Unable to initialize the transcription engine.", file=sys.stderr); return 2
-        elif mode == "client":
-            start_discovery_listener(); discovery_started = True
-            time.sleep(1.0)
-            server = get_best_server()
-            if server is not None:
-                logger.info(
-                    "CLI transcription discovered server %s:%s; skipping local fallback prompt.",
-                    server.host,
-                    server.port,
-                )
-            else:
-                logger.info(
-                    "CLI transcription did not discover a server; fallback prompt may still be shown."
-                )
-        text = transcribe_audio(str(file_path), play_feedback=False)
+        backend_config = get_runtime_backend_config()
+        if backend_config.backend == "bundled":
+            with settings_lock:
+                mode = settings.get("mode")
+            if mode == "client_server":
+                if initialize_transcriber() is None:
+                    print("Unable to initialize the transcription engine.", file=sys.stderr); return 2
+            elif mode == "client":
+                start_discovery_listener(); discovery_started = True
+                time.sleep(1.0)
+                server = get_best_server()
+                if server is not None:
+                    logger.info(
+                        "CLI transcription discovered server %s:%s; skipping local fallback prompt.",
+                        server.host,
+                        server.port,
+                    )
+                else:
+                    logger.info(
+                        "CLI transcription did not discover a server; fallback prompt may still be shown."
+                    )
+        try:
+            text = transcribe_audio(str(file_path), play_feedback=False)
+        except ApiBackendError as exc:
+            print(f"API transcription failed: {exc}", file=sys.stderr)
+            return 4
         if text is None:
             print("Transcription produced no output.", file=sys.stderr); return 3
         print(text)
@@ -1185,4 +1404,3 @@ def apply_auto_setup(profile: str) -> None:
     logger.info("Applying auto-setup profile: %s", profile)
     with settings_lock: settings["mode"] = profile
     save_settings()
-

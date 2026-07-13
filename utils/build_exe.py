@@ -1,6 +1,6 @@
-"""Helper script to build the CtrlSpeak executable with PyInstaller.
+"""Helper script to build the CtrlSpeak v0.3 executable with PyInstaller.
 
-The resulting bundle lives in ``dist/CtrlSpeak/``. From the project root run::
+The resulting artifact is ``dist/CtrlSpeak_v0.3.exe``. From the project root run::
 
     python -m utils.build_exe
 """
@@ -20,7 +20,7 @@ except ImportError as exc:  # pragma: no cover - developer convenience
 
 project_root = Path(__file__).resolve().parent.parent
 assets_dir = project_root / "assets"
-default_spec_path = project_root / "packaging" / "CtrlSpeak.spec"
+default_spec_path = project_root / "packaging" / "CtrlSpeak_v0.3.spec"
 watcher_spec_path = project_root / "packaging" / "CtrlSpeak_Watcher.spec"
 
 
@@ -60,7 +60,7 @@ def _resolve_build_config(watcher: bool) -> BuildConfig:
             intro_video_path=assets_dir / "Watcher_Intro_Video.mp4",
         )
     return BuildConfig(
-        name="CtrlSpeak",
+        name="CtrlSpeak v0.3",
         spec_path=default_spec_path,
         intro_video_label="welcome video",
         intro_video_path=assets_dir / "TrueAI_Intro_Video.mp4",

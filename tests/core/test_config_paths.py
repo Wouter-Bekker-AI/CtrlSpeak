@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import stat
+
 import pytest
 
 from utils import config_paths
@@ -45,7 +47,7 @@ def test_settings_round_trip(tmp_path, monkeypatch):
 
     with config_paths.settings_lock:
         config_paths.settings["unit_test_marker"] = "ok"
-    config_paths.save_settings()
+    assert config_paths.save_settings() is True
 
     reloaded = config_paths.load_settings()
     assert reloaded["unit_test_marker"] == "ok"
@@ -53,6 +55,14 @@ def test_settings_round_trip(tmp_path, monkeypatch):
     settings_file = config_paths.get_config_file_path()
     assert settings_file.exists()
     assert "unit_test_marker" in settings_file.read_text(encoding="utf-8")
+    if not config_paths.sys.platform.startswith("win"):
+        assert stat.S_IMODE(settings_file.stat().st_mode) == 0o600
+
+
+def test_settings_persistence_failure_is_returned_to_the_caller(monkeypatch):
+    monkeypatch.setattr(config_paths, "get_config_file_path", lambda: object())
+
+    assert config_paths.save_settings() is False
 
 
 def test_create_and_cleanup_recording_file(tmp_path, monkeypatch):

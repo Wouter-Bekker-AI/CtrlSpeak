@@ -1,6 +1,6 @@
 # CtrlSpeak
 
-CtrlSpeak is a Windows speech-to-text assistant that records speech while the right `Ctrl` key is held down and injects the transcription into the active text control. It can run as a self-contained **Client + Server** bundle with Whisper hosted locally or as a lightweight **Client Only** build that discovers a LAN server.
+CtrlSpeak v0.3 is a Windows speech-to-text assistant that records speech while the right `Ctrl` key is held down and injects the transcription into the active text control. Its control center explicitly offers **Embedded / local** or **Remote API** transcription. The legacy **Client + Server** and **Client Only** choices remain available inside embedded/local mode.
 
 Both flavours support Windows 10/11, enforce a single running instance, expose a tray UI for mode switching, and include AnyDesk-aware text injection with optional audio cues.
 
@@ -36,10 +36,53 @@ python main.py
 
 On first launch you will be prompted to choose between **Client + Server** or **Client Only** modes. The client-only card lets you refresh for LAN servers or manually enter a `host[:port]` so CtrlSpeak knows which remote host to target. Settings, models, and logs live under `%APPDATA%\CtrlSpeak` (the folder is created automatically).
 
+## Transcription backends
+
+The backend choice is independent of the legacy client/server operating mode:
+
+- **Embedded / local** (`bundled`, the default) preserves existing offline functionality and does not use the configurable Whisper API. Client + Server runs the bundled model directly; the legacy Client Only role continues to use CtrlSpeak discovery/`/transcribe` and its existing local-server recovery flow.
+- **Remote API** (`api`) uploads the WAV recording to `POST <api_url>/v1/transcribe`. `api_url` is a complete `http://` or `https://` base URL and may identify loopback, a LAN/VPN host, or a properly secured public/cloud service; no LAN-only assumption is made. CtrlSpeak retains the returned `id`, `raw_text`, corrected `text`, segments, language, correction IDs, and exact-override ID with the pending injection. An API error is actionable and never silently switches to the embedded backend.
+
+Bundled results pass through `%APPDATA%\CtrlSpeak\local-corrections.sqlite3`. User-approved edits create only complete, exact raw-transcript → corrected-transcript overrides, so a different or merely similar transcript is not rewritten. This index is local and works without network access. Remote API corrections remain at the configured service.
+
+The management window has backend, API URL, masked optional bearer-token, feedback-capture, and redacted status controls. Backend settings are pinned when CtrlSpeak starts; saving a changed backend, URL, token, or feedback method explicitly requires a CtrlSpeak restart, avoiding a partially switched runtime. Defaults and persisted settings are:
+
+```json
+{
+  "transcription_backend": "bundled",
+  "api_url": "http://127.0.0.1:8765",
+  "api_token": null,
+  "feedback_capture_method": "active_field_on_enter"
+}
+```
+
+Environment variables override saved backend values at runtime:
+
+- `CTRLSPEAK_BACKEND=bundled|api`
+- `CTRLSPEAK_API_URL=http://127.0.0.1:8765`
+- `CTRLSPEAK_API_TOKEN=...`
+
+There is intentionally no bearer-token command-line flag, because command arguments can be exposed in process listings and shell history. Prefer `CTRLSPEAK_API_TOKEN`; a token entered in the UI is stored in the per-user `settings.json` as plain text, so protect that account and file. On POSIX systems CtrlSpeak creates the settings and correction-database files with user-only permissions; Windows protection relies on the user profile ACL. Status text and object representations report only whether a token exists and never print it.
+
+### Automatic edit feedback and platform limitations
+
+With the default `active_field_on_enter` method:
+
+1. Dictate and let CtrlSpeak inject a transcript from either backend.
+2. Edit the target field.
+3. Press bare Enter to send/confirm it normally.
+
+At the observed Enter press, CtrlSpeak best-effort snapshots the active field with Ctrl+A/C before returning from its non-suppressing keyboard callback. It restores the prior text clipboard value and submits the captured text only when it differs from the pending injected result. The user does not need to select or copy anything manually. The original Enter is never suppressed, replayed, duplicated, or synthesized. Pending state is single-use, replaced by the next injection, and expires after ten minutes. A pending remote result remains bound to the original API URL and in-memory token even if saved settings change before confirmation.
+
+This is deliberately best-effort: some elevated, remote, custom-rendered, protected, password, terminal, or multiline controls may reject Ctrl+A/C, may expose only part of their content, or may interpret Enter as a newline. Capture is skipped when CtrlSpeak detects a non-text-only clipboard because that data cannot be restored safely by its lightweight Win32 helper. Ctrl+A leaves the field selected, and a field containing unrelated surrounding text would be treated as the complete final transcript. Remote feedback sends the changed final text and client audit metadata to `POST /v1/transcriptions/{id}/feedback`; embedded feedback stays in the local correction index. Both paths store an exact raw-transcript-to-approved-text override only. Neither path infers broad phrase substitutions from arbitrary whole-transcript edits; any future phrase rule must be separately and explicitly user-approved and auditable. Set the method to `disabled` in the management window if this behavior is unsuitable for a particular workflow.
+
 ### Command-line Flags
 
 - `--auto-setup {client,client_server}` – pre-select the startup mode without showing the GUI prompts.
 - `--force-sendinput` – force the AnyDesk-compatible synthetic keystroke path.
+- `--backend {bundled,api}` – persist the selected transcription backend.
+- `--api-url <http(s)-url>` – persist the API base URL; configure tokens through settings or `CTRLSPEAK_API_TOKEN`.
+- `--backend-status` – print redacted backend/auth/feedback status and exit.
 - `--download-cuda-only` (alias: `--setup-cuda`) – stage the CUDA runtime, cuBLAS, and cuDNN support packages (reusing any cached wheels before downloading fresh copies) and exit; the command aborts immediately when no CUDA-capable GPU is detected.
 - `--transcribe <wav>` – batch process an audio file without the hotkey workflow.
 - `--uninstall` – remove the application data and executable (used by the packaged build).
@@ -48,13 +91,13 @@ Run `python main.py --help` for the full list.
 
 ## Packaging with PyInstaller
 
-Use the helper module to build a distributable executable under `dist/CtrlSpeak/`:
+Use the helper module to build the v0.3 executable:
 
 ```powershell
 python -m utils.build_exe
 ```
 
-The helper executes the maintained `packaging/CtrlSpeak.spec` so manual `pyinstaller` runs stay aligned. The resulting one-file GUI build embeds the tray icon, loading chime, onboarding video, fun-facts rotation list, and regression test clip inside the internal `assets/` directory. Required runtime data for `faster_whisper`, `ctranslate2`, and `ffpyplayer` is collected automatically, while CUDA runtimes and Whisper model weights remain external downloads performed at runtime when the user opts in.
+The helper executes `packaging/CtrlSpeak_v0.3.spec` and produces `dist/CtrlSpeak_v0.3.exe`. The one-file GUI build uses `console=False`, so it opens no console window; startup configuration errors are shown in a GUI dialog, while stdout-oriented flags are intended for `python main.py` from source. The build reuses `assets/icon.ico` and embeds the loading chime, onboarding video, fun-facts rotation list, and regression clip. Required runtime data for `faster_whisper`, `ctranslate2`, `ffpyplayer`, and the API HTTP client is collected automatically, while CUDA runtimes and Whisper model weights remain external downloads used only by bundled mode.
 
 ## Manual Model Download
 
@@ -70,33 +113,19 @@ New-Item -ItemType File (Join-Path $target '.installed') -Force | Out-Null
 - Substitute a different `repo/model` name if you prefer another Whisper checkpoint.
 - To point CtrlSpeak at a custom directory, set the `CTRLSPEAK_MODEL_DIR` environment variable to the parent folder that contains the models (defaults to `%APPDATA%\CtrlSpeak\models`).
 
-## Windows Server Provisioning
+## Controlled LAN and public API hosting
 
-When deploying the combined Client + Server build to a dedicated host, run the following elevated PowerShell commands once per machine:
+Configuring a remote URL in CtrlSpeak does not expose, rebind, deploy, restart, or open firewall access to any service. The companion Whisper service remains loopback-only by default. If an operator later enables remote access:
 
-1. Copy the packaged executable onto the target PC (example assumes the Desktop):
-   ```powershell
-   Copy-Item "C:\Users\<user>\PycharmProjects\CtrlSpeak\dist\CtrlSpeak-full.exe" "$env:USERPROFILE\Desktop\CtrlSpeak-full.exe"
-   ```
-2. Prime the installation and download the Whisper model by running auto-setup mode:
-   ```powershell
-   Start-Process -FilePath "$env:USERPROFILE\Desktop\CtrlSpeak-full.exe" -ArgumentList '--auto-setup','client_server' -Wait
-   ```
-3. Allow the discovery and API ports through Windows Firewall (adjust the profile if you need different scopes):
-   ```powershell
-   netsh advfirewall firewall add rule name="CtrlSpeak API" dir=in action=allow protocol=TCP localport=65432 profile=private
-   netsh advfirewall firewall add rule name="CtrlSpeak API (Public)" dir=in action=allow protocol=TCP localport=65432 profile=public
-   netsh advfirewall firewall add rule name="CtrlSpeak Discovery In" dir=in action=allow protocol=UDP localport=54330 profile=private
-   netsh advfirewall firewall add rule name="CtrlSpeak Discovery Out" dir=out action=allow protocol=UDP localport=54330 profile=private
-   netsh advfirewall firewall add rule name="CtrlSpeak Discovery In (Public)" dir=in action=allow protocol=UDP localport=54330 profile=public
-   netsh advfirewall firewall add rule name="CtrlSpeak Discovery Out (Public)" dir=out action=allow protocol=UDP localport=54330 profile=public
-   ```
-4. Launch CtrlSpeak normally (double-click the EXE) and confirm the **Manage CtrlSpeak** window reports:
-   - Mode: `client_server`
-   - Server thread: `Running`
-   - Serving: `<server-IP>:65432`
+1. Prefer a specific private/VPN interface over all-interface binding, and restrict reachability to intended clients with separately managed network policy.
+2. Configure a strong bearer token outside source control and use the same token in CtrlSpeak’s per-user settings or `CTRLSPEAK_API_TOKEN`. Never put it in a command line, repository file, or shared log.
+3. Use HTTPS for public, cloud, or untrusted-network traffic. Put the loopback service behind a TLS gateway or VPN; validate certificates normally and do not disable TLS verification.
+4. Remember that a reverse proxy connects to the service from loopback. The proxy is therefore inside the service’s trusted boundary and must authenticate remote clients itself before forwarding requests.
+5. Protect and retain correction databases according to the sensitivity of dictated and edited text. Back them up only to approved encrypted storage.
 
-After updates you can re-run `--auto-setup client_server` to refresh the installation silently.
+The legacy bundled CtrlSpeak `/transcribe` and UDP-discovery protocol is for controlled trusted networks and does not implement the new bearer-auth contract. Do not publish it on the Internet. If it is required on a LAN, an operator must create narrowly scoped private-network firewall rules after reviewing the host/network design; this project does not make those changes automatically.
+
+For a Windows embedded host, copy `dist\CtrlSpeak_v0.3.exe`, run it once with `--auto-setup client_server` to stage the model, and verify the control center reports the local server as running. Any installation, firewall, service, TLS, or restart action remains a deliberate post-build operator step.
 
 ## Development Notes
 

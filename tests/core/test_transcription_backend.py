@@ -1,0 +1,328 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from utils import config_paths
+from utils.transcription_backend import (
+    ApiBackendError,
+    ApiTranscriptionClient,
+    BackendConfig,
+    BackendPersistenceError,
+    DEFAULT_API_URL,
+    activate_runtime_backend_config,
+    backend_from_display_name,
+    backend_display_name,
+    get_backend_config,
+    get_backend_status,
+    get_runtime_backend_config,
+    uses_bundled_runtime,
+    save_backend_config,
+    transcribe_selected,
+)
+from utils.local_corrections import LocalCorrectionLibrary
+
+
+pytestmark = pytest.mark.core_headless
+
+
+class FakeResponse:
+    def __init__(self, status_code: int, payload: dict[str, object]) -> None:
+        self.status_code = status_code
+        self._payload = payload
+        self.text = json.dumps(payload)
+
+    def json(self) -> dict[str, object]:
+        return self._payload
+
+
+class RecordingSession:
+    def __init__(self, response: FakeResponse) -> None:
+        self.response = response
+        self.calls: list[dict[str, object]] = []
+
+    def post(self, url: str, **kwargs):
+        files = kwargs.get("files")
+        audio_bytes = files["audio"][1].read() if files else None
+        self.calls.append({"url": url, "audio_bytes": audio_bytes, **kwargs})
+        return self.response
+
+
+def test_backend_display_names_are_explicit_and_round_trip() -> None:
+    assert backend_display_name("bundled") == "Embedded / local"
+    assert backend_display_name("api") == "Remote API"
+    assert backend_from_display_name("Embedded / local") == "bundled"
+    assert backend_from_display_name("Remote API") == "api"
+    assert get_backend_status(
+        BackendConfig("bundled", DEFAULT_API_URL, None, "disabled")
+    ) == "Embedded / local · bundled CtrlSpeak model · feedback: disabled"
+
+
+def test_backend_config_defaults_to_bundled_and_loopback_and_env_takes_precedence(monkeypatch) -> None:
+    assert get_backend_config() == BackendConfig(
+        backend="bundled",
+        api_url="http://127.0.0.1:8765",
+        api_token=None,
+        feedback_capture_method="active_field_on_enter",
+    )
+
+    with config_paths.settings_lock:
+        config_paths.settings.update(
+            transcription_backend="api",
+            api_url="http://settings.invalid:9000/",
+            api_token="settings-secret",
+            feedback_capture_method="clipboard_on_enter",
+        )
+    monkeypatch.setenv("CTRLSPEAK_BACKEND", "bundled")
+    monkeypatch.setenv("CTRLSPEAK_API_URL", "https://whisper.example.test/base/")
+    monkeypatch.setenv("CTRLSPEAK_API_TOKEN", "environment-secret")
+
+    assert get_backend_config() == BackendConfig(
+        backend="bundled",
+        api_url="https://whisper.example.test/base",
+        api_token="environment-secret",
+        feedback_capture_method="active_field_on_enter",
+    )
+    assert uses_bundled_runtime(BackendConfig("api", DEFAULT_API_URL, None, "disabled")) is False
+    assert uses_bundled_runtime(BackendConfig("bundled", DEFAULT_API_URL, None, "disabled")) is True
+
+
+def test_invalid_saved_api_url_is_rejected_even_for_bundled_backend(monkeypatch) -> None:
+    monkeypatch.setenv("CTRLSPEAK_BACKEND", "bundled")
+    monkeypatch.setenv("CTRLSPEAK_API_URL", "not-a-url")
+
+    with pytest.raises(ValueError, match=r"API URL.*https?://"):
+        get_backend_config()
+
+    with pytest.raises(ValueError, match=r"API URL.*https?://"):
+        save_backend_config(
+            backend="bundled",
+            api_url="still-not-a-url",
+            api_token=None,
+            feedback_capture_method="disabled",
+        )
+
+
+@pytest.mark.parametrize(
+    ("api_url", "api_token"),
+    [
+        ("http://127.0.0.1:8765", None),
+        ("http://localhost:8765", None),
+        ("http://10.1.2.3:8765", None),
+        ("http://172.16.0.10:8765/base", None),
+        ("http://192.168.50.4:8765", "optional-lan-token"),
+        ("http://example.com", None),
+        ("http://8.8.8.8:8765", "optional-public-token"),
+        ("https://whisper.example.com", None),
+        ("https://192.0.2.20:8765", None),
+    ],
+)
+def test_any_valid_http_or_https_endpoint_is_supported_with_an_optional_token(
+    api_url: str,
+    api_token: str | None,
+) -> None:
+    saved = save_backend_config(
+        backend="api",
+        api_url=api_url,
+        api_token=api_token,
+        feedback_capture_method="disabled",
+    )
+    assert saved.api_url == api_url
+
+
+def test_runtime_backend_remains_pinned_until_restart(monkeypatch) -> None:
+    monkeypatch.setattr("utils.transcription_backend._runtime_backend_config", None)
+    active = BackendConfig(
+        "api",
+        "http://192.168.1.50:8765",
+        None,
+        "active_field_on_enter",
+    )
+    activate_runtime_backend_config(active)
+
+    saved = save_backend_config(
+        backend="bundled",
+        api_url="https://cloud.example.test/whisper",
+        api_token="later-token",
+        feedback_capture_method="disabled",
+    )
+
+    assert saved.backend == "bundled"
+    assert get_backend_config().backend == "bundled"
+    assert get_runtime_backend_config() == active
+
+
+def test_backend_persistence_failure_is_actionable_and_not_claimed_successful(
+    monkeypatch,
+) -> None:
+    with config_paths.settings_lock:
+        before = dict(config_paths.settings)
+    monkeypatch.setattr(config_paths, "save_settings", lambda: False)
+
+    with pytest.raises(BackendPersistenceError, match=r"settings.*could not be saved"):
+        save_backend_config(
+            backend="api",
+            api_url="http://192.168.1.50:8765",
+            api_token=None,
+            feedback_capture_method="active_field_on_enter",
+        )
+
+    with config_paths.settings_lock:
+        assert config_paths.settings == before
+
+
+def test_invalid_backend_from_settings_or_environment_is_not_silently_defaulted(
+    monkeypatch,
+) -> None:
+    with config_paths.settings_lock:
+        config_paths.settings["transcription_backend"] = "typo"
+    with pytest.raises(ValueError, match=r"transcription_backend.*bundled.*api"):
+        get_backend_config(environ={})
+
+    monkeypatch.setenv("CTRLSPEAK_BACKEND", "also-wrong")
+    with pytest.raises(ValueError, match=r"CTRLSPEAK_BACKEND.*bundled.*api"):
+        get_backend_config()
+
+
+def test_backend_status_and_persistence_never_disclose_token() -> None:
+    saved = save_backend_config(
+        backend="api",
+        api_url="http://127.0.0.1:8765/",
+        api_token="do-not-print-me",
+        feedback_capture_method="active_field_on_enter",
+    )
+
+    status = get_backend_status(saved)
+    assert status == (
+        "API · http://127.0.0.1:8765 · bearer token configured · "
+        "feedback: automatic active-field capture on Enter"
+    )
+    assert "do-not-print-me" not in status
+    assert "do-not-print-me" not in repr(saved)
+    persisted = json.loads(config_paths.get_config_file_path().read_text("utf-8"))
+    assert persisted["api_token"] == "do-not-print-me"
+
+
+def test_api_transcription_uploads_audio_and_retains_audit_metadata(tmp_path: Path) -> None:
+    audio = tmp_path / "clip.wav"
+    audio.write_bytes(b"wave-data")
+    response_payload = {
+        "id": "tx-123",
+        "raw_text": "raw words",
+        "text": "corrected words",
+        "language": "en",
+        "segments": [{"start": 0.0, "end": 1.0, "text": "raw words"}],
+        "applied_correction_rule_ids": ["rule-1"],
+        "exact_override_id": None,
+    }
+    session = RecordingSession(FakeResponse(200, response_payload))
+    client = ApiTranscriptionClient(
+        BackendConfig("api", "http://127.0.0.1:8765", "secret", "disabled"),
+        session=session,
+    )
+
+    result = client.transcribe(audio)
+
+    assert result.text == "corrected words"
+    assert result.transcription_id == "tx-123"
+    assert result.raw_text == "raw words"
+    assert result.corrected_text == "corrected words"
+    assert result.metadata == response_payload
+    assert result.feedback_target is not None
+    assert result.feedback_target.backend == "api"
+    assert result.feedback_target.api_url == "http://127.0.0.1:8765"
+    assert result.feedback_target.api_token == "secret"
+    call = session.calls[0]
+    assert call["url"] == "http://127.0.0.1:8765/v1/transcribe"
+    assert call["audio_bytes"] == b"wave-data"
+    assert call["headers"] == {"Authorization": "Bearer secret"}
+
+
+def test_api_failure_is_actionable_and_does_not_fall_back_to_bundled(tmp_path: Path) -> None:
+    audio = tmp_path / "clip.wav"
+    audio.write_bytes(b"wave-data")
+    session = RecordingSession(FakeResponse(503, {"detail": "model is not ready"}))
+    client = ApiTranscriptionClient(
+        BackendConfig("api", "http://127.0.0.1:8765", None, "disabled"),
+        session=session,
+    )
+    bundled_calls: list[Path] = []
+
+    with pytest.raises(ApiBackendError, match=r"HTTP 503.*model is not ready"):
+        transcribe_selected(
+            audio,
+            config=client.config,
+            bundled_transcriber=lambda path: bundled_calls.append(path) or "fallback",
+            api_client=client,
+        )
+
+    assert bundled_calls == []
+
+
+def test_bundled_transcription_records_and_applies_only_local_exact_overrides(
+    tmp_path: Path,
+) -> None:
+    library = LocalCorrectionLibrary(tmp_path / "local-corrections.sqlite3")
+    config = BackendConfig("bundled", DEFAULT_API_URL, None, "active_field_on_enter")
+
+    first = transcribe_selected(
+        tmp_path / "unused.wav",
+        config=config,
+        bundled_transcriber=lambda _path: "write Acme tomorrow",
+        local_correction_library=library,
+    )
+    assert first is not None
+    assert first.raw_text == "write Acme tomorrow"
+    assert first.corrected_text == "write Acme tomorrow"
+    assert first.transcription_id
+    assert first.feedback_target is not None
+    assert first.feedback_target.backend == "bundled"
+
+    library.approve_exact_override(
+        first.transcription_id,
+        confirmed_text="write ACME tomorrow",
+        capture_method="active_field_on_enter",
+    )
+    repeated = transcribe_selected(
+        tmp_path / "unused.wav",
+        config=config,
+        bundled_transcriber=lambda _path: "write Acme tomorrow",
+        local_correction_library=library,
+    )
+    similar = transcribe_selected(
+        tmp_path / "unused.wav",
+        config=config,
+        bundled_transcriber=lambda _path: "write Acme today",
+        local_correction_library=library,
+    )
+
+    assert repeated is not None and repeated.text == "write ACME tomorrow"
+    assert repeated.metadata and repeated.metadata["exact_override_id"]
+    assert similar is not None and similar.text == "write Acme today"
+    assert similar.metadata and similar.metadata["exact_override_id"] is None
+
+
+def test_feedback_posts_only_confirmed_text_to_matching_transcription() -> None:
+    session = RecordingSession(FakeResponse(200, {"transcription_id": "tx-123", "override_id": "override-1"}))
+    client = ApiTranscriptionClient(
+        BackendConfig("api", "http://127.0.0.1:8765", None, "active_field_on_enter"),
+        session=session,
+    )
+
+    response = client.submit_feedback(
+        "tx-123",
+        final_text="confirmed final words",
+        capture_method="active_field_on_enter",
+        client_metadata={"client": "CtrlSpeak", "version": "0.3.0"},
+    )
+
+    assert response["override_id"] == "override-1"
+    call = session.calls[0]
+    assert call["url"] == "http://127.0.0.1:8765/v1/transcriptions/tx-123/feedback"
+    assert call["json"] == {
+        "confirmed_text": "confirmed final words",
+        "capture_method": "active_field_on_enter",
+        "client_metadata": {"client": "CtrlSpeak", "version": "0.3.0"},
+    }

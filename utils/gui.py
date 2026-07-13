@@ -55,6 +55,16 @@ from utils.ui_theme import (
 )
 
 from utils.config_paths import asset_path, get_logger
+from utils.transcription_backend import (
+    BACKEND_DISPLAY_NAMES,
+    BackendPersistenceError,
+    backend_display_name,
+    backend_from_display_name,
+    get_backend_config,
+    get_backend_status,
+    get_runtime_backend_config,
+    save_backend_config,
+)
 
 # Shared UI thread root + instance ref (imported by utils.system.schedule_management_refresh)
 tk_root: Optional[tk.Tk] = None
@@ -75,6 +85,21 @@ _lockout_cancel_button: Optional[ttk.Button] = None
 _lockout_cancel_callback: Optional[Callable[[], None]] = None
 
 # -------- Notification helpers --------
+
+
+def show_startup_error(title: str, message: str) -> None:
+    """Show a blocking error for the windowed build, which has no stderr UI."""
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(title, message, parent=root)
+    finally:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                logger.debug("Failed to destroy startup error root", exc_info=True)
 
 
 def _call_on_management_ui(callback: Callable[[], None], *, log_message: str) -> None:
@@ -1390,6 +1415,71 @@ class ManagementWindow:
         ttk.Label(status_card, textvariable=self.server_status_var, style="Caption.TLabel",
                   justify=tk.LEFT).pack(anchor=tk.W)
 
+        # Transcription backend selection
+        backend_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
+        backend_card.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(backend_card, text="Transcription backend", style="SectionHeading.TLabel").pack(anchor=tk.W)
+        backend_accent = ttk.Frame(backend_card, style="AccentLine.TFrame")
+        backend_accent.configure(height=2)
+        backend_accent.pack(fill=tk.X, pady=(10, 12))
+        active_backend = get_backend_config()
+        self.backend_var = tk.StringVar(value=backend_display_name(active_backend.backend))
+        self.api_url_var = tk.StringVar(value=active_backend.api_url)
+        with settings_lock:
+            saved_token = settings.get("api_token")
+        self.api_token_var = tk.StringVar(value=str(saved_token) if saved_token else "")
+        self.feedback_capture_var = tk.StringVar(value=active_backend.feedback_capture_method)
+
+        backend_row = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
+        backend_row.pack(fill=tk.X, pady=(8, 6))
+        ttk.Label(backend_row, text="Backend", style="Body.TLabel", width=18).pack(side=tk.LEFT)
+        ttk.Combobox(
+            backend_row,
+            textvariable=self.backend_var,
+            values=list(BACKEND_DISPLAY_NAMES.values()),
+            state="readonly", width=24, style="Modern.TCombobox",
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        api_url_row = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
+        api_url_row.pack(fill=tk.X, pady=6)
+        ttk.Label(api_url_row, text="API base URL", style="Body.TLabel", width=18).pack(side=tk.LEFT)
+        ttk.Entry(api_url_row, textvariable=self.api_url_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        token_row = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
+        token_row.pack(fill=tk.X, pady=6)
+        ttk.Label(token_row, text="Bearer token", style="Body.TLabel", width=18).pack(side=tk.LEFT)
+        ttk.Entry(token_row, textvariable=self.api_token_var, show="•").pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        feedback_row = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
+        feedback_row.pack(fill=tk.X, pady=6)
+        ttk.Label(feedback_row, text="Edit feedback", style="Body.TLabel", width=18).pack(side=tk.LEFT)
+        ttk.Combobox(
+            feedback_row,
+            textvariable=self.feedback_capture_var,
+            values=["active_field_on_enter", "disabled"],
+            state="readonly",
+            width=24,
+            style="Modern.TCombobox",
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(
+            backend_card,
+            text=("Automatic capture snapshots the active field when you press bare Enter, "
+                  "then restores the clipboard and submits only changed text. Saving any "
+                  "backend setting requires a CtrlSpeak restart. Environment variables "
+                  "override saved API values."),
+            style="Caption.TLabel",
+            wraplength=520,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(8, 0))
+        ttk.Button(
+            backend_card, text="Save backend", style="Accent.TButton", command=self._apply_backend,
+        ).pack(anchor=tk.W, pady=(12, 0))
+        self.backend_status_var = tk.StringVar(value=get_backend_status(active_backend))
+        ttk.Label(
+            backend_card, textvariable=self.backend_status_var, style="Caption.TLabel",
+            wraplength=520, justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(10, 0))
+
         # Device preferences
         device_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
         device_card.pack(fill=tk.X, pady=(0, 12))
@@ -1637,29 +1727,47 @@ class ManagementWindow:
         if self.cuda_supported and device_pref == "cuda" and has_cuda_files:
             cuda_ready = cuda_runtime_ready(ignore_preference=True, quiet=True)
         model_name = get_current_model_name()
-        self.mode_badge.configure(text=f"MODE \uFFFD {mode.upper()}", style="PillAccent.TLabel")
-        network_label = describe_server_status()
-        if "Not connected" in network_label:
+        backend_config = get_runtime_backend_config()
+        if backend_config.backend == "api":
+            self.mode_badge.configure(text="BACKEND · API", style="PillAccent.TLabel")
+            network_label = f"API configured: {backend_config.api_url}"
+        else:
+            self.mode_badge.configure(text=f"MODE · {mode.upper()}", style="PillAccent.TLabel")
+            network_label = describe_server_status()
+        if backend_config.backend == "api":
+            badge_style = "PillMuted.TLabel"
+            badge_text = "API · CONFIGURED"
+        elif "Not connected" in network_label:
             badge_style = "PillDanger.TLabel"
-            badge_text = "NETWORK \uFFFD OFFLINE"
+            badge_text = "NETWORK · OFFLINE"
         elif network_label.startswith("Serving"):
             badge_style = "PillAccent.TLabel"
-            badge_text = "SERVER \uFFFD ONLINE"
+            badge_text = "SERVER · ONLINE"
         elif network_label.startswith("Connected") or network_label.startswith("Discovered"):
             badge_style = "PillAccent.TLabel"
-            badge_text = "NETWORK \uFFFD LINKED"
+            badge_text = "NETWORK · LINKED"
         else:
             badge_style = "PillMuted.TLabel"
-            badge_text = "NETWORK \uFFFD READY"
+            badge_text = "NETWORK · READY"
         self.network_badge.configure(text=badge_text, style=badge_style)
+        mode_status = f"{mode}" if backend_config.backend == "bundled" else "not used by API backend"
         status_parts = [
-            f"\u2022 Mode: {mode}",
+            f"\u2022 Mode: {mode_status}",
             f"\u2022 Client: {'active' if sysmod.client_enabled else 'stopped'}",
             f"\u2022 Server thread: {'running' if sysmod.server_thread and sysmod.server_thread.is_alive() else 'not running'}",
             f"\u2022 Device: {device_pref}",
+            f"\u2022 Backend: {backend_config.backend}",
         ]
         self.status_var.set("\n".join(status_parts))
-        self.server_status_var.set(f"Network: {describe_server_status()}")
+        self.server_status_var.set(f"Network: {network_label}")
+        configured_backend = get_backend_config()
+        if configured_backend != backend_config:
+            self.backend_status_var.set(
+                f"Active until restart: {get_backend_status(backend_config)}\n"
+                f"Saved for next launch: {get_backend_status(configured_backend)}"
+            )
+        else:
+            self.backend_status_var.set(get_backend_status(backend_config))
         if not self.cuda_supported:
             cuda_text = "CUDA acceleration is unavailable on this system (no compatible GPU detected)."
         elif device_pref == "cuda":
@@ -1734,6 +1842,47 @@ class ManagementWindow:
             self.start_button.state(["disabled"]); self.stop_button.state(["!disabled"])
         else:
             self.start_button.state(["!disabled"]); self.stop_button.state(["disabled"])
+
+    def _apply_backend(self) -> None:
+        try:
+            backend = backend_from_display_name(self.backend_var.get())
+        except ValueError as exc:
+            messagebox.showerror("Invalid backend settings", str(exc), parent=self.window)
+            return
+        api_url = self.api_url_var.get().strip()
+        token = self.api_token_var.get()
+        capture_method = self.feedback_capture_var.get().strip()
+
+        try:
+            saved = save_backend_config(
+                backend=backend,
+                api_url=api_url,
+                api_token=token,
+                feedback_capture_method=capture_method,
+            )
+        except ValueError as exc:
+            messagebox.showerror("Invalid backend settings", str(exc), parent=self.window)
+            return
+        except BackendPersistenceError as exc:
+            messagebox.showerror("Backend settings not saved", str(exc), parent=self.window)
+            return
+
+        active = get_runtime_backend_config()
+        effective = get_backend_config()
+        self.refresh_status()
+        restart_required = effective != active
+        if restart_required:
+            self.backend_status_var.set(
+                f"Active until restart: {get_backend_status(active)}\n"
+                f"Saved for next launch: {get_backend_status(effective)}"
+            )
+            message = "Backend settings saved. Restart CtrlSpeak to apply them."
+        else:
+            self.backend_status_var.set(get_backend_status(active))
+            message = "Backend settings are saved and already match the active runtime."
+        if effective != saved:
+            message += " Environment variables currently override one or more saved values."
+        messagebox.showinfo("Backend settings saved", message, parent=self.window)
 
     def _reload_transcriber_async(
         self,
@@ -2117,9 +2266,3 @@ class ManagementWindow:
             self._unbind_mousewheel(None)
             self.window.destroy()
         management_window = None
-
-
-
-
-
-

@@ -10,6 +10,7 @@ pyaudio
 pyinstaller
 pynput
 pystray
+requests
 tqdm
 pytest
 pylint

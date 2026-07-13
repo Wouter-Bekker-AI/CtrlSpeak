@@ -25,6 +25,10 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "device_preference": "cpu",
     "input_device": None,
     "model_name": "small",
+    "transcription_backend": "bundled",
+    "api_url": "http://127.0.0.1:8765",
+    "api_token": None,
+    "feedback_capture_method": "active_field_on_enter",
 }
 
 settings_lock = threading.RLock()
@@ -93,14 +97,21 @@ def load_settings() -> Dict[str, object]:
         settings.update(loaded)
         return dict(settings)
 
-def save_settings() -> None:
+def save_settings() -> bool:
     path = get_config_file_path()
     with settings_lock:
         snapshot = dict(settings)
     try:
+        if not sys.platform.startswith("win"):
+            path.touch(mode=0o600, exist_ok=True)
+            path.chmod(0o600)
         path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+        if not sys.platform.startswith("win"):
+            path.chmod(0o600)
+        return True
     except Exception:
         get_logger().exception("Unable to save settings to %s", path)
+        return False
 
 
 def get_app_base_dir() -> Path:

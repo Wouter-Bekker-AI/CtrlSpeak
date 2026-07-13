@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 import time
 import ctypes
+import uuid
 from ctypes import wintypes
 from pathlib import Path
 from typing import Optional
@@ -296,6 +297,52 @@ def restore_clipboard_text(previous: Optional[str]) -> None:
                 user32.CloseClipboard()
         return
     set_clipboard_text(previous)
+
+
+def clipboard_contains_non_text_data() -> bool:
+    """Return True when capture would overwrite a non-text-only clipboard."""
+    if not sys.platform.startswith("win") or not open_clipboard():
+        return False
+    try:
+        first_format = user32.EnumClipboardFormats(0)
+        return bool(first_format) and not bool(
+            user32.IsClipboardFormatAvailable(CF_UNICODETEXT)
+        )
+    finally:
+        user32.CloseClipboard()
+
+
+def snapshot_active_text_field(*, copy_wait_seconds: float = 0.08) -> Optional[str]:
+    """Best-effort Ctrl+A/C snapshot of the focused Windows field.
+
+    The original Enter is owned by the caller's non-suppressing keyboard hook;
+    this helper does not send Enter. A prior Unicode-text clipboard value (or an
+    empty clipboard) is restored before returning. A non-text-only clipboard is
+    left untouched and capture is skipped because it cannot be restored safely
+    through the lightweight Win32 text helpers.
+    """
+    if not sys.platform.startswith("win"):
+        return None
+    if clipboard_contains_non_text_data():
+        logger.info("Skipping active-field capture to preserve non-text clipboard data")
+        return None
+
+    previous = get_clipboard_text()
+    marker = f"CtrlSpeak-field-capture-{uuid.uuid4()}"
+    try:
+        if not set_clipboard_text(marker):
+            return None
+        pyautogui.hotkey("ctrl", "a")
+        pyautogui.hotkey("ctrl", "c")
+        if copy_wait_seconds > 0:
+            time.sleep(copy_wait_seconds)
+        captured = get_clipboard_text()
+        return captured if captured is not None and captured != marker else None
+    except Exception:
+        logger.exception("Failed to snapshot the active text field")
+        return None
+    finally:
+        restore_clipboard_text(previous)
 
 
 def send_input_key(vk: int, keyup: bool = False) -> bool:

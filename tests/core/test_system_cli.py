@@ -8,17 +8,50 @@ pytestmark = pytest.mark.core_headless
 
 
 def test_parse_cli_args_transcribe():
-    args = system.parse_cli_args(["ctrlspeak", "--transcribe", "sample.wav", "--force-sendinput"])
+    args = system.parse_cli_args([
+        "ctrlspeak", "--transcribe", "sample.wav", "--force-sendinput",
+        "--backend", "api", "--api-url", "http://127.0.0.1:8765/",
+    ])
     assert args.transcribe == "sample.wav"
     assert args.force_sendinput is True
     assert args.auto_setup is None
     assert args.uninstall is False
+    assert args.backend == "api"
+    assert args.api_url == "http://127.0.0.1:8765/"
 
 
 def test_parse_cli_args_auto_setup():
     args = system.parse_cli_args(["ctrlspeak", "--auto-setup", "client_server"])
     assert args.auto_setup == "client_server"
     assert args.transcribe is None
+
+
+def test_cli_backend_selection_persists_without_accepting_a_token_argument(capsys):
+    args = system.parse_cli_args([
+        "ctrlspeak", "--backend", "api", "--api-url", "http://127.0.0.1:9000",
+        "--backend-status",
+    ])
+
+    assert system.apply_backend_cli_config(args) is True
+
+    output = capsys.readouterr().out
+    assert output == (
+        "API · http://127.0.0.1:9000 · no bearer token · "
+        "feedback: automatic active-field capture on Enter\n"
+    )
+    assert not hasattr(args, "api_token")
+    with system.settings_lock:
+        assert system.settings["transcription_backend"] == "api"
+        assert system.settings["api_url"] == "http://127.0.0.1:9000"
+
+
+def test_api_backend_hotkey_does_not_require_legacy_server():
+    with system.settings_lock:
+        system.settings["mode"] = "client"
+        system.settings["transcription_backend"] = "api"
+    system.last_connected_server = None
+
+    assert system._client_hotkey_available() is True
 
 
 def test_acquire_single_instance_lock(tmp_path, monkeypatch):
