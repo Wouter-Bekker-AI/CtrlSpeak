@@ -1156,6 +1156,9 @@ def run_tray():
 # ---------------- Startup / single-instance ----------------
 def acquire_single_instance_lock() -> bool:
     global instance_lock_handle
+    if instance_lock_handle is not None:
+        logger.debug("Instance lock is already held by this process")
+        return True
     lock_path = get_config_dir() / LOCK_FILENAME
     logger.debug("Attempting to acquire instance lock at %s", lock_path)
     try:

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+import types
+
 import pytest
 
 from utils import system
@@ -79,3 +82,29 @@ def test_acquire_single_instance_lock(tmp_path, monkeypatch):
     system.release_single_instance_lock()
     assert system.instance_lock_handle is None
     assert not lock_path.exists()
+
+
+def test_windows_reacquire_single_instance_lock_is_idempotent(tmp_path, monkeypatch):
+    lock_attempts = 0
+
+    def locking(_fileno, mode, _length):
+        nonlocal lock_attempts
+        if mode == fake_msvcrt.LK_NBLCK:
+            lock_attempts += 1
+            if lock_attempts > 1:
+                raise OSError("lock already held")
+
+    fake_msvcrt = types.SimpleNamespace(LK_NBLCK=1, LK_UNLCK=2, locking=locking)
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+    monkeypatch.setattr(system.sys, "platform", "win32")
+    monkeypatch.setattr(system, "get_config_dir", lambda: tmp_path)
+
+    try:
+        assert system.acquire_single_instance_lock() is True
+        first_handle = system.instance_lock_handle
+
+        assert system.acquire_single_instance_lock() is True
+        assert system.instance_lock_handle is first_handle
+        assert lock_attempts == 1
+    finally:
+        system.release_single_instance_lock()
