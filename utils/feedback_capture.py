@@ -1,8 +1,8 @@
 """Best-effort active-field edit feedback for one CtrlSpeak injection.
 
 The Enter observer never suppresses, replays, or synthesizes the user's Enter.
-On Windows, the snapshot provider briefly uses the existing Ctrl+A/C automation
-path and restores the clipboard before the original key callback returns.
+The selected platform adapter briefly uses its supported Ctrl+A/C path and
+restores the text clipboard before the original key callback returns.
 """
 from __future__ import annotations
 

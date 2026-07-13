@@ -1,192 +1,257 @@
-# CtrlSpeak
+# CtrlSpeak v0.4 for Ubuntu/Linux
 
-CtrlSpeak v0.3 is a Windows speech-to-text assistant that records speech while the right `Ctrl` key is held down and injects the transcription into the active text control. Its control center explicitly offers **Embedded / local** or **Remote API** transcription. The legacy **Client + Server** and **Client Only** choices remain available inside embedded/local mode.
+CtrlSpeak is a native desktop speech-to-text client. Hold the **right Ctrl**
+key to record, release it to transcribe, and CtrlSpeak inserts the result into
+the active field. v0.4 adds a maintained Ubuntu/Linux path while preserving the
+v0.3 backend design:
 
-Both flavours support Windows 10/11, enforce a single running instance, expose a tray UI for mode switching, and include AnyDesk-aware text injection with optional audio cues.
+- **Embedded / local** runs the bundled `faster-whisper` workflow and retains
+  the existing model (`small` or `large-v3`) and device (`cpu` or `cuda`)
+  settings.
+- **Remote API** sends the recording to a configurable HTTP(S) base URL with an
+  optional bearer token. It retains the API transcription ID and submits an
+  edited final result to that same API endpoint.
 
-## Repository Layout
+The legacy **Client + Server** and **Client Only** roles remain inside the
+embedded/local backend. Remote API mode is independent of those roles and does
+not start discovery, a local server, or a model download.
 
-- `main.py` – application entry point.
-- `assets/` – static resources such as the tray icon (`icon.ico`), the welcome video (`TrueAI_Intro_Video.mp4`), the fun-fact rotation list (`fun_facts.txt`), and the processing chime (`loading.wav`).
-- `utils/` – implementation modules (GUI, models, networking, configuration helpers, etc.).
-- `utils/build_exe.py` – helper script that runs PyInstaller with the correct data files.
-- `packaging/` – PyInstaller spec (`CtrlSpeak.spec`) and additional build documentation.
+## Linux support boundary
 
-Generated folders such as `dist/` and `build/` are ignored via `.gitignore`.
+The desktop hotkey, active-field capture, and text-injection workflow is
+supported on an **X11/Xorg session**. On Ubuntu's sign-in screen, choose the
+gear icon and **Ubuntu on Xorg** before signing in.
 
-## Environment Setup
+Native Wayland global input is not implemented. CtrlSpeak detects Wayland,
+leaves the listener stopped, and presents an actionable message instead of
+crashing or pretending that an XWayland window makes system-wide input work.
+Headless shells and services are also unsupported because there is no active
+field or desktop keyboard session.
 
-Create an isolated environment and install the dependencies:
+On X11:
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+- `pynput` observes the global right-Ctrl hotkey and bare Enter. The listener is
+  always configured with `suppress=False`.
+- `pyautogui` performs X11 keystrokes.
+- `xclip` is the preferred clipboard provider for paste and feedback capture.
+  CtrlSpeak restores the prior text clipboard after the operation.
+- If `xclip` is absent, the included tkinter fallback uses a withdrawn Tk root,
+  services X11 selection events while it owns staged text, and restores the
+  prior text before cleaning up. It supports Unicode and multiline text.
+- If neither `xclip` nor the Tk/X11 fallback is usable, CtrlSpeak reports the
+  display/runtime problem; plain single-line ASCII retains its direct-typing
+  last resort.
+- If the clipboard advertises non-text formats, CtrlSpeak does not overwrite
+  them. It uses the same ASCII fallback when possible; otherwise insertion or
+  feedback capture is skipped with a logged explanation.
+
+Some protected, elevated, custom-rendered, remote, terminal, password, or
+multiline controls may reject Ctrl+A/C or expose incomplete text. Correction
+capture is therefore best effort, not universal accessibility-API support.
+
+## Ubuntu prerequisites and source setup
+
+Use a project virtual environment. Typical Ubuntu build/runtime prerequisites
+are:
+
+```bash
+sudo apt install python3-venv python3-dev python3-tk portaudio19-dev \
+  libportaudio2 xclip libx11-6 libxtst6 libxinerama1 libxrandr2 libxi6
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-GPU acceleration requires an NVIDIA CUDA-capable GPU with compatible drivers, but CtrlSpeak always boots in CPU mode and skips CUDA validation unless you opt in. The Whisper `small` model is downloaded automatically on first launch so a fresh install is usable immediately. Selecting **GPU (CUDA)** in the management window now launches the same welcome-and-progress experience used for model downloads; the app installs the CUDA runtime, cuBLAS, and cuDNN automatically and only falls back to CPU if validation fails. The CUDA wheels are cached under `%APPDATA%\CtrlSpeak\cuda\downloads`, verified with the published SHA-256 digests, and reused on the next attempt so extraction failures no longer force a redownload; the cache is purged only after a validated install. You can also stage GPU support manually via `python main.py --download-cuda-only` (alias: `--setup-cuda`). When no CUDA-capable GPU is detected, the management UI hides the GPU option and the installer flag exits early with an explanatory message.
-During the initial Whisper download, CtrlSpeak opens a centered welcome window sized to roughly 80% of a 1080p frame (about 1536×864) that plays the bundled intro clip (about five seconds for the default `TrueAI_Intro_Video.mp4`) with audio. Once the clip ends, the window transitions into a branded fun-facts card featuring the CtrlSpeak logo on a white tile and rotating onboarding tips sourced from `assets/fun_facts.txt`. A slim lockout window remains in the top-left corner with live status text and a red **Cancel download** button; cancelling stops the download subprocess immediately, exiting entirely if no model is available or otherwise returning you to the currently staged model.
+`xclip` remains preferred, but it is optional at runtime when tkinter can open
+the active X11 display. `python3-tk` supplies that included fallback for source
+environments; the Linux bundle must include the same tkinter runtime support.
 
+Ubuntu GNOME may also require its AppIndicator support/extension before a
+legacy tray icon is visible. CtrlSpeak keeps Tk on the main thread and runs the
+Linux tray backend in its dedicated event thread. If tray startup fails, the
+application reports the failure and opens the management window so settings and
+Quit remain reachable. `pystray`'s Xorg fallback has limited shell integration;
+GTK/AppIndicator support may require PyGObject and desktop-specific packages.
 
-## Running from Source
+PyAudio uses the host's PortAudio input devices. Microphone permission, default
+source selection, PipeWire/PulseAudio compatibility, and per-device levels are
+operator/desktop settings; CtrlSpeak does not alter them.
 
-```powershell
+Run from source:
+
+```bash
+. .venv/bin/activate
 python main.py
 ```
 
-On first launch you will be prompted to choose between **Client + Server** or **Client Only** modes. The client-only card lets you refresh for LAN servers or manually enter a `host[:port]` so CtrlSpeak knows which remote host to target. Settings, models, and logs live under `%APPDATA%\CtrlSpeak` (the folder is created automatically).
+Runtime state is never written beside the source tree or packaged executable.
+It lives at:
+
+```text
+$XDG_CONFIG_HOME/CtrlSpeak/
+```
+
+If `XDG_CONFIG_HOME` is unset, the path is `~/.config/CtrlSpeak`. This directory
+contains `settings.json`, `models/`, `cuda/`, `temp/`, `logs/`, the instance
+lock, Hugging Face cache, and `local-corrections.sqlite3`. Settings and local
+correction files are created with user-only POSIX permissions.
 
 ## Transcription backends
 
-The backend choice is independent of the legacy client/server operating mode:
-
-- **Embedded / local** (`bundled`, the default) preserves existing offline functionality and does not use the configurable Whisper API. Client + Server runs the bundled model directly; the legacy Client Only role continues to use CtrlSpeak discovery/`/transcribe` and its existing local-server recovery flow.
-- **Remote API** (`api`) uploads the WAV recording to `POST <api_url>/v1/transcribe`. `api_url` is a complete `http://` or `https://` base URL and may identify loopback, a LAN/VPN host, or a properly secured public/cloud service; no LAN-only assumption is made. CtrlSpeak retains the returned `id`, `raw_text`, corrected `text`, segments, language, correction IDs, and exact-override ID with the pending injection. An API error is actionable and never silently switches to the embedded backend.
-
-Bundled results pass through `%APPDATA%\CtrlSpeak\local-corrections.sqlite3`. User-approved edits create only complete, exact raw-transcript → corrected-transcript overrides, so a different or merely similar transcript is not rewritten. This index is local and works without network access. Remote API corrections remain at the configured service.
-
-The management window has backend, API URL, masked optional bearer-token, feedback-capture, and redacted status controls. Backend settings are pinned when CtrlSpeak starts; saving a changed backend, URL, token, or feedback method explicitly requires a CtrlSpeak restart, avoiding a partially switched runtime. Defaults and persisted settings are:
+The defaults are:
 
 ```json
 {
   "transcription_backend": "bundled",
   "api_url": "http://127.0.0.1:8765",
   "api_token": null,
-  "feedback_capture_method": "active_field_on_enter"
+  "feedback_capture_method": "active_field_on_enter",
+  "device_preference": "cpu",
+  "model_name": "small"
 }
 ```
 
-Environment variables override saved backend values at runtime:
+The API URL is a complete configurable `http://` or `https://` base URL. It may
+point to loopback, a LAN/VPN host, or an HTTPS service. No current LAN address
+is hardcoded. API mode calls:
 
-- `CTRLSPEAK_BACKEND=bundled|api`
-- `CTRLSPEAK_API_URL=http://127.0.0.1:8765`
-- `CTRLSPEAK_API_TOKEN=...`
+- `POST <base-url>/v1/transcribe` with multipart WAV audio.
+- `POST <base-url>/v1/transcriptions/{id}/feedback` with the confirmed final
+  text, capture method, and client audit metadata.
 
-There is intentionally no bearer-token command-line flag, because command arguments can be exposed in process listings and shell history. Prefer `CTRLSPEAK_API_TOKEN`; a token entered in the UI is stored in the per-user `settings.json` as plain text, so protect that account and file. On POSIX systems CtrlSpeak creates the settings and correction-database files with user-only permissions; Windows protection relies on the user profile ACL. Status text and object representations report only whether a token exists and never print it.
+The transcribe response must include non-empty `text`, `raw_text`, and `id`.
+CtrlSpeak retains those fields plus the complete response metadata. A pending
+feedback item remains bound to the original URL and in-memory token even if
+saved settings are later changed. Network, HTTP, and response-schema failures
+are actionable and never silently fall back to local transcription.
 
-### Automatic edit feedback and platform limitations
+An optional token is sent as `Authorization: Bearer <token>`. There is no token
+CLI flag because command arguments leak through process listings and shell
+history. A token saved through the management window is plain text in the
+user-only settings file. Runtime status displays only whether a token exists.
 
-With the default `active_field_on_enter` method:
+Environment overrides are:
 
-1. Dictate and let CtrlSpeak inject a transcript from either backend.
-2. Edit the target field.
-3. Press bare Enter to send/confirm it normally.
+```bash
+export CTRLSPEAK_BACKEND=api
+export CTRLSPEAK_API_URL=https://whisper.example.test/base
+export CTRLSPEAK_API_TOKEN='...'
+python main.py
+```
 
-At the observed Enter press, CtrlSpeak best-effort snapshots the active field with Ctrl+A/C before returning from its non-suppressing keyboard callback. It restores the prior text clipboard value and submits the captured text only when it differs from the pending injected result. The user does not need to select or copy anything manually. The original Enter is never suppressed, replayed, duplicated, or synthesized. Pending state is single-use, replaced by the next injection, and expires after ten minutes. A pending remote result remains bound to the original API URL and in-memory token even if saved settings change before confirmation.
+Backend settings are pinned at startup. Saving a backend, URL, token, or
+feedback-method change in the management window requires a restart, preventing
+a partially switched runtime.
 
-This is deliberately best-effort: some elevated, remote, custom-rendered, protected, password, terminal, or multiline controls may reject Ctrl+A/C, may expose only part of their content, or may interpret Enter as a newline. Capture is skipped when CtrlSpeak detects a non-text-only clipboard because that data cannot be restored safely by its lightweight Win32 helper. Ctrl+A leaves the field selected, and a field containing unrelated surrounding text would be treated as the complete final transcript. Remote feedback sends the changed final text and client audit metadata to `POST /v1/transcriptions/{id}/feedback`; embedded feedback stays in the local correction index. Both paths store an exact raw-transcript-to-approved-text override only. Neither path infers broad phrase substitutions from arbitrary whole-transcript edits; any future phrase rule must be separately and explicitly user-approved and auditable. Set the method to `disabled` in the management window if this behavior is unsuitable for a particular workflow.
+## Embedded/local Whisper
 
-### Command-line Flags
+Embedded mode preserves model download, storage, selection, CPU inference, and
+the legacy client/server behavior. The default `small` model is downloaded on
+first embedded launch and stored under the XDG CtrlSpeak directory. Local
+approved edits create exact raw-transcript-to-final-text overrides in
+`local-corrections.sqlite3`; similar transcripts are not broadly rewritten.
 
-- `--auto-setup {client,client_server}` – pre-select the startup mode without showing the GUI prompts.
-- `--force-sendinput` – force the AnyDesk-compatible synthetic keystroke path.
-- `--backend {bundled,api}` – persist the selected transcription backend.
-- `--api-url <http(s)-url>` – persist the API base URL; configure tokens through settings or `CTRLSPEAK_API_TOKEN`.
-- `--backend-status` – print redacted backend/auth/feedback status and exit.
-- `--download-cuda-only` (alias: `--setup-cuda`) – stage the CUDA runtime, cuBLAS, and cuDNN support packages (reusing any cached wheels before downloading fresh copies) and exit; the command aborts immediately when no CUDA-capable GPU is detected.
-- `--transcribe <wav>` – batch process an audio file without the hotkey workflow.
-- `--uninstall` – remove the application data and executable (used by the packaged build).
+CPU is the safe default. On Linux, CtrlSpeak can select `cuda` when
+`libcuda.so.1` reports an NVIDIA device and CTranslate2 can use the installed
+CUDA/cuDNN runtime. CtrlSpeak v0.4 does **not** install Linux GPU drivers or
+system CUDA libraries. The management window offers **Recheck system CUDA**;
+the Windows wheel-based installer remains Windows-only. `--download-cuda-only`
+therefore validates Linux system readiness and reports the missing operator
+prerequisites rather than modifying the host.
 
-Run `python main.py --help` for the full list.
+## Edit feedback and Enter behavior
 
-## Packaging with PyInstaller
+With `active_field_on_enter` enabled:
 
-Use the helper module to build the v0.3 executable:
+1. CtrlSpeak injects one transcription.
+2. The user edits the active field.
+3. The user presses bare Enter normally.
+4. Before that original non-suppressed Enter reaches the application, CtrlSpeak
+   best-effort snapshots the field with Ctrl+A/C, restores the prior text
+   clipboard, compares the result, and schedules feedback only if it changed.
 
-```powershell
+CtrlSpeak never suppresses, replays, synthesizes, or duplicates Enter. Modified
+Enter (for example Shift+Enter), key releases, and unrelated keys do not consume
+the pending item. Pending state is single-use, is replaced by the next
+injection, and expires after ten minutes. Set the feedback method to `disabled`
+when whole-field selection is unsuitable.
+
+## CLI
+
+```text
+--backend {bundled,api}       Persist the backend
+--api-url <http(s)-url>       Persist the complete API base URL
+--backend-status              Print redacted backend status and exit
+--auto-setup {client,client_server}
+--transcribe <wav>            Transcribe a file
+--download-cuda-only          Windows install / Linux readiness check
+--setup-cuda                  Alias for --download-cuda-only
+--force-sendinput             Windows-only SendInput preference
+--automation-flow             Legacy provisioned-workstation harness
+--uninstall                   Automatic self-removal on Windows only
+```
+
+Use `python main.py --help` for parser details. On Linux, remove a manually
+installed executable, icon, and desktop file manually; CtrlSpeak does not run a
+package manager or delete arbitrary installation paths.
+
+## Linux packaging and launcher template
+
+The maintained Linux build command is:
+
+```bash
 python -m utils.build_exe
 ```
 
-The helper executes `packaging/CtrlSpeak_v0.3.spec` and produces `dist/CtrlSpeak_v0.3.exe`. The one-file GUI build uses `console=False`, so it opens no console window; startup configuration errors are shown in a GUI dialog, while stdout-oriented flags are intended for `python main.py` from source. The build reuses `assets/icon.ico` and embeds the loading chime, onboarding video, fun-facts rotation list, and regression clip. Required runtime data for `faster_whisper`, `ctranslate2`, `ffpyplayer`, and the API HTTP client is collected automatically, while CUDA runtimes and Whisper model weights remain external downloads used only by bundled mode.
+It selects `packaging/CtrlSpeak_v0.4.spec` and produces the clearly named
+one-file executable `dist/CtrlSpeak_v0.4` on a Linux build host. The PNG icon and
+runtime assets are bundled; model weights and system CUDA libraries remain
+external. PyInstaller does not cross-compile this artifact from Windows.
 
-## Manual Model Download
+The repository includes:
 
-CtrlSpeak caches Whisper model weights under `%APPDATA%\CtrlSpeak\models`. The default configuration selects the lightweight `small` Whisper checkpoint and runs on the CPU. If you want to preload the model without launching the GUI, use the Hugging Face CLI:
+- `packaging/linux/ctrlspeak.desktop` — uninstalled launcher template.
+- `packaging/linux/io.trueai.ctrlspeak.metainfo.xml` — AppStream metadata.
+- `assets/icon.png` — native Linux application icon.
 
-```powershell
-pip install huggingface_hub
-$target = Join-Path $env:APPDATA 'CtrlSpeak\models\small'
-huggingface-cli download Systran/faster-whisper-small --local-dir $target --local-dir-use-symlinks False
-New-Item -ItemType File (Join-Path $target '.installed') -Force | Out-Null
+Detailed prerequisites, placeholder replacement, optional user-local install
+commands, and post-build verification are in `packaging/BUILDING.md`. Nothing in
+the build helper installs a desktop file, starts a service, changes a firewall,
+or deploys an API.
+
+## Development checks
+
+```bash
+python -m pytest -m core_headless
+python -m pytest -q tests/core
+python -m compileall .
+git diff --check
 ```
 
-- Substitute a different `repo/model` name if you prefer another Whisper checkpoint.
-- To point CtrlSpeak at a custom directory, set the `CTRLSPEAK_MODEL_DIR` environment variable to the parent folder that contains the models (defaults to `%APPDATA%\CtrlSpeak\models`).
+The full embedded model/server integration remains opt-in because it downloads
+and loads Whisper assets:
 
-## Controlled LAN and public API hosting
-
-Configuring a remote URL in CtrlSpeak does not expose, rebind, deploy, restart, or open firewall access to any service. The companion Whisper service remains loopback-only by default. If an operator later enables remote access:
-
-1. Prefer a specific private/VPN interface over all-interface binding, and restrict reachability to intended clients with separately managed network policy.
-2. Configure a strong bearer token outside source control and use the same token in CtrlSpeak’s per-user settings or `CTRLSPEAK_API_TOKEN`. Never put it in a command line, repository file, or shared log.
-3. Use HTTPS for public, cloud, or untrusted-network traffic. Put the loopback service behind a TLS gateway or VPN; validate certificates normally and do not disable TLS verification.
-4. Remember that a reverse proxy connects to the service from loopback. The proxy is therefore inside the service’s trusted boundary and must authenticate remote clients itself before forwarding requests.
-5. Protect and retain correction databases according to the sensitivity of dictated and edited text. Back them up only to approved encrypted storage.
-
-The legacy bundled CtrlSpeak `/transcribe` and UDP-discovery protocol is for controlled trusted networks and does not implement the new bearer-auth contract. Do not publish it on the Internet. If it is required on a LAN, an operator must create narrowly scoped private-network firewall rules after reviewing the host/network design; this project does not make those changes automatically.
-
-For a Windows embedded host, copy `dist\CtrlSpeak_v0.3.exe`, run it once with `--auto-setup client_server` to stage the model, and verify the control center reports the local server as running. Any installation, firewall, service, TLS, or restart action remains a deliberate post-build operator step.
-
-## Development Notes
-
-- Temporary recordings, configuration, logs, and downloaded Whisper models live under `%APPDATA%\CtrlSpeak`.
-- Test audio files such as `part1.wav` are intentionally excluded from Git to avoid large binaries.
-- Use the tray menu to manage the client/server lifecycle or to uninstall (`Delete CtrlSpeak`).
-
-## Automation Flow
-
-Run the regression harness to validate a workstation without touching the GUI:
-
-```powershell
-python main.py --automation-flow
+```bash
+CTRLSPEAK_RUN_FULL_TESTS=1 python -m pytest -m full_gui
 ```
 
-The command performs a staged health-check entirely inside %APPDATA%\CtrlSpeak:
+See `docs/TESTING.md` for focused commands and the required physical Ubuntu
+desktop checks. A headless suite cannot prove microphone capture, GNOME tray
+visibility, global X11 hooks, active-application injection, or model/GPU
+performance.
 
-1. Ensure the default Whisper model is present under %APPDATA%\CtrlSpeak\models (downloading it when missing).
-2. Reuse or install the NVIDIA CUDA runtime stack (nvidia-cuda-runtime-cu12, nvidia-cublas-cu12, nvidia-cudnn-cu12) so the DLLs live under %APPDATA%\CtrlSpeak\cuda\12.3 when GPU testing is required.
-3. Transcribe assets/test.wav on the CPU.
-4. Transcribe the same clip on the GPU using the DLLs staged in %APPDATA%\CtrlSpeak\cuda\12.3.
-5. Simulate each text-injection strategy (direct insert, SendInput paste, clipboard paste, PyAutoGUI typing) and write a consolidated report to %APPDATA%\CtrlSpeak\automation\artifacts.
+## Network and security boundary
 
-If any stage fails the workflow stops at that checkpoint and leaves detailed logs plus the partially populated automation_state.json in the same automation folder. Fix the underlying system issue (drivers, CUDA DLLs, networking, etc.) and re-run the flag - the script resumes where it left off.
+Configuring a URL does not bind, expose, restart, deploy, or reconfigure the
+remote service. CtrlSpeak does not change services or firewall policy. Use HTTPS
+or a trusted VPN for untrusted networks, keep tokens out of source and command
+lines, and protect transcription/correction data according to its sensitivity.
 
-### Handing the checklist to another operator or AI agent
-
-Provide your helper with the single command above and the acceptance criteria:
-
-- All stages complete without errors on a single pass.
-- %APPDATA%\CtrlSpeak\automation\artifacts contains a report named automation_run_*.txt whose injection sections echo the canonical transcript.
-- %APPDATA%\CtrlSpeak\cuda\12.3 holds the CUDA DLLs and `python main.py` can select both CPU and GPU devices without warnings.
-
-An agent can loop on `python main.py --automation-flow`, examine automation_state.json, and only make host-level changes (install drivers, adjust PATH, etc.) until the run succeeds - no code edits are required.
-
-
+The legacy embedded `/transcribe` plus UDP-discovery protocol is intended for a
+controlled trusted LAN and has no bearer-auth contract. Do not publish it to the
+Internet.
 
 ## License
 
-This project is released under the MIT License:
-
-```
-MIT License
-
-Copyright (c) 2025 CtrlSpeak contributors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
+MIT License. Copyright (c) 2025 CtrlSpeak contributors.

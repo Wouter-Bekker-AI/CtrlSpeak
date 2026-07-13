@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.trueai.ctrlspeak</id>
+  <name>CtrlSpeak</name>
+  <summary>Desktop speech-to-text with embedded and remote transcription</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <content_rating type="oars-1.1" />
+  <description>
+    <p>
+      CtrlSpeak records while the right Control key is held, transcribes with a
+      bundled Whisper model or a configured HTTP API, and inserts the result in
+      the active field.
+    </p>
+  </description>
+  <launchable type="desktop-id">ctrlspeak.desktop</launchable>
+  <provides>
+    <binary>CtrlSpeak_v0.4</binary>
+  </provides>
+  <categories>
+    <category>Utility</category>
+    <category>Accessibility</category>
+  </categories>
+  <releases>
+    <release version="0.4.0" date="2026-07-13" />
+  </releases>
+</component>

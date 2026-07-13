@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=CtrlSpeak
+Comment=Hold right Ctrl to dictate into the active field
+Exec=@CTRLSPEAK_EXECUTABLE@
+Icon=@CTRLSPEAK_ICON@
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=speech;dictation;transcription;whisper;
+StartupNotify=true
+StartupWMClass=CtrlSpeak

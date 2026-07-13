@@ -1,43 +1,142 @@
-# Building CtrlSpeak one-file executable
+# Building CtrlSpeak v0.4 for Linux
 
-## Prereqs
-- A 64-bit Windows 10/11 build host with Python 3.10+
-- `pip install -r requirements.txt`
-- `pip install pyinstaller` (already in requirements)
-- Ensure all optional GPU or model components are **not** bundled; this app fetches them at first launch.
+This is the maintained Ubuntu/Linux packaging path. It produces
+`dist/CtrlSpeak_v0.4`; it does not install the result, create a desktop
+launcher, start a service, deploy an API, or alter firewall policy.
+
+## Prerequisites
+
+Build on a 64-bit Linux host. PyInstaller builds for the host operating system;
+it does not cross-compile the Linux executable from Windows.
+Build on the oldest Ubuntu/glibc release you intend to support because
+PyInstaller does not bundle Linux `libc`; a bundle made on a newer distribution
+may not start on an older one.
+
+Typical Ubuntu packages are:
+
+```bash
+sudo apt install python3-venv python3-dev python3-tk portaudio19-dev \
+  libportaudio2 xclip libx11-6 libxtst6 libxinerama1 libxrandr2 libxi6
+```
+
+Create a clean environment and install Python dependencies:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+`xclip` is preferred for clipboard-preserving paste and automatic active-field
+edit capture, but is not a hard runtime prerequisite. When it is absent, the
+included tkinter runtime provides a withdrawn Tk/X11 clipboard fallback with
+Unicode/multiline staging, selection-event servicing, and prior-text
+restoration. If neither provider can access the active X11 display, CtrlSpeak
+reports actionable `DISPLAY`/tkinter guidance; only plain single-line ASCII can
+use direct typing. PortAudio and a working desktop input source are required
+for recording. Ubuntu GNOME may require AppIndicator/legacy tray support before
+the tray icon is visible.
+
+The global hotkey and injection path requires an X11 session. At the Ubuntu
+sign-in screen choose **Ubuntu on Xorg**. Native Wayland is intentionally
+reported as unsupported.
 
 ## Build
-From the project root run:
 
-```powershell
+From the project root:
+
+```bash
 python -m utils.build_exe
 ```
 
-Build on Windows from a clean virtual environment. The maintained spec is `packaging/CtrlSpeak_v0.3.spec`; the equivalent direct command is:
+The helper selects `packaging/CtrlSpeak_v0.4.spec`. The equivalent direct
+command is:
 
-```powershell
-pyinstaller --noconfirm --clean packaging/CtrlSpeak_v0.3.spec
+```bash
+pyinstaller --noconfirm --clean packaging/CtrlSpeak_v0.4.spec
 ```
 
-The helper wraps PyInstaller and executes `packaging/CtrlSpeak_v0.3.spec`, keeping command-line and scripted builds aligned. You can still invoke `pyinstaller packaging/CtrlSpeak_v0.3.spec` directly if you need custom flags.
-To produce a private white-label build that swaps in `assets/Watcher_Intro_Video.mp4` and emits `CtrlSpeak_Watcher.exe`, pass
-`--watcher` to the helper. That path uses `packaging/CtrlSpeak_Watcher.spec` while leaving the standard build flow untouched.
+The one-file spec uses `console=False`, includes the native PNG icon and shipped
+assets, collects the Whisper/CTranslate2/HTTP runtime data, includes the X11
+`pynput` and Linux `pystray` backends, and explicitly excludes the lazy Windows
+input adapter. Whisper weights and Linux system CUDA/cuDNN libraries are not
+bundled.
 
-The spec collects the native data required by `faster_whisper`, `ctranslate2`, and `ffpyplayer`, and embeds the existing `assets/icon.ico`, loading chime, onboarding video, fun-facts list, and regression test clip under the packaged `assets/` directory. The output is the single-file windowed executable `dist/CtrlSpeak_v0.3.exe`; CUDA runtimes and Whisper models remain external downloads performed by the app at runtime.
+Expected artifact:
 
-PyInstaller does not cross-compile this Windows executable from Linux. After the command finishes on Windows, verify the exact artifact and icon before distribution:
-
-```powershell
-Get-Item .\dist\CtrlSpeak_v0.3.exe
+```bash
+test -x dist/CtrlSpeak_v0.4
+file dist/CtrlSpeak_v0.4
 ```
 
-The spec uses `console=False`, so `CtrlSpeak_v0.3.exe` is a GUI executable and does not have a console window. Console-oriented flags such as status output and file transcription are useful when running `python main.py` from source, but their stdout/stderr is not visible when the packaged executable is launched normally. Startup configuration failures are therefore shown in a blocking GUI error dialog. Validate redacted CLI status from source with `python main.py --backend-status`; validate the packaged backend in the management window.
+Do not claim release readiness from a successful PyInstaller command alone.
+Run the source/headless checks and the physical desktop checklist in
+`docs/TESTING.md` against the exact artifact.
 
-Code signing, malware scanning, and testing on a clean Windows 10/11 machine are release steps performed after this build; the helper does not sign, install, deploy, open firewall ports, or start services.
+## Uninstalled desktop and AppStream metadata
 
-## First-run behavior
-- Creates the per-user application data directory (for example `%APPDATA%\CtrlSpeak` on Windows) with subfolders `models/`, `cuda/`, `temp/`, and `logs/`.
-- In the default embedded/local backend, automatically downloads the default `small` Whisper model so transcription works on CPU immediately.
-- Defers CUDA preparation until the user runs `python main.py --download-cuda-only` (alias: `--setup-cuda`) or chooses **Install or repair CUDA** in the management window; when no CUDA-capable GPU is detected the command exits immediately and the UI leaves the GPU option hidden, so the packaged build never attempts a CUDA install on unsupported hardware. When invoked, the installer fetches the CUDA runtime, cuBLAS, and cuDNN wheels, caches the wheels under `%APPDATA%\CtrlSpeak\cuda\downloads` until validation succeeds, and stages the DLLs under `%APPDATA%\CtrlSpeak\cuda\12.3`.
-- When API mode is selected before startup (for example with `--backend api` or `CTRLSPEAK_BACKEND=api`), bundled model download/warm-up is skipped. The default remains bundled mode.
-- Creates settings and the exact-only local correction index under the per-user application-data directory, never beside the executable.
+`packaging/linux/ctrlspeak.desktop` is a template. Its executable and icon
+placeholders must be replaced with absolute paths. The following is an example
+of a user-local installation; do not run it as part of the build:
+
+```bash
+install -Dm755 dist/CtrlSpeak_v0.4 \
+  "$HOME/.local/opt/ctrlspeak/CtrlSpeak_v0.4"
+install -Dm644 assets/icon.png \
+  "$HOME/.local/share/icons/hicolor/128x128/apps/ctrlspeak.png"
+sed \
+  -e "s|@CTRLSPEAK_EXECUTABLE@|$HOME/.local/opt/ctrlspeak/CtrlSpeak_v0.4|g" \
+  -e "s|@CTRLSPEAK_ICON@|$HOME/.local/share/icons/hicolor/128x128/apps/ctrlspeak.png|g" \
+  packaging/linux/ctrlspeak.desktop \
+  > /tmp/ctrlspeak.desktop
+desktop-file-validate /tmp/ctrlspeak.desktop
+install -Dm644 /tmp/ctrlspeak.desktop \
+  "$HOME/.local/share/applications/ctrlspeak.desktop"
+```
+
+The AppStream source is
+`packaging/linux/io.trueai.ctrlspeak.metainfo.xml`. Validate it when
+`appstreamcli` is available:
+
+```bash
+appstreamcli validate --no-net packaging/linux/io.trueai.ctrlspeak.metainfo.xml
+```
+
+No launcher or metadata has been installed merely because these templates are
+present in the repository.
+
+## Linux CUDA boundary
+
+CPU is the default. CtrlSpeak detects `libcuda.so.1` and asks CTranslate2
+whether a CUDA device is usable. The v0.4 Linux app does not install NVIDIA
+drivers, CUDA, cuDNN, modify loader configuration, or change system services.
+Provide a driver/runtime combination compatible with the installed
+CTranslate2 build, then use **Recheck system CUDA** or:
+
+```bash
+python main.py --download-cuda-only
+```
+
+On Linux that command is a readiness check only. It exits non-zero with an
+actionable message if the system runtime is not usable.
+
+## Known desktop limitations
+
+- Native Wayland global hotkeys and injection are unsupported.
+- X11 Ctrl+A/C feedback cannot read every toolkit/control and treats the
+  selected field as the complete final transcript.
+- Non-text clipboard data is preserved by avoiding clipboard replacement;
+  Unicode/multiline injection then requires the operation to stop.
+- Tray visibility depends on the desktop shell's indicator support.
+- A one-file PyInstaller program extracts to a temporary runtime directory on
+  launch and cannot start when that extraction location is mounted `noexec`;
+  persistent state still goes only to the XDG CtrlSpeak directory.
+
+## Legacy Windows build preservation
+
+The existing Windows specifications remain unchanged. On Windows,
+`python -m utils.build_exe` still selects `packaging/CtrlSpeak_v0.3.spec` and
+produces `CtrlSpeak_v0.3.exe` with `console=False`; the executable does not have a console window.
+The Watcher option also remains Windows-only. The Linux v0.4
+work does not build, install, or modify a Windows workspace.

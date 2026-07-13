@@ -19,7 +19,7 @@ def test_v03_packaging_uses_versioned_executable_name_and_existing_icon() -> Non
     assert "assets' / 'icon.ico'" in spec
     build_helper = (ROOT / "utils" / "build_exe.py").read_text("utf-8")
     assert '"CtrlSpeak_v0.3.spec"' in build_helper
-    assert system.APP_VERSION == "0.3.0"
+    assert system.APP_VERSION == "0.4.0"
 
 
 def test_build_documentation_names_exact_v03_artifact_and_command() -> None:

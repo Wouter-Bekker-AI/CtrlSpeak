@@ -47,6 +47,7 @@ except Exception:  # pragma: no cover - optional dependency missing
     MediaPlayer = None  # type: ignore
 
 from utils.system import (
+    APP_VERSION,
     settings, settings_lock,
     notify, notify_error, format_exception_details,
     get_config_dir, save_settings,
@@ -57,7 +58,8 @@ from utils.system import (
 )
 from utils.system import get_best_server, CLIENT_ONLY_BUILD
 from utils.ui_theme import apply_modern_theme
-from utils.config_paths import get_logger, asset_path, get_temp_dir
+from utils.config_paths import app_icon_path, get_logger, asset_path, get_temp_dir
+from utils.cuda_probe import automatic_runtime_install_supported, probe_cuda_driver
 
 
 # ---------------- Env / defaults ----------------
@@ -69,7 +71,7 @@ ENV_DEVICE_PREF   = os.environ.get("CTRLSPEAK_DEVICE", "cpu").lower()
 COMPUTE_TYPE_OVERRIDE = os.environ.get("CTRLSPEAK_COMPUTE_TYPE")
 MODEL_REPO_OVERRIDE   = os.environ.get("CTRLSPEAK_MODEL_REPO")
 
-# All model content under %APPDATA%/CtrlSpeak/models
+# All model content stays under the platform CtrlSpeak config directory.
 MODEL_ROOT_PATH = get_config_dir() / "models"
 MODEL_TRACE_PATH = get_config_dir() / "logs" / "model_download_trace.log"
 
@@ -87,7 +89,7 @@ CUDA_DOWNLOAD_SPEC: dict[str, list[dict[str, str]]] = {
     ],
 }
 
-# CUDA search: also look in %APPDATA%/CtrlSpeak/cuda
+# CUDA search also checks the per-user CtrlSpeak config directory.
 cuda_paths_initialized = False
 
 _cuda_driver_probe: Optional[bool] = None
@@ -96,43 +98,7 @@ _whisper_model_class: Optional[type] = None
 
 
 def _probe_cuda_driver() -> bool:
-    if sys.platform.startswith("win"):
-        try:
-            nvcuda = ctypes.windll.nvcuda  # type: ignore[attr-defined]
-        except Exception:
-            try:
-                ctypes.WinDLL("nvcuda.dll")
-                nvcuda = ctypes.windll.nvcuda  # type: ignore[attr-defined]
-            except Exception:
-                logger.debug("CUDA driver DLL 'nvcuda.dll' was not found while probing for GPU support.", exc_info=True)
-                return False
-        try:
-            cu_init = nvcuda.cuInit  # type: ignore[attr-defined]
-            cu_init.argtypes = [ctypes.c_uint]
-            cu_init.restype = ctypes.c_int
-            result = cu_init(0)
-        except Exception:
-            logger.debug("Failed to invoke cuInit while probing for CUDA hardware.", exc_info=True)
-            return False
-        if result == 100:  # CUDA_ERROR_NO_DEVICE
-            return False
-        if result != 0:
-            logger.debug("cuInit returned error code %s during CUDA hardware probe.", result)
-            return False
-        try:
-            cu_get_count = nvcuda.cuDeviceGetCount  # type: ignore[attr-defined]
-            cu_get_count.argtypes = [ctypes.POINTER(ctypes.c_int)]
-            cu_get_count.restype = ctypes.c_int
-            count = ctypes.c_int(0)
-            status = cu_get_count(ctypes.byref(count))
-        except Exception:
-            logger.debug("Failed to query CUDA device count during hardware probe.", exc_info=True)
-            return False
-        if status != 0:
-            logger.debug("cuDeviceGetCount returned error code %s during hardware probe.", status)
-            return False
-        return count.value > 0
-    return False
+    return probe_cuda_driver()
 
 
 def cuda_driver_available() -> bool:
@@ -307,7 +273,7 @@ def set_current_model_name(name: str) -> None:
     save_settings()
 
 
-# ---------------- Model storage (AppData/CtrlSpeak/models) ----------------
+# ---------------- Model storage (per-user CtrlSpeak config/models) ----------------
 def _legacy_model_store_path(model_short: str) -> Path:
     return MODEL_ROOT_PATH / model_short
 
@@ -364,7 +330,7 @@ def _model_activation_cache_path(model_short: str) -> Path:
 # ---------------- CUDA lookup / readiness ----------------
 def get_cuda_dll_dirs() -> list[Path]:
     paths = []
-    # user runtime in AppData (preferred first)
+    # per-user runtime (preferred first)
     for root in _iter_cuda_roots():
         for sub in ("bin", "cuda_runtime/bin", "cublas/bin", "cudnn/bin"):
             paths.append(root / sub)
@@ -880,7 +846,7 @@ def _download_cuda_runtime(progress_queue: MPQueue | None = None) -> None:
         downloaded = 0
         overall_total = total_known
         session = requests.Session()
-        session.headers.setdefault("User-Agent", "CtrlSpeak/0.3.0")
+        session.headers.setdefault("User-Agent", f"CtrlSpeak/{APP_VERSION}")
 
         try:
             for entry in metadata:
@@ -1077,6 +1043,13 @@ def _run_cmd_stream(cmd: List[str], timeout: int | None = None) -> int:
 def install_cuda_runtime_with_progress(parent=None) -> bool:
     """Download or reuse CUDA runtime assets, optionally showing the GUI."""
 
+    if not automatic_runtime_install_supported():
+        logger.info(
+            "Automatic CUDA runtime installation is unavailable on Linux; "
+            "checking the system CTranslate2/CUDA runtime instead"
+        )
+        return cuda_runtime_ready(ignore_preference=True, quiet=True)
+
     if ensure_cuda_runtime_from_existing():
         return True
 
@@ -1103,8 +1076,8 @@ _WELCOME_VIDEO_DEFAULT_DURATION_MS = 5000
 _WELCOME_VIDEO_MIN_FRAME_DELAY_MS = 5
 _DEFAULT_FUN_FACTS: List[str] = [
     "CtrlSpeak records while you hold the right Ctrl key and pastes the transcript when you release it.",
-    "Whisper models live in %APPDATA%/CtrlSpeak/models so updates never overwrite your cached downloads.",
-    "Need GPU acceleration later? Use the management window’s CUDA installer without reinstalling CtrlSpeak.",
+    "Whisper models live in your CtrlSpeak config directory, separate from application updates.",
+    "Need GPU acceleration later? Use the management window’s platform-specific CUDA readiness controls.",
     "Fun fact: Whisper small balances accuracy and speed, making it the ideal first model for most PCs.",
     "Speech recognition loves quiet rooms—CtrlSpeak lets you change microphones from the management window anytime.",
     "You can automate install validation with python main.py --automation-flow for headless health checks.",
@@ -1463,7 +1436,7 @@ class WelcomeWindow:
 
         try:
             if card.winfo_exists():
-                icon_image = Image.open(asset_path("icon.ico")).convert("RGBA")
+                icon_image = Image.open(app_icon_path()).convert("RGBA")
                 icon_image.thumbnail((176, 176), Image.Resampling.LANCZOS)
                 white_bg = Image.new("RGBA", icon_image.size, (255, 255, 255, 255))
                 alpha_channel = icon_image.getchannel("A") if "A" in icon_image.getbands() else None
@@ -1703,7 +1676,7 @@ def _model_download_worker(model_name: str, queue: MPQueue) -> None:
         downloaded = 0
 
         session = requests.Session()
-        session.headers.setdefault("User-Agent", "CtrlSpeak/0.3.0")
+        session.headers.setdefault("User-Agent", f"CtrlSpeak/{APP_VERSION}")
         CHUNK_SIZE = 1 << 18  # 256 KiB
         try:
             for index, (rel_path, size_hint) in enumerate(file_entries, start=1):
@@ -2489,6 +2462,3 @@ def transcribe_audio_result(file_path: str, play_feedback: bool = True):
 def transcribe_audio(file_path: str, play_feedback: bool = True) -> Optional[str]:
     result = transcribe_audio_result(file_path, play_feedback=play_feedback)
     return result.text if result else None
-
-
-

@@ -4,13 +4,15 @@ from __future__ import annotations
 import sys
 import threading
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, TYPE_CHECKING
 from queue import Empty
 
 import tkinter as tk
 from tkinter import ttk, messagebox
-import pystray
 import numpy as np
+
+if TYPE_CHECKING:
+    import pystray
 
 import utils.net_discovery as net_discovery
 
@@ -54,7 +56,8 @@ from utils.ui_theme import (
     DANGER,
 )
 
-from utils.config_paths import asset_path, get_logger
+from utils.config_paths import app_icon_path, asset_path, get_logger
+from utils.cuda_probe import automatic_runtime_install_supported
 from utils.transcription_backend import (
     BACKEND_DISPLAY_NAMES,
     BackendPersistenceError,
@@ -76,6 +79,16 @@ _management_queue_job: Optional[str] = None
 
 logger = get_logger(__name__)
 
+
+def _set_window_icon(window: tk.Misc) -> None:
+    """Set an ICO on Windows and a PNG icon on Linux/Tk."""
+    if sys.platform.startswith("win"):
+        window.iconbitmap(str(asset_path("icon.ico")))
+        return
+    photo = tk.PhotoImage(file=str(app_icon_path()))
+    window.iconphoto(True, photo)
+    setattr(window, "_ctrlspeak_icon_photo", photo)
+
 # -------- Lockout window state --------
 _lockout_win: Optional[tk.Toplevel] = None
 _lockout_message_var: Optional[tk.StringVar] = None
@@ -91,7 +104,7 @@ def show_startup_error(title: str, message: str) -> None:
     """Show a blocking error for the windowed build, which has no stderr UI."""
     root = None
     try:
-        root = tk.Tk()
+        root = tk.Tk(className="CtrlSpeak")
         root.withdraw()
         messagebox.showerror(title, message, parent=root)
     finally:
@@ -596,7 +609,7 @@ def hide_waveform_overlay() -> None:
 # ---------------- Splash (1s) ----------------
 def show_splash_screen(duration_ms: int) -> None:
     try:
-        root = tk.Tk()
+        root = tk.Tk(className="CtrlSpeak")
     except tk.TclError:
         return
     apply_modern_theme(root)
@@ -630,7 +643,7 @@ def show_splash_screen(duration_ms: int) -> None:
     icon_added = False
     try:
         from PIL import Image, ImageTk
-        icon_path = asset_path("icon.ico")
+        icon_path = app_icon_path()
         image = Image.open(icon_path)
         image.thumbnail((160, 160), Image.LANCZOS)
         photo = ImageTk.PhotoImage(image)
@@ -1178,7 +1191,7 @@ def _initialize_management_ui_on_main_thread() -> None:
     sysmod.management_ui_thread = None
 
     try:
-        root = tk.Tk()
+        root = tk.Tk(className="CtrlSpeak")
     except Exception:
         logger.exception("Failed to initialize management UI root")
         _management_thread_ready.set()
@@ -1348,7 +1361,7 @@ class ManagementWindow:
         self.window.bind("<Escape>", lambda _e: self.close())
         apply_modern_theme(self.window)
         try:
-            self.window.iconbitmap(str(asset_path("icon.ico")))
+            _set_window_icon(self.window)
         except Exception:
             logger.exception("Failed to set management window icon")
 
@@ -1491,6 +1504,7 @@ class ManagementWindow:
         if pref not in {"cpu", "cuda"}:
             pref = "cpu"
         self.cuda_supported = cuda_driver_available()
+        self.cuda_auto_install_supported = automatic_runtime_install_supported()
         if pref == "cuda" and not self.cuda_supported:
             try:
                 set_device_preference("cpu")
@@ -1516,7 +1530,12 @@ class ManagementWindow:
         self.apply_device_btn = ttk.Button(device_buttons, text="Apply device", style="Accent.TButton",
                                            command=self._apply_device)
         self.apply_device_btn.pack(side=tk.LEFT)
-        self.install_cuda_btn = ttk.Button(device_buttons, text="Install or repair CUDA", style="Subtle.TButton",
+        cuda_button_text = (
+            "Install or repair CUDA"
+            if self.cuda_auto_install_supported
+            else "Recheck system CUDA"
+        )
+        self.install_cuda_btn = ttk.Button(device_buttons, text=cuda_button_text, style="Subtle.TButton",
                                            command=self._install_cuda)
         self.install_cuda_btn.pack(side=tk.LEFT, padx=(12, 0))
         if not self.cuda_supported:
@@ -1636,7 +1655,12 @@ class ManagementWindow:
         footer.pack(fill=tk.X, pady=(18, 0))
         ttk.Button(footer, text="Close control center", style="Accent.TButton",
                    command=self.close).pack(fill=tk.X)
-        ttk.Button(footer, text="Delete CtrlSpeak", style="Danger.TButton",
+        uninstall_label = (
+            "Delete CtrlSpeak"
+            if sys.platform.startswith("win")
+            else "Linux uninstall information"
+        )
+        ttk.Button(footer, text=uninstall_label, style="Danger.TButton",
                    command=self.delete_ctrlspeak).pack(fill=tk.X, pady=(10, 0))
 
         self.window.after(120, self.refresh_status)
@@ -1724,7 +1748,10 @@ class ManagementWindow:
         self.device_var.set(device_pref)
         has_cuda_files = cuda_runtime_files_present() if self.cuda_supported else False
         cuda_ready = False
-        if self.cuda_supported and device_pref == "cuda" and has_cuda_files:
+        if self.cuda_supported and (
+            not self.cuda_auto_install_supported
+            or (device_pref == "cuda" and has_cuda_files)
+        ):
             cuda_ready = cuda_runtime_ready(ignore_preference=True, quiet=True)
         model_name = get_current_model_name()
         backend_config = get_runtime_backend_config()
@@ -1770,6 +1797,17 @@ class ManagementWindow:
             self.backend_status_var.set(get_backend_status(backend_config))
         if not self.cuda_supported:
             cuda_text = "CUDA acceleration is unavailable on this system (no compatible GPU detected)."
+        elif not self.cuda_auto_install_supported and cuda_ready:
+            cuda_text = (
+                "System CUDA runtime is available and active."
+                if device_pref == "cuda"
+                else "System CUDA runtime is available. Switch to GPU to enable it."
+            )
+        elif not self.cuda_auto_install_supported:
+            cuda_text = (
+                "System CUDA runtime is not ready. Install a compatible NVIDIA driver, "
+                "CUDA/cuDNN libraries, and a CUDA-enabled CTranslate2 build, then recheck."
+            )
         elif device_pref == "cuda":
             cuda_text = ("CUDA runtime active." if cuda_ready
                          else "CUDA runtime not ready; using CPU instead.")
@@ -2047,6 +2085,30 @@ class ManagementWindow:
                     logger.exception("Failed to present CUDA unavailable message box")
                 return
 
+            if not self.cuda_auto_install_supported:
+                if not cuda_runtime_ready(ignore_preference=True, quiet=True):
+                    self.device_var.set("cpu")
+                    set_device_preference("cpu")
+                    self.cuda_status.set(
+                        "System CUDA runtime is not ready; using CPU. Install compatible "
+                        "NVIDIA/CUDA/cuDNN and CTranslate2 dependencies, then recheck."
+                    )
+                    messagebox.showwarning(
+                        "CUDA",
+                        "CtrlSpeak found an NVIDIA GPU, but CTranslate2 cannot use the system "
+                        "CUDA runtime. Linux runtime/driver installation is an operator step; "
+                        "see packaging/BUILDING.md.",
+                        parent=self.window,
+                    )
+                    return
+                set_device_preference("cuda")
+                self._reload_transcriber_async(
+                    progress_message="Applying device preference...",
+                    status_var=self.cuda_status,
+                    notify_context="Device setup failed",
+                )
+                return
+
             staged = cuda_runtime_files_present()
             if not staged:
                 staged = ensure_cuda_runtime_from_existing()
@@ -2098,7 +2160,21 @@ class ManagementWindow:
             except Exception:
                 logger.exception("Failed to present CUDA unavailable message box")
             return
-        if ensure_cuda_runtime_from_existing():
+        if not self.cuda_auto_install_supported:
+            if cuda_runtime_ready(ignore_preference=True, quiet=True):
+                messagebox.showinfo(
+                    "CUDA",
+                    "The system CUDA runtime is available to CTranslate2.",
+                    parent=self.window,
+                )
+            else:
+                messagebox.showwarning(
+                    "CUDA",
+                    "The Linux CUDA runtime is not ready. CtrlSpeak does not install system "
+                    "GPU drivers or libraries; see packaging/BUILDING.md for prerequisites.",
+                    parent=self.window,
+                )
+        elif ensure_cuda_runtime_from_existing():
             messagebox.showinfo("CUDA", "Reused existing CUDA runtime for CtrlSpeak.", parent=self.window)
         elif install_cuda_runtime_with_progress(self.window):
             messagebox.showinfo("CUDA", "CUDA runtime installed successfully.", parent=self.window)
@@ -2254,6 +2330,15 @@ class ManagementWindow:
         self.close()
 
     def delete_ctrlspeak(self) -> None:
+        if not sys.platform.startswith("win"):
+            messagebox.showinfo(
+                "Linux uninstall",
+                "CtrlSpeak does not remove manually installed Linux files. Remove the "
+                "executable, desktop entry, icon, and XDG CtrlSpeak data explicitly; see "
+                "packaging/BUILDING.md.",
+                parent=self.window,
+            )
+            return
         if not messagebox.askyesno("Delete CtrlSpeak",
                                    "This will remove CtrlSpeak and all local data. Continue?",
                                    parent=self.window):

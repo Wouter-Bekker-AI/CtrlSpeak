@@ -130,6 +130,11 @@ def asset_path(relative_name: str) -> Path:
     return get_assets_dir() / relative_name
 
 
+def app_icon_path() -> Path:
+    """Return the native application icon while preserving Windows packaging."""
+    return asset_path("icon.ico" if sys.platform.startswith("win") else "icon.png")
+
+
 LOGGER_NAME = "ctrlspeak"
 _LOG_HANDLER: Optional[RotatingFileHandler] = None
 _CONSOLE_HANDLER: Optional[logging.Handler] = None

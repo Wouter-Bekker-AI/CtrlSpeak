@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import sys
 
 import pytest
 
@@ -132,6 +133,36 @@ def test_enter_captures_field_before_scheduling_background_submission() -> None:
     assert submitted == ["edited"]
 
 
+def test_modified_enter_is_ignored_then_bare_enter_is_observed_once() -> None:
+    snapshots = MutableSnapshots("edited")
+    submitted: list[str] = []
+    coordinator = FeedbackCaptureCoordinator(
+        snapshot_provider=snapshots,
+        submit_feedback=lambda _tx, text, _method, _metadata, _target: submitted.append(text),
+        executor=lambda callback: callback(),
+    )
+    coordinator.track_injection(
+        TranscriptionResult(
+            text="injected",
+            transcription_id="tx-1",
+            feedback_target=FeedbackTarget("api", "http://127.0.0.1:8765"),
+        ),
+        capture_method="active_field_on_enter",
+    )
+
+    modified = coordinator.handle_key_event(
+        KeyEvent("enter", "press", frozenset({"shift"}))
+    )
+    assert modified.feedback_scheduled is False
+    assert coordinator.pending is not None
+
+    bare = coordinator.handle_key_event(KeyEvent("enter", "press"))
+    assert bare.feedback_scheduled is True
+    assert bare.suppress_event is False
+    assert bare.replay_event is False
+    assert submitted == ["edited"]
+
+
 def test_capture_can_be_disabled_and_requires_a_feedback_target() -> None:
     snapshots = MutableSnapshots("before")
     coordinator = FeedbackCaptureCoordinator(
@@ -213,18 +244,20 @@ def test_active_field_snapshot_provider_returns_the_capture_result() -> None:
     assert provider.snapshot() == FieldSnapshot("complete edited field")
 
 
+@pytest.mark.skipif(not sys.platform.startswith("win"), reason="Win32 adapter test")
 def test_windows_active_field_snapshot_selects_copies_and_restores_clipboard(monkeypatch) -> None:
+    from utils import windows_input
+
     clipboard = {"text": "keep me"}
     hotkeys: list[tuple[str, ...]] = []
     restored: list[str | None] = []
-    monkeypatch.setattr(winio.sys, "platform", "win32")
-    monkeypatch.setattr(winio, "get_clipboard_text", lambda: clipboard["text"])
+    monkeypatch.setattr(windows_input, "get_clipboard_text", lambda: clipboard["text"])
     monkeypatch.setattr(
-        winio,
+        windows_input,
         "set_clipboard_text",
         lambda text: clipboard.update(text=text) is None,
     )
-    monkeypatch.setattr(winio, "clipboard_contains_non_text_data", lambda: False)
+    monkeypatch.setattr(windows_input, "clipboard_contains_non_text_data", lambda: False)
 
     def send_hotkey(*keys: str) -> None:
         hotkeys.append(tuple(keys))
@@ -232,35 +265,37 @@ def test_windows_active_field_snapshot_selects_copies_and_restores_clipboard(mon
             clipboard["text"] = "complete edited field"
 
     monkeypatch.setattr(
-        winio.pyautogui,
+        windows_input.pyautogui,
         "hotkey",
         send_hotkey,
         raising=False,
     )
-    monkeypatch.setattr(winio, "restore_clipboard_text", restored.append)
+    monkeypatch.setattr(windows_input, "restore_clipboard_text", restored.append)
 
-    captured = winio.snapshot_active_text_field(copy_wait_seconds=0)
+    captured = windows_input.snapshot_active_text_field(copy_wait_seconds=0)
 
     assert captured == "complete edited field"
     assert hotkeys == [("ctrl", "a"), ("ctrl", "c")]
     assert restored == ["keep me"]
 
 
+@pytest.mark.skipif(not sys.platform.startswith("win"), reason="Win32 adapter test")
 def test_windows_active_field_snapshot_rejects_a_failed_copy(monkeypatch) -> None:
+    from utils import windows_input
+
     clipboard = {"text": "unrelated old clipboard"}
     restored: list[str | None] = []
-    monkeypatch.setattr(winio.sys, "platform", "win32")
-    monkeypatch.setattr(winio, "get_clipboard_text", lambda: clipboard["text"])
+    monkeypatch.setattr(windows_input, "get_clipboard_text", lambda: clipboard["text"])
     monkeypatch.setattr(
-        winio,
+        windows_input,
         "set_clipboard_text",
         lambda text: clipboard.update(text=text) is None,
     )
-    monkeypatch.setattr(winio, "clipboard_contains_non_text_data", lambda: False)
-    monkeypatch.setattr(winio.pyautogui, "hotkey", lambda *_keys: None, raising=False)
-    monkeypatch.setattr(winio, "restore_clipboard_text", restored.append)
+    monkeypatch.setattr(windows_input, "clipboard_contains_non_text_data", lambda: False)
+    monkeypatch.setattr(windows_input.pyautogui, "hotkey", lambda *_keys: None, raising=False)
+    monkeypatch.setattr(windows_input, "restore_clipboard_text", restored.append)
 
-    assert winio.snapshot_active_text_field(copy_wait_seconds=0) is None
+    assert windows_input.snapshot_active_text_field(copy_wait_seconds=0) is None
     assert restored == ["unrelated old clipboard"]
 
 
@@ -361,7 +396,7 @@ def test_system_submits_bundled_feedback_to_the_local_library(monkeypatch) -> No
         "local-tx",
         "approved local text",
         "active_field_on_enter",
-        {"client": "CtrlSpeak", "version": "0.3.0", "raw_text": "local raw"},
+        {"client": "CtrlSpeak", "version": "0.4.0", "raw_text": "local raw"},
     )]
 
 
@@ -416,6 +451,6 @@ def test_system_submits_api_feedback_to_the_original_endpoint_after_settings_cha
     assert capture_method == "active_field_on_enter"
     assert metadata == {
         "client": "CtrlSpeak",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "raw_text": "remote raw",
     }

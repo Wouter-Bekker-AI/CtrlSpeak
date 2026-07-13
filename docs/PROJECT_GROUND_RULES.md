@@ -14,10 +14,10 @@
 
 ## Runtime storage boundaries
 - All persistent runtime data lives under the CtrlSpeak application data directory: `%APPDATA%\CtrlSpeak` on Windows or the platform-equivalent configuration root elsewhere. `get_config_dir` creates the required subdirectories (`models/`, `cuda/`, `temp/`, and `logs/`) ahead of time—place every generated file under this tree.【F:utils/config_paths.py†L33-L68】
-- User settings are stored exclusively in `%APPDATA%\CtrlSpeak\settings.json`. Defaults guarantee CPU transcription with the `small` Whisper checkpoint until the user opts into different hardware or model sizes.【F:utils/config_paths.py†L19-L103】
+- User settings are stored exclusively in the platform config directory (`%APPDATA%\CtrlSpeak\settings.json` on Windows or `$XDG_CONFIG_HOME/CtrlSpeak/settings.json` on Linux). Defaults guarantee CPU transcription with the `small` Whisper checkpoint until the user opts into different hardware or model sizes.【F:utils/config_paths.py†L19-L103】
 
 ## Logging requirements
-- Every module must obtain loggers through `utils.config_paths.get_logger`. This seeds a rotating file handler that writes to `%APPDATA%\CtrlSpeak\logs\ctrlspeak.log` and wires global logging so warnings and exceptions are persisted. Never replace the logger wiring or redirect logs elsewhere.【F:utils/config_paths.py†L127-L163】
+- Every module must obtain loggers through `utils.config_paths.get_logger`. This seeds a rotating file handler under the platform CtrlSpeak config directory and wires global logging so warnings and exceptions are persisted. Never replace the logger wiring or redirect logs elsewhere.【F:utils/config_paths.py†L127-L163】
 - When errors occur (I/O, GUI, CUDA, networking, etc.), catch the exception and log via the project logger so the failure is captured in AppData. Existing code uses `logger.exception(...)` as the pattern—follow it for new code paths.【F:utils/config_paths.py†L73-L81】【F:utils/system.py†L781-L788】【F:utils/models.py†L62-L83】
 
 ## Tkinter and UI threading
@@ -40,8 +40,11 @@
 - The embedded HTTP server handles `/transcribe` uploads by writing them to a temp file under AppData, performing local transcription, and deleting the temporary audio before responding. Preserve this contract when making server-side changes.【F:utils/system.py†L754-L789】
 
 ## Text injection strategy
-- Text insertion follows a strict priority: SendInput for consoles, AnyDesk, and other remote-hosted windows; direct message-based insertion for standard local controls; clipboard or simulated typing as fallbacks. Preserve this order so remote desktops and terminals continue working.【F:utils/winio.py†L385-L439】
-- Remote-control contexts rely on the SendInput (“force auto input”) path. Do not revert to Win32 clipboard-only approaches for these windows because they break AnyDesk and console compatibility.【F:utils/winio.py†L413-L432】
+- Text insertion follows a strict priority on Windows: SendInput for consoles, AnyDesk, and other remote-hosted windows; direct message-based insertion for standard local controls; clipboard or simulated typing as fallbacks. Preserve this order so remote desktops and terminals continue working.【F:utils/windows_input.py†L385-L439】
+- Remote-control contexts rely on the Windows SendInput (“force auto input”) path. Do not revert to Win32 clipboard-only approaches for these windows because they break AnyDesk and console compatibility.【F:utils/windows_input.py†L413-L432】
+- The preceding priority remains the Windows adapter contract. Linux routes lazily to a separate X11 adapter, so a Linux process must not import or initialize Win32 APIs.
+- Linux global hooks, insertion, and active-field capture are supported only on X11. Native Wayland and headless sessions must fail with actionable guidance and leave the management path alive; they must never be presented as working.
+- Linux clipboard operations prefer `xclip` and fall back to an included withdrawn tkinter/X11 owner when it is absent. Both paths restore prior text, avoid overwriting advertised non-text formats, and never synthesize Enter. The Tk owner must service selection events and clean up its root; direct typing is only a safe last resort for single-line ASCII.
 
 ## Temporary recordings and cleanup
 - Microphone captures are staged in `%APPDATA%\CtrlSpeak\temp` via `create_recording_file_path`, and `cleanup_recording_file` removes them when finished. Always use these helpers so no recordings are left beside the executable.【F:utils/config_paths.py†L65-L81】【F:utils/system.py†L650-L752】
@@ -50,6 +53,7 @@
 - Run the compile smoke test to ensure every module still compiles to bytecode: `python -m compileall .`.
 - Execute the core headless pytest suite on every change: `python -m pytest -m core_headless`. This fast suite guards configuration helpers, CLI parsing, and discovery utilities. The run must succeed; if it fails, stop, investigate, and explain the failure in your status update before proceeding.【F:tests/TESTING.md†L1-L34】
 - Regularly run the full GUI/integration suite (`CTRLSPEAK_RUN_FULL_TESTS=1 python -m pytest -m full_gui`) and the combined run (`CTRLSPEAK_RUN_FULL_TESTS=1 python -m pytest`) to catch regressions that span the entire pipeline.【F:tests/TESTING.md†L18-L52】
+- v0.4 Linux changes additionally require focused routing, XDG, packaging metadata, CUDA-loader, clipboard restoration, and observer-only Enter tests. Physical X11 microphone/tray/injection validation and the actual PyInstaller build remain release-host checks that headless tests cannot prove.
 
 ## Documentation synchronization
 - When code changes alter behavior, configuration, or user interaction, update the relevant Markdown documentation (`README.md`, files in `docs/`, `tests/TESTING.md`, etc.) in the same change set.

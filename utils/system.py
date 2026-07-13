@@ -24,10 +24,7 @@ import traceback
 
 import numpy as np
 import pyaudio
-import pyautogui
-import pystray
 from PIL import Image
-from pynput import keyboard
 import tkinter as tk
 from collections import deque
 
@@ -35,7 +32,13 @@ from utils.config_paths import (
     settings, settings_lock, load_settings, save_settings,
     get_config_dir, get_config_file_path, get_temp_dir,
     create_recording_file_path, cleanup_recording_file, resource_path,
-    asset_path, get_logger, get_logs_dir,
+    asset_path, app_icon_path, get_logger, get_logs_dir,
+)
+from utils.hotkeys import (
+    DesktopSessionError,
+    create_global_listener,
+    is_right_control,
+    key_name as hotkey_key_name,
 )
 
 
@@ -97,7 +100,7 @@ def get_processing_waveform(n: int = 512) -> np.ndarray:
 
 
 # ---------------- Public constants ----------------
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 SPLASH_DURATION_MS = 1000
 ERROR_LOG_FILENAME = "CtrlSpeak-error.log"
 LOCK_FILENAME = "CtrlSpeak.lock"
@@ -120,7 +123,7 @@ CLIENT_ONLY_BUILD = detect_client_only_build()
 # ---------------- Globals ----------------
 recording = False
 recording_thread: Optional[threading.Thread] = None
-listener: Optional[keyboard.Listener] = None
+listener: Optional[object] = None
 recording_file_path: Optional[Path] = None
 listener_lock = threading.Lock()
 client_enabled = True
@@ -144,6 +147,7 @@ tk_root: Optional[tk.Tk] = None
 management_window: Optional["ManagementWindow"] = None  # created in utils.gui
 
 if TYPE_CHECKING:
+    import pystray
     from utils.gui import ManagementWindow
 
 # ---------------- IMPORTS from new split modules (and re-exports) ----------------
@@ -291,15 +295,7 @@ def inject_transcription_result(result) -> None:
 
 
 def _pynput_key_name(key) -> str:
-    key_type = getattr(keyboard, "Key", None)
-    if key_type is not None:
-        for name in ("enter", "shift", "shift_l", "shift_r", "ctrl", "ctrl_l", "ctrl_r", "alt", "alt_l", "alt_r"):
-            if key == getattr(key_type, name, object()):
-                return name
-    char = getattr(key, "char", None)
-    if isinstance(char, str):
-        return char.lower()
-    return str(key).lower().replace("key.", "")
+    return hotkey_key_name(key)
 
 
 def _observe_pynput_press(key) -> None:
@@ -446,8 +442,7 @@ def format_exception_details(exc: BaseException | None) -> str:
 
 # ---------------- Resource helpers ----------------
 def create_icon_image():
-    icon_path = asset_path("icon.ico")
-    return Image.open(icon_path)
+    return Image.open(app_icon_path())
 
 # ---------------- Management UI pump (GUI thread lives in utils.gui) ----------------
 def enqueue_management_task(func: Callable[..., None], *args, **kwargs) -> None:
@@ -796,9 +791,18 @@ def record_audio(target_path: Path) -> None:
         wf.setframerate(RATE)
         wf.writeframes(b"".join(frames))
 
+
+def _record_audio_worker(target_path: Path) -> None:
+    """Keep microphone/backend failures inside CtrlSpeak's reporting path."""
+    try:
+        record_audio(target_path)
+    except Exception as exc:
+        logger.exception("Microphone recording failed")
+        notify_error("Microphone recording failed", format_exception_details(exc))
+
 # ---------------- Client keyboard listener ----------------
 def _client_hotkey_available() -> bool:
-    """Return True when the Ctrl+R hotkey may start a recording."""
+    """Return True when the right-Ctrl hotkey may start a recording."""
 
     from utils.transcription_backend import get_runtime_backend_config
 
@@ -825,12 +829,17 @@ def on_press(key):
     _observe_pynput_press(key)
     if not client_enabled:
         return
-    if key == keyboard.Key.ctrl_r and not recording:
+    if is_right_control(key) and not recording:
         if not _client_hotkey_available():
             return
         recording = True
         recording_file_path = create_recording_file_path()
-        recording_thread = threading.Thread(target=record_audio, args=(recording_file_path,), daemon=True)
+        recording_thread = threading.Thread(
+            target=_record_audio_worker,
+            args=(recording_file_path,),
+            name="CtrlSpeakRecorder",
+            daemon=True,
+        )
         recording_thread.start()
         try:
             from utils.gui import show_waveform_overlay
@@ -843,7 +852,7 @@ def on_release(key):
     from utils.models import transcribe_audio_result
     global recording, recording_thread, recording_file_path
     _observe_pynput_release(key)
-    if key == keyboard.Key.ctrl_r:
+    if is_right_control(key):
         if recording:
             recording = False
             if recording_thread:
@@ -916,14 +925,30 @@ def _refresh_best_server_async():
 def start_client_listener() -> None:
     global listener, client_enabled
     with listener_lock:
-        if listener is not None: return
+        if listener is not None:
+            return
         client_enabled = True
-        listener = keyboard.Listener(
-            on_press=on_press,
-            on_release=on_release,
-            suppress=False,
-        )
-        listener.start()
+        try:
+            candidate = create_global_listener(
+                on_press=on_press,
+                on_release=on_release,
+            )
+            candidate.start()
+            listener = candidate
+        except DesktopSessionError as exc:
+            client_enabled = False
+            logger.warning("CtrlSpeak hotkey listener is unavailable: %s", exc)
+            notify(str(exc), title="CtrlSpeak desktop support")
+            return
+        except Exception as exc:
+            client_enabled = False
+            logger.exception("CtrlSpeak hotkey listener failed to start")
+            notify(
+                "The global hotkey listener could not start. On Ubuntu, use an Ubuntu on "
+                f"Xorg session and verify pynput dependencies. {exc}",
+                title="CtrlSpeak desktop support",
+            )
+            return
     from utils.transcription_backend import uses_bundled_runtime
     if uses_bundled_runtime():
         threading.Thread(target=_refresh_best_server_async, daemon=True).start()
@@ -980,7 +1005,11 @@ class TranscriptionRequestHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", "0"))
         if content_length <= 0:
             self.send_error(400, "Missing audio payload"); return
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=".wav",
+            dir=get_temp_dir(),
+        ) as tmp:
             remaining = content_length
             while remaining > 0:
                 chunk = self.rfile.read(min(65536, remaining))
@@ -1123,19 +1152,69 @@ def run_tray():
     from utils.transcription_backend import get_runtime_backend_config
     backend = get_runtime_backend_config().backend
     tray_mode = mode if backend == "bundled" else "api"
+    try:
+        import pystray
+    except Exception as exc:
+        message = (
+            "The tray backend could not start. CtrlSpeak opened its control window instead "
+            f"when a desktop was available. Check the X11/AppIndicator prerequisites. {exc}"
+        )
+        logger.exception("Failed to import the CtrlSpeak tray backend")
+        try:
+            print(f"CtrlSpeak tray: {message}", file=sys.stderr)
+        except Exception:
+            logger.debug("Could not print tray backend failure", exc_info=True)
+        notify(message, title="CtrlSpeak tray")
+
+        class _ManagementOnlyIcon:
+            title = f"CtrlSpeak ({tray_mode})"
+
+            @staticmethod
+            def stop() -> None:
+                request_management_ui_shutdown()
+
+        fallback_icon = _ManagementOnlyIcon()
+        try:
+            from utils.gui import _show_management_window
+
+            enqueue_management_task(_show_management_window, fallback_icon)
+        except Exception:
+            logger.exception("Failed to queue management-only CtrlSpeak window")
+        run_management_ui_loop()
+        return
+
     menu_items = [
         pystray.MenuItem("Manage CtrlSpeak", open_management_dialog),
         pystray.MenuItem("Quit", on_exit),
     ]
     icon = pystray.Icon("CtrlSpeak", create_icon_image(), f"CtrlSpeak ({tray_mode})", menu=pystray.Menu(*menu_items))
     def _run_icon() -> None:
+        tray_failed = False
         try:
             icon.run()
+        except Exception as exc:
+            tray_failed = True
+            logger.exception("Failed to start the CtrlSpeak tray icon")
+            if sys.platform.startswith("linux"):
+                notify(
+                    "The tray icon could not start. CtrlSpeak opened its control window "
+                    f"instead. Check the X11/AppIndicator prerequisites. {exc}",
+                    title="CtrlSpeak tray",
+                )
+                try:
+                    from utils.gui import _show_management_window
+
+                    enqueue_management_task(_show_management_window, icon)
+                except Exception:
+                    logger.exception(
+                        "Failed to queue management window after tray startup failure"
+                    )
         finally:
-            try:
-                request_management_ui_shutdown()
-            except Exception:
-                logger.exception("Failed to shut down management UI after tray loop exited")
+            if not tray_failed:
+                try:
+                    request_management_ui_shutdown()
+                except Exception:
+                    logger.exception("Failed to shut down management UI after tray loop exited")
 
     thread = threading.Thread(target=_run_icon, name="CtrlSpeakTray", daemon=True)
     thread.start()

@@ -9,6 +9,7 @@ pyautogui
 pyaudio
 pyinstaller
 pynput
+python-xlib; sys_platform == "linux"
 pystray
 requests
 tqdm

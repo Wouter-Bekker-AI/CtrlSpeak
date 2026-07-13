@@ -102,10 +102,12 @@ def main(argv: list[str]) -> int:
     logger.info("Selected transcription backend: %s", backend_config.backend)
 
     if getattr(args, "cuda_only", False):
+        from utils.cuda_probe import automatic_runtime_install_supported
         from utils.models import (
             ensure_cuda_runtime_from_existing,
             install_cuda_runtime_with_progress,
             cuda_driver_available,
+            cuda_runtime_ready,
         )
 
         if not cuda_driver_available():
@@ -115,6 +117,20 @@ def main(argv: list[str]) -> int:
             except Exception:
                 logger.debug("Failed to write CUDA hardware warning to stderr", exc_info=True)
             return 1
+
+        if not automatic_runtime_install_supported():
+            success = cuda_runtime_ready(ignore_preference=True, quiet=True)
+            message = (
+                "Linux system CUDA is ready for CtrlSpeak."
+                if success
+                else "Linux system CUDA is not ready. CtrlSpeak does not install system GPU "
+                     "drivers or CUDA/cuDNN libraries; see packaging/BUILDING.md."
+            )
+            try:
+                print(message, file=sys.stdout if success else sys.stderr)
+            except Exception:
+                logger.debug("Failed to write Linux CUDA readiness result", exc_info=True)
+            return 0 if success else 1
 
         success = ensure_cuda_runtime_from_existing()
         if not success:

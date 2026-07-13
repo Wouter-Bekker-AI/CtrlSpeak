@@ -1,6 +1,7 @@
-"""Helper script to build the CtrlSpeak v0.3 executable with PyInstaller.
+"""Select and run the native CtrlSpeak PyInstaller specification.
 
-The resulting artifact is ``dist/CtrlSpeak_v0.3.exe``. From the project root run::
+On Linux the resulting artifact is ``dist/CtrlSpeak_v0.4``. From the project
+root run::
 
     python -m utils.build_exe
 """
@@ -9,23 +10,16 @@ from __future__ import annotations
 from argparse import ArgumentParser
 from dataclasses import dataclass
 from pathlib import Path
-
-try:
-    from PyInstaller.__main__ import run as pyinstaller_run
-except ImportError as exc:  # pragma: no cover - developer convenience
-    raise SystemExit(
-        "PyInstaller is required to build the executable. "
-        "Install it with 'pip install pyinstaller'."
-    ) from exc
+import sys
 
 project_root = Path(__file__).resolve().parent.parent
 assets_dir = project_root / "assets"
-default_spec_path = project_root / "packaging" / "CtrlSpeak_v0.3.spec"
+linux_spec_path = project_root / "packaging" / "CtrlSpeak_v0.4.spec"
+windows_spec_path = project_root / "packaging" / "CtrlSpeak_v0.3.spec"
 watcher_spec_path = project_root / "packaging" / "CtrlSpeak_Watcher.spec"
 
 
 COMMON_REQUIRED_ASSETS = {
-    "application icon": assets_dir / "icon.ico",
     "processing chime": assets_dir / "loading.wav",
     "automation clip": assets_dir / "test.wav",
     "fun facts list": assets_dir / "fun_facts.txt",
@@ -38,6 +32,7 @@ class BuildConfig:
     spec_path: Path
     intro_video_label: str
     intro_video_path: Path
+    icon_path: Path
 
 
 def _parse_args() -> bool:
@@ -51,19 +46,40 @@ def _parse_args() -> bool:
     return bool(args.watcher)
 
 
-def _resolve_build_config(watcher: bool) -> BuildConfig:
+def _resolve_build_config(
+    watcher: bool,
+    *,
+    platform_name: str | None = None,
+) -> BuildConfig:
+    platform_value = (platform_name or sys.platform).lower()
+    if platform_value.startswith("linux"):
+        if watcher:
+            raise SystemExit("The Watcher white-label build is Windows-only.")
+        return BuildConfig(
+            name="CtrlSpeak v0.4 Linux",
+            spec_path=linux_spec_path,
+            intro_video_label="welcome video",
+            intro_video_path=assets_dir / "TrueAI_Intro_Video.mp4",
+            icon_path=assets_dir / "icon.png",
+        )
+    if not platform_value.startswith("win"):
+        raise SystemExit(
+            f"CtrlSpeak packaging is supported only on Linux and Windows, not {platform_value!r}."
+        )
     if watcher:
         return BuildConfig(
             name="CtrlSpeak Watcher",
             spec_path=watcher_spec_path,
             intro_video_label="Watcher intro video",
             intro_video_path=assets_dir / "Watcher_Intro_Video.mp4",
+            icon_path=assets_dir / "icon.ico",
         )
     return BuildConfig(
         name="CtrlSpeak v0.3",
-        spec_path=default_spec_path,
+        spec_path=windows_spec_path,
         intro_video_label="welcome video",
         intro_video_path=assets_dir / "TrueAI_Intro_Video.mp4",
+        icon_path=assets_dir / "icon.ico",
     )
 
 
@@ -74,6 +90,7 @@ def build(*, watcher: bool = False) -> None:
         raise SystemExit(f"Missing PyInstaller spec at {config.spec_path}")
 
     required_assets = dict(COMMON_REQUIRED_ASSETS)
+    required_assets["application icon"] = config.icon_path
     required_assets[config.intro_video_label] = config.intro_video_path
 
     missing_assets = [name for name, path in required_assets.items() if not path.exists()]
@@ -84,6 +101,13 @@ def build(*, watcher: bool = False) -> None:
     print(f"Building {config.name} bundle...")
     args = ["--noconfirm", "--clean", str(config.spec_path)]
     print("Running PyInstaller with arguments:\n  " + "\n  ".join(args))
+    try:
+        from PyInstaller.__main__ import run as pyinstaller_run
+    except ImportError as exc:  # pragma: no cover - developer convenience
+        raise SystemExit(
+            "PyInstaller is required to build the executable. "
+            "Install it with 'pip install pyinstaller'."
+        ) from exc
     pyinstaller_run(args)
 
 
