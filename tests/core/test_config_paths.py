@@ -33,7 +33,7 @@ def test_get_config_dir_creates_expected_structure(tmp_path, monkeypatch):
 def test_linux_config_dir_falls_back_to_home_dot_config(tmp_path, monkeypatch):
     monkeypatch.setattr(config_paths.sys, "platform", "linux")
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(config_paths.Path, "home", lambda: tmp_path)
 
     assert config_paths.get_config_dir() == tmp_path / ".config" / "CtrlSpeak"
 
