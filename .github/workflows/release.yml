@@ -121,7 +121,9 @@ jobs:
             --output-dir release
 
       - name: Independently verify release set
-        run: python scripts/release.py verify --directory release --tag "${{ github.ref_name }}"
+        run: |
+          chmod +x release/CtrlSpeak-linux-x86_64
+          python scripts/release.py verify --directory release --tag "${{ github.ref_name }}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -155,7 +157,9 @@ jobs:
           merge-multiple: true
 
       - name: Verify assembled release set before upload
-        run: python scripts/release.py verify --directory release --tag "${{ github.ref_name }}"
+        run: |
+          chmod +x release/CtrlSpeak-linux-x86_64
+          python scripts/release.py verify --directory release --tag "${{ github.ref_name }}"
 
       - name: Create draft release with exactly five public assets
         env:
