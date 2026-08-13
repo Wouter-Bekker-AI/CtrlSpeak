@@ -4,19 +4,27 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import sys
 import uuid
+from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 import tempfile
 import threading
+from urllib.parse import urlsplit
+
+from utils.version import APP_VERSION
 
 CONFIG_FILENAME = "settings.json"
 LOG_DIR_NAME = "logs"
 ASSETS_DIR_NAME = "assets"
+SETTINGS_SCHEMA_VERSION = 1
+SETTINGS_BACKUP_PREFIX = "settings.pre-migration-v1"
 
 DEFAULT_SETTINGS: Dict[str, object] = {
+    "settings_schema_version": SETTINGS_SCHEMA_VERSION,
     "mode": None,                    # "client" | "client_server"
     "server_port": 65432,
     "discovery_port": 54363,
@@ -25,14 +33,67 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "device_preference": "cpu",
     "input_device": None,
     "model_name": "small",
+    "model_auto_install_complete": False,
     "transcription_backend": "bundled",
     "api_url": "http://127.0.0.1:8765",
     "api_token": None,
     "feedback_capture_method": "active_field_on_enter",
+    "update_channel": "stable",
+    "last_update_check_at": None,
+    "show_whats_new_on_update": True,
+    "whats_new_last_seen_version": APP_VERSION,
 }
 
 settings_lock = threading.RLock()
 settings: Dict[str, object] = {}
+
+
+def _is_plain_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_optional_string(value: object) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def _is_optional_nonempty_string(value: object) -> bool:
+    return value is None or (isinstance(value, str) and bool(value.strip()))
+
+
+def _is_port(value: object) -> bool:
+    return _is_plain_int(value) and 1 <= int(value) <= 65535
+
+
+def _is_http_url(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = urlsplit(value.strip())
+    except ValueError:
+        return False
+    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
+
+
+_SETTING_VALIDATORS: Dict[str, Callable[[object], bool]] = {
+    "settings_schema_version": lambda value: _is_plain_int(value) and int(value) >= 1,
+    "mode": lambda value: value is None or value in {"client", "client_server"},
+    "server_port": _is_port,
+    "discovery_port": _is_port,
+    "preferred_server_host": _is_optional_nonempty_string,
+    "preferred_server_port": lambda value: value is None or _is_port(value),
+    "device_preference": lambda value: value in {"cpu", "cuda"},
+    "input_device": _is_optional_string,
+    "model_name": lambda value: value in {"small", "large-v3"},
+    "model_auto_install_complete": lambda value: isinstance(value, bool),
+    "transcription_backend": lambda value: value in {"bundled", "api"},
+    "api_url": _is_http_url,
+    "api_token": _is_optional_string,
+    "feedback_capture_method": lambda value: value in {"active_field_on_enter", "disabled"},
+    "update_channel": lambda value: value == "stable",
+    "last_update_check_at": _is_optional_string,
+    "show_whats_new_on_update": lambda value: isinstance(value, bool),
+    "whats_new_last_seen_version": lambda value: isinstance(value, str),
+}
 
 def get_config_dir() -> Path:
     """
@@ -83,31 +144,146 @@ def cleanup_recording_file(path: Optional[Path]) -> None:
         logger = get_logger()
         logger.exception("Failed to remove temporary recording file: %s", path)
 
+
+def _settings_backup_path(path: Path) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return path.with_name(
+        f"{SETTINGS_BACKUP_PREFIX}.{timestamp}.{uuid.uuid4().hex[:8]}.json"
+    )
+
+
+def _backup_settings_file(path: Path) -> Optional[Path]:
+    if not path.is_file():
+        return None
+    backup_path = _settings_backup_path(path)
+    try:
+        shutil.copy2(path, backup_path)
+        if not sys.platform.startswith("win"):
+            backup_path.chmod(0o600)
+        return backup_path
+    except Exception:
+        get_logger().exception("Unable to back up settings before migration: %s", path)
+        return None
+
+
+def _atomic_write_settings(path: Path, snapshot: Dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n"
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+        text=True,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        if not sys.platform.startswith("win"):
+            os.chmod(temporary_path, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+        if not sys.platform.startswith("win"):
+            path.chmod(0o600)
+    except Exception:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _salvage_settings(loaded: Dict[str, object]) -> tuple[Dict[str, object], list[str]]:
+    salvaged = dict(DEFAULT_SETTINGS)
+    invalid_fields: list[str] = []
+
+    # Unknown fields are retained for rollback/forward compatibility. Known
+    # fields are accepted independently so one malformed value cannot erase
+    # unrelated credentials or user preferences.
+    for key, value in loaded.items():
+        validator = _SETTING_VALIDATORS.get(key)
+        if validator is None:
+            salvaged[key] = value
+            continue
+        try:
+            valid = validator(value)
+        except Exception:
+            valid = False
+        if valid:
+            salvaged[key] = value
+        else:
+            invalid_fields.append(key)
+
+    stored_schema = loaded.get("settings_schema_version", 0)
+    if not _is_plain_int(stored_schema) or int(stored_schema) < SETTINGS_SCHEMA_VERSION:
+        salvaged["settings_schema_version"] = SETTINGS_SCHEMA_VERSION
+    return salvaged, invalid_fields
+
+
 def load_settings() -> Dict[str, object]:
     path = get_config_file_path()
-    loaded = {}
+    loaded: Dict[str, object] = {}
+    needs_migration = False
     if path.exists():
         try:
-            loaded = json.loads(path.read_text("utf-8-sig"))
+            decoded = json.loads(path.read_text("utf-8-sig"))
+            if not isinstance(decoded, dict):
+                raise ValueError("settings root must be a JSON object")
+            loaded = decoded
         except Exception:
             get_logger().exception("Unable to read settings from %s", path)
+            needs_migration = True
+
+    salvaged, invalid_fields = _salvage_settings(loaded)
+    stored_schema = loaded.get("settings_schema_version", 0)
+    if path.exists() and (
+        not _is_plain_int(stored_schema)
+        or int(stored_schema) < SETTINGS_SCHEMA_VERSION
+        or bool(invalid_fields)
+    ):
+        needs_migration = True
+
+    if invalid_fields:
+        get_logger().warning(
+            "Invalid settings fields fell back to safe defaults: %s",
+            ", ".join(sorted(invalid_fields)),
+        )
+
     with settings_lock:
         settings.clear()
-        settings.update(DEFAULT_SETTINGS)
-        settings.update(loaded)
-        return dict(settings)
+        settings.update(salvaged)
+        snapshot = dict(settings)
+
+    if needs_migration:
+        backup_path = _backup_settings_file(path)
+        if path.exists() and backup_path is None:
+            get_logger().error("Settings migration was not written because backup creation failed")
+        else:
+            try:
+                _atomic_write_settings(path, snapshot)
+                get_logger().info(
+                    "Settings migrated to schema %s; backup=%s",
+                    SETTINGS_SCHEMA_VERSION,
+                    backup_path,
+                )
+            except Exception:
+                get_logger().exception("Unable to write migrated settings to %s", path)
+    return snapshot
 
 def save_settings() -> bool:
     path = get_config_file_path()
     with settings_lock:
         snapshot = dict(settings)
     try:
-        if not sys.platform.startswith("win"):
-            path.touch(mode=0o600, exist_ok=True)
-            path.chmod(0o600)
-        path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
-        if not sys.platform.startswith("win"):
-            path.chmod(0o600)
+        snapshot["settings_schema_version"] = SETTINGS_SCHEMA_VERSION
+        _atomic_write_settings(path, snapshot)
+        with settings_lock:
+            settings["settings_schema_version"] = SETTINGS_SCHEMA_VERSION
         return True
     except Exception:
         get_logger().exception("Unable to save settings to %s", path)

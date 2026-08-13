@@ -1,14 +1,15 @@
-# Building CtrlSpeak v0.4 for Linux
+# Building CtrlSpeak v0.5 for Windows and Linux
 
-This is the maintained Ubuntu/Linux packaging path. It produces
-`dist/CtrlSpeak_v0.4`; it does not install the result, create a desktop
+This is the maintained standard CtrlSpeak packaging path. It produces the
+stable filename `dist/CtrlSpeak.exe` on Windows or `dist/CtrlSpeak` on Linux;
+it does not install the result, create a desktop
 launcher, start a service, deploy an API, or alter firewall policy.
 
 ## Prerequisites
 
-Build on a 64-bit Linux host. PyInstaller builds for the host operating system;
-it does not cross-compile the Linux executable from Windows.
-Build on the oldest Ubuntu/glibc release you intend to support because
+Build each artifact on its 64-bit target operating system. PyInstaller does not
+cross-compile Windows and Linux executables. Build Linux on the oldest
+Ubuntu/glibc release you intend to support because
 PyInstaller does not bundle Linux `libc`; a bundle made on a newer distribution
 may not start on an older one.
 
@@ -24,6 +25,15 @@ Create a clean environment and install Python dependencies:
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+On Windows use a clean 64-bit Python environment and the equivalent commands:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
@@ -50,11 +60,11 @@ From the project root:
 python -m utils.build_exe
 ```
 
-The helper selects `packaging/CtrlSpeak_v0.4.spec`. The equivalent direct
+The helper selects `packaging/CtrlSpeak_v0.5.spec`. The equivalent direct
 command is:
 
 ```bash
-pyinstaller --noconfirm --clean packaging/CtrlSpeak_v0.4.spec
+pyinstaller --noconfirm --clean packaging/CtrlSpeak_v0.5.spec
 ```
 
 The one-file spec uses `console=False`, includes the native PNG icon and shipped
@@ -66,8 +76,8 @@ bundled.
 Expected artifact:
 
 ```bash
-test -x dist/CtrlSpeak_v0.4
-file dist/CtrlSpeak_v0.4
+test -x dist/CtrlSpeak
+file dist/CtrlSpeak
 ```
 
 Do not claim release readiness from a successful PyInstaller command alone.
@@ -81,12 +91,12 @@ placeholders must be replaced with absolute paths. The following is an example
 of a user-local installation; do not run it as part of the build:
 
 ```bash
-install -Dm755 dist/CtrlSpeak_v0.4 \
-  "$HOME/.local/opt/ctrlspeak/CtrlSpeak_v0.4"
+install -Dm755 dist/CtrlSpeak \
+  "$HOME/.local/opt/ctrlspeak/CtrlSpeak"
 install -Dm644 assets/icon.png \
   "$HOME/.local/share/icons/hicolor/128x128/apps/ctrlspeak.png"
 sed \
-  -e "s|@CTRLSPEAK_EXECUTABLE@|$HOME/.local/opt/ctrlspeak/CtrlSpeak_v0.4|g" \
+  -e "s|@CTRLSPEAK_EXECUTABLE@|$HOME/.local/opt/ctrlspeak/CtrlSpeak|g" \
   -e "s|@CTRLSPEAK_ICON@|$HOME/.local/share/icons/hicolor/128x128/apps/ctrlspeak.png|g" \
   packaging/linux/ctrlspeak.desktop \
   > /tmp/ctrlspeak.desktop
@@ -109,7 +119,7 @@ present in the repository.
 ## Linux CUDA boundary
 
 CPU is the default. CtrlSpeak detects `libcuda.so.1` and asks CTranslate2
-whether a CUDA device is usable. The v0.4 Linux app does not install NVIDIA
+whether a CUDA device is usable. The v0.5 Linux app does not install NVIDIA
 drivers, CUDA, cuDNN, modify loader configuration, or change system services.
 Provide a driver/runtime combination compatible with the installed
 CTranslate2 build, then use **Recheck system CUDA** or:
@@ -133,10 +143,18 @@ actionable message if the system runtime is not usable.
   launch and cannot start when that extraction location is mounted `noexec`;
   persistent state still goes only to the XDG CtrlSpeak directory.
 
-## Legacy Windows build preservation
+## Stable cross-platform packaging and updates
 
-The existing Windows specifications remain unchanged. On Windows,
-`python -m utils.build_exe` still selects `packaging/CtrlSpeak_v0.3.spec` and
-produces `CtrlSpeak_v0.3.exe` with `console=False`; the executable does not have a console window.
-The Watcher option also remains Windows-only. The Linux v0.4
-work does not build, install, or modify a Windows workspace.
+On Windows the same v0.5 specification produces `CtrlSpeak.exe` with
+`console=False`; the executable does not have a console window. Windows version
+resources identify product/file version 0.5.0. The historical v0.2-v0.4 specs
+remain in the repository for reproducibility but are no longer selected by the
+standard build helper. The Watcher option remains Windows-only and does not use
+the standard CtrlSpeak updater identity.
+
+Release assets use platform-qualified names, but an installed standard copy is
+always `CtrlSpeak.exe` on Windows or `CtrlSpeak` on Linux. The signed updater
+replaces that stable filename only after explicit user approval, full size and
+SHA-256 verification, and a detached helper handoff. Runtime settings, models,
+CUDA files, logs, corrections, and update journals remain under the per-user
+CtrlSpeak application-data directory.

@@ -29,6 +29,29 @@ def test_parse_cli_args_auto_setup():
     assert args.transcribe is None
 
 
+def test_parse_cli_args_supports_packaging_and_internal_update_modes():
+    args = system.parse_cli_args(
+        [
+            "ctrlspeak",
+            "--version",
+            "--health-check-file",
+            "health.json",
+            "--apply-update",
+            "transaction.json",
+            "--post-update",
+            "abc",
+            "--rollback-notice",
+            "def",
+        ]
+    )
+
+    assert args.show_version is True
+    assert args.health_check_file == "health.json"
+    assert args.apply_update == "transaction.json"
+    assert args.post_update == "abc"
+    assert args.rollback_notice == "def"
+
+
 def test_cli_backend_selection_persists_without_accepting_a_token_argument(capsys):
     args = system.parse_cli_args([
         "ctrlspeak", "--backend", "api", "--api-url", "http://127.0.0.1:9000",

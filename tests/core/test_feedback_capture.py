@@ -396,7 +396,7 @@ def test_system_submits_bundled_feedback_to_the_local_library(monkeypatch) -> No
         "local-tx",
         "approved local text",
         "active_field_on_enter",
-        {"client": "CtrlSpeak", "version": "0.4.0", "raw_text": "local raw"},
+        {"client": "CtrlSpeak", "version": system.APP_VERSION, "raw_text": "local raw"},
     )]
 
 
@@ -451,6 +451,6 @@ def test_system_submits_api_feedback_to_the_original_endpoint_after_settings_cha
     assert capture_method == "active_field_on_enter"
     assert metadata == {
         "client": "CtrlSpeak",
-        "version": "0.4.0",
+        "version": system.APP_VERSION,
         "raw_text": "remote raw",
     }

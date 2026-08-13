@@ -1,0 +1,45 @@
+name: CtrlSpeak tests
+
+on:
+  push:
+    branches: [v0.5]
+  pull_request:
+    branches: [v0.5]
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04]
+        python-version: ["3.11", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Linux build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk portaudio19-dev libportaudio2 xclip libx11-6 libxtst6 libxinerama1 libxrandr2 libxi6
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run core headless tests
+        run: python -m pytest -m core_headless
+
+      - name: Compile Python sources
+        run: python -m compileall main.py utils scripts tests
+
+      - name: Check diff whitespace
+        run: git diff --check

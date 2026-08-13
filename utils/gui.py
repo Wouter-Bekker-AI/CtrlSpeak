@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import time
+import webbrowser
+from pathlib import Path
 from typing import Callable, Optional, TYPE_CHECKING
 from queue import Empty
 
@@ -68,6 +71,15 @@ from utils.transcription_backend import (
     get_runtime_backend_config,
     save_backend_config,
 )
+from utils.update_helper import prepare_update_handoff
+from utils.update_manager import (
+    UpdateError,
+    UpdateEvent,
+    classify_runtime,
+    get_update_coordinator,
+    sanitize_release_notes,
+    utc_now_iso,
+)
 
 # Shared UI thread root + instance ref (imported by utils.system.schedule_management_refresh)
 tk_root: Optional[tk.Tk] = None
@@ -113,6 +125,37 @@ def show_startup_error(title: str, message: str) -> None:
                 root.destroy()
             except Exception:
                 logger.debug("Failed to destroy startup error root", exc_info=True)
+
+
+def show_post_update_notice(release_metadata: dict[str, object]) -> None:
+    """Show a bounded one-time What's New message on the existing Tk thread."""
+
+    version = str(release_metadata.get("version") or APP_VERSION)
+    notes = sanitize_release_notes(release_metadata.get("notes"), limit=3000)
+
+    def _show() -> None:
+        with settings_lock:
+            enabled = bool(settings.get("show_whats_new_on_update", True))
+            last_seen = str(settings.get("whats_new_last_seen_version") or "")
+        if not enabled or last_seen == version:
+            return
+        message = f"CtrlSpeak {version} was installed successfully."
+        if notes:
+            message += f"\n\nWhat's new:\n{notes}"
+        try:
+            messagebox.showinfo("CtrlSpeak updated", message, parent=tk_root)
+        except Exception:
+            logger.exception("Failed to display post-update release summary")
+            return
+        with settings_lock:
+            settings["whats_new_last_seen_version"] = version
+        if not save_settings():
+            logger.error("Unable to save the last-seen What's New version")
+
+    _call_on_management_ui(
+        _show,
+        log_message="Failed to schedule the post-update release summary",
+    )
 
 
 def _call_on_management_ui(callback: Callable[[], None], *, log_message: str) -> None:
@@ -1428,6 +1471,9 @@ class ManagementWindow:
         ttk.Label(status_card, textvariable=self.server_status_var, style="Caption.TLabel",
                   justify=tk.LEFT).pack(anchor=tk.W)
 
+        # Signed application updates
+        self._build_update_card(container)
+
         # Transcription backend selection
         backend_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
         backend_card.pack(fill=tk.X, pady=(0, 12))
@@ -1671,6 +1717,331 @@ class ManagementWindow:
         self.window.minsize(req_w, 560)
 
         self.bring_to_front()
+
+    def _build_update_card(self, container: ttk.Frame) -> None:
+        update_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
+        update_card.pack(fill=tk.X, pady=(0, 12))
+        ttk.Label(update_card, text="Application updates", style="SectionHeading.TLabel").pack(anchor=tk.W)
+        update_accent = ttk.Frame(update_card, style="AccentLine.TFrame")
+        update_accent.configure(height=2)
+        update_accent.pack(fill=tk.X, pady=(10, 12))
+
+        self._update_runtime = classify_runtime()
+        self._update_release = None
+        self._update_transaction = None
+        self._update_event = UpdateEvent(0, "idle", "Updates have not been checked in this session.")
+        self._last_recorded_check_generation = -1
+        self.update_status_var = tk.StringVar()
+        self.update_last_checked_var = tk.StringVar()
+        self.update_progress_var = tk.DoubleVar(value=0.0)
+
+        ttk.Label(
+            update_card,
+            text=f"CtrlSpeak {APP_VERSION}  ·  Stable channel",
+            style="Body.TLabel",
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            update_card,
+            textvariable=self.update_status_var,
+            style="Caption.TLabel",
+            wraplength=520,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(10, 0))
+        ttk.Label(
+            update_card,
+            textvariable=self.update_last_checked_var,
+            style="Caption.TLabel",
+        ).pack(anchor=tk.W, pady=(6, 0))
+
+        self.update_progress = ttk.Progressbar(
+            update_card,
+            variable=self.update_progress_var,
+            maximum=100.0,
+            mode="determinate",
+        )
+        self.update_progress.pack(fill=tk.X, pady=(12, 0))
+        self.update_progress_text_var = tk.StringVar(value="")
+        ttk.Label(
+            update_card,
+            textvariable=self.update_progress_text_var,
+            style="Caption.TLabel",
+        ).pack(anchor=tk.W, pady=(4, 0))
+
+        buttons = ttk.Frame(update_card, style="ModernCardInner.TFrame")
+        buttons.pack(fill=tk.X, pady=(14, 0))
+        self.check_update_btn = ttk.Button(
+            buttons,
+            text="Check for updates",
+            style="Accent.TButton",
+            command=self.check_for_updates,
+        )
+        self.check_update_btn.pack(side=tk.LEFT)
+        self.install_update_btn = ttk.Button(
+            buttons,
+            text="Download and install",
+            style="Subtle.TButton",
+            command=self._download_or_install_update,
+        )
+        self.install_update_btn.pack(side=tk.LEFT, padx=(10, 0))
+        self.cancel_update_btn = ttk.Button(
+            buttons,
+            text="Cancel",
+            style="Subtle.TButton",
+            command=self._cancel_update,
+        )
+        self.cancel_update_btn.pack(side=tk.LEFT, padx=(10, 0))
+
+        secondary = ttk.Frame(update_card, style="ModernCardInner.TFrame")
+        secondary.pack(fill=tk.X, pady=(10, 0))
+        self.view_release_btn = ttk.Button(
+            secondary,
+            text="View release",
+            style="Subtle.TButton",
+            command=self._view_update_release,
+        )
+        self.view_release_btn.pack(side=tk.LEFT)
+        self.copy_update_diagnostics_btn = ttk.Button(
+            secondary,
+            text="Copy diagnostics",
+            style="Subtle.TButton",
+            command=self._copy_update_diagnostics,
+        )
+        self.copy_update_diagnostics_btn.pack(side=tk.LEFT, padx=(10, 0))
+
+        self._update_coordinator = get_update_coordinator(APP_VERSION)
+        self._update_coordinator.add_listener(self._on_update_event)
+        with settings_lock:
+            last_checked = settings.get("last_update_check_at")
+        self.update_last_checked_var.set(
+            f"Last checked: {last_checked}" if last_checked else "Last checked: Never"
+        )
+        self._apply_update_event(self._update_coordinator.snapshot())
+
+    @staticmethod
+    def _set_button_enabled(button: ttk.Button, enabled: bool) -> None:
+        try:
+            button.state(["!disabled"] if enabled else ["disabled"])
+        except Exception:
+            button.configure(state="normal" if enabled else "disabled")
+
+    @staticmethod
+    def _format_update_bytes(value: int) -> str:
+        if value >= 1024 * 1024:
+            return f"{value / (1024 * 1024):.1f} MB"
+        if value >= 1024:
+            return f"{value / 1024:.1f} KB"
+        return f"{value} bytes"
+
+    def _on_update_event(self, event: UpdateEvent) -> None:
+        _call_on_management_ui(
+            lambda: self._apply_update_event(event),
+            log_message="Failed to marshal update status to the management window",
+        )
+
+    def _apply_update_event(self, event: UpdateEvent) -> None:
+        if not self.is_open():
+            return
+        self._update_event = event
+        if event.release is not None:
+            self._update_release = event.release
+        if event.transaction is not None:
+            self._update_transaction = event.transaction
+
+        message = event.message
+        if self._update_runtime == "source_checkout" and event.state in {
+            "idle", "up_to_date", "available", "newer_than_release"
+        }:
+            message += " Source checkouts are updated through Git; binary installation is disabled."
+        elif self._update_runtime == "packaged_manual_install_required" and event.state == "available":
+            message += " This install location is not writable; open the release for manual installation."
+        self.update_status_var.set(message)
+
+        if event.total > 0:
+            percentage = min(100.0, max(0.0, (event.downloaded / event.total) * 100.0))
+            self.update_progress_var.set(percentage)
+            self.update_progress_text_var.set(
+                f"{self._format_update_bytes(event.downloaded)} of "
+                f"{self._format_update_bytes(event.total)} ({percentage:.0f}%)"
+            )
+        else:
+            self.update_progress_var.set(0.0)
+            self.update_progress_text_var.set("")
+
+        busy = event.state in {"checking", "downloading", "verifying", "launching_updater"}
+        self._set_button_enabled(self.check_update_btn, not busy)
+        self._set_button_enabled(self.cancel_update_btn, event.state == "downloading")
+        self._set_button_enabled(self.view_release_btn, self._update_release is not None)
+
+        install_eligible = self._update_runtime == "packaged_user_writable"
+        if event.state == "ready_to_install" and install_eligible:
+            self.install_update_btn.configure(text="Restart and install")
+            self._set_button_enabled(self.install_update_btn, True)
+        elif event.state in {"available", "failed"} and self._update_release is not None and install_eligible:
+            label = "Retry download" if event.state == "failed" else "Download and install"
+            self.install_update_btn.configure(text=label)
+            self._set_button_enabled(self.install_update_btn, True)
+        else:
+            self.install_update_btn.configure(text="Download and install")
+            self._set_button_enabled(self.install_update_btn, False)
+
+        if (
+            event.state in {"up_to_date", "available", "newer_than_release", "manual_install_required"}
+            and event.generation != self._last_recorded_check_generation
+        ):
+            checked_at = utc_now_iso()
+            self._last_recorded_check_generation = event.generation
+            self.update_last_checked_var.set(f"Last checked: {checked_at}")
+            with settings_lock:
+                settings["last_update_check_at"] = checked_at
+            if not save_settings():
+                logger.error("Unable to persist the last update check timestamp")
+
+    def check_for_updates(self) -> None:
+        try:
+            self._update_coordinator.check_async()
+        except Exception:
+            logger.exception("Unable to start update check")
+            self.update_status_var.set("The update check could not start. See the CtrlSpeak log.")
+
+    def _download_or_install_update(self) -> None:
+        if self._update_event.state == "ready_to_install":
+            self._restart_to_install_update()
+            return
+        release = self._update_release
+        if release is None:
+            return
+        if self._update_runtime != "packaged_user_writable":
+            messagebox.showinfo(
+                "Manual update required",
+                "This CtrlSpeak copy cannot install a binary update in place. Open the verified release instead.",
+                parent=self.window,
+            )
+            return
+        details = (
+            f"Current version: {APP_VERSION}\n"
+            f"New version: {release.version}\n"
+            f"Artifact: {release.asset.name}\n"
+            f"Download: approximately {self._format_update_bytes(release.asset.size)}\n\n"
+            "CtrlSpeak will verify the signed download before it closes. Settings, models, "
+            "CUDA files, and corrections will be retained. Continue?"
+        )
+        if not messagebox.askyesno(
+            "Download CtrlSpeak update",
+            details,
+            parent=self.window,
+            default=messagebox.NO,
+            icon=messagebox.QUESTION,
+        ):
+            return
+        try:
+            self._update_coordinator.download_async(installation_path=Path(sys.executable))
+        except UpdateError as exc:
+            self.update_status_var.set(exc.user_message)
+        except Exception:
+            logger.exception("Unable to start update download")
+            self.update_status_var.set("The update download could not start. See the CtrlSpeak log.")
+
+    def _restart_to_install_update(self) -> None:
+        transaction = self._update_transaction
+        release = self._update_release
+        if transaction is None or release is None:
+            self.update_status_var.set("The verified update transaction is unavailable; check again.")
+            return
+        if sysmod.recording or (
+            sysmod.recording_thread is not None and sysmod.recording_thread.is_alive()
+        ):
+            messagebox.showwarning(
+                "CtrlSpeak is busy",
+                "Wait for recording and transcription to finish before installing the update.",
+                parent=self.window,
+            )
+            return
+        if not messagebox.askyesno(
+            "Restart and install",
+            f"CtrlSpeak will now close, install version {release.version}, and reopen. "
+            "If startup health checks fail, the previous executable will be restored automatically. Continue?",
+            parent=self.window,
+            default=messagebox.NO,
+            icon=messagebox.QUESTION,
+        ):
+            return
+        try:
+            helper_pid = prepare_update_handoff(transaction)
+        except UpdateError as exc:
+            logger.warning("Update helper launch failed [%s]: %s", exc.code, exc.user_message)
+            self.update_status_var.set(exc.user_message)
+            messagebox.showerror("Update could not start", exc.user_message, parent=self.window)
+            return
+        except Exception:
+            logger.exception("Update helper launch failed unexpectedly")
+            self.update_status_var.set("The update helper could not start. See the CtrlSpeak log.")
+            messagebox.showerror(
+                "Update could not start",
+                "The update helper could not start. The current CtrlSpeak executable was not replaced.",
+                parent=self.window,
+            )
+            return
+        self.update_status_var.set(f"Update helper {helper_pid} started. CtrlSpeak is closing safely…")
+        self._set_button_enabled(self.check_update_btn, False)
+        self._set_button_enabled(self.install_update_btn, False)
+        self.window.after(100, self._finish_update_shutdown)
+
+    def _finish_update_shutdown(self) -> None:
+        logger.info("Gracefully handing off to the external update helper")
+        try:
+            stop_client_listener()
+            shutdown_server()
+            sysmod.stop_discovery_listener()
+            sysmod.release_single_instance_lock()
+        except Exception:
+            logger.exception("One or more services failed to stop during update handoff")
+        try:
+            self._icon.stop()
+        except Exception:
+            logger.exception("Failed to stop tray during update handoff")
+        try:
+            request_management_ui_shutdown()
+        except Exception:
+            logger.exception("Failed to stop management UI during update handoff")
+
+    def _cancel_update(self) -> None:
+        self._update_coordinator.cancel()
+
+    def _view_update_release(self) -> None:
+        release = self._update_release
+        if release is None:
+            return
+        try:
+            webbrowser.open_new_tab(release.release_url)
+        except Exception:
+            logger.exception("Unable to open the verified GitHub Release URL")
+            messagebox.showerror(
+                "Could not open release",
+                "CtrlSpeak could not open the verified GitHub Release in your browser.",
+                parent=self.window,
+            )
+
+    def _copy_update_diagnostics(self) -> None:
+        event = self._update_event
+        release = self._update_release
+        transaction = self._update_transaction
+        lines = [
+            f"CtrlSpeak version: {APP_VERSION}",
+            f"Runtime: {self._update_runtime}",
+            f"State: {event.state}",
+            f"Error category: {event.error_code or 'none'}",
+            f"Target version: {release.version if release else 'none'}",
+            f"Release tag: {release.tag if release else 'none'}",
+            f"Manifest SHA-256: {release.manifest_sha256 if release else 'none'}",
+            f"Transaction: {transaction.transaction_id if transaction else 'none'}",
+        ]
+        try:
+            self.window.clipboard_clear()
+            self.window.clipboard_append("\n".join(lines))
+            self.window.update_idletasks()
+            self.update_status_var.set("Redacted update diagnostics copied to the clipboard.")
+        except Exception:
+            logger.exception("Unable to copy redacted update diagnostics")
 
     # --- window helpers ---
     def is_open(self) -> bool:
@@ -2310,7 +2681,7 @@ class ManagementWindow:
         save_settings()
 
         try:
-            self._icon.title = f"CtrlSpeak ({choice})"
+            self._icon.title = f"CtrlSpeak {APP_VERSION} ({choice})"
         except Exception:
             logger.exception("Failed to update tray icon title after mode change")
 
@@ -2347,6 +2718,12 @@ class ManagementWindow:
 
     def close(self) -> None:
         global management_window
+        coordinator = getattr(self, "_update_coordinator", None)
+        if coordinator is not None:
+            try:
+                coordinator.remove_listener(self._on_update_event)
+            except Exception:
+                logger.exception("Failed to detach management update listener")
         if self.is_open():
             self._unbind_mousewheel(None)
             self.window.destroy()

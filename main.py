@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+import json
 import sys
 import atexit
 import time
+from pathlib import Path
 
 from utils.config_paths import get_logger
 from utils.system import (
@@ -56,6 +58,45 @@ def main(argv: list[str]) -> int:
     logger.info("CtrlSpeak starting up (version %s)", APP_VERSION)
     args = parse_cli_args(argv)
     logger.debug("Parsed CLI arguments: %s", args)
+
+    if args.show_version:
+        print(APP_VERSION)
+        return 0
+
+    if args.health_check_file:
+        target = Path(args.health_check_file).expanduser().resolve()
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps(
+                    {
+                        "product": "ctrlspeak",
+                        "version": APP_VERSION,
+                        "executable": str(Path(sys.executable).resolve()),
+                        "frozen": bool(getattr(sys, "frozen", False)),
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return 0
+        except OSError:
+            logger.exception("Packaged health-check result could not be written to %s", target)
+            return 6
+
+    if args.apply_update:
+        from utils.update_helper import apply_update_transaction
+        from utils.update_manager import UpdateError
+
+        try:
+            return apply_update_transaction(args.apply_update)
+        except UpdateError as exc:
+            logger.error("External updater failed [%s]: %s", exc.code, exc.user_message)
+            return 7
+        except Exception:
+            logger.exception("External updater failed unexpectedly")
+            return 7
 
     if args.uninstall:
         logger.info("Uninstall flag detected; launching uninstall workflow")
@@ -192,6 +233,33 @@ def main(argv: list[str]) -> int:
         time.sleep(1.0)  # small delay so discovery has time to populate
 
     logger.info("Launching system tray UI")
+    if args.post_update:
+        from utils.update_helper import load_release_metadata, write_post_update_health
+        from utils.update_manager import UpdateError
+
+        try:
+            write_post_update_health(args.post_update, APP_VERSION)
+            release_metadata = load_release_metadata(args.post_update)
+            from utils.gui import show_post_update_notice
+
+            show_post_update_notice(release_metadata)
+        except UpdateError as exc:
+            logger.error("Post-update health confirmation failed [%s]: %s", exc.code, exc.user_message)
+            _report_invalid_backend_configuration(exc)
+            return 8
+        except Exception as exc:
+            logger.exception("Post-update health confirmation failed unexpectedly")
+            _report_invalid_backend_configuration(exc)
+            return 8
+    elif args.rollback_notice:
+        from utils.update_helper import rollback_notice
+
+        try:
+            message = rollback_notice(args.rollback_notice)
+        except Exception:
+            logger.exception("Failed to load rollback notice")
+            message = "The previous CtrlSpeak version was restored after an update did not start safely."
+        notify(message, title="CtrlSpeak update rolled back")
     run_tray()
     logger.info("CtrlSpeak shutting down cleanly")
     return 0

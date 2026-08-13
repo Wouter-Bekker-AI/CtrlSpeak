@@ -1,6 +1,6 @@
-# CtrlSpeak v0.4 testing playbook
+# CtrlSpeak v0.5 testing playbook
 
-Run commands from the v0.4 repository root in a project-compatible Python
+Run commands from the v0.5 repository root in a project-compatible Python
 environment. The required fast suite is GUI-free and performs no model
 download, desktop installation, service operation, or firewall change.
 
@@ -25,8 +25,15 @@ The core marker covers:
 - preferred-xclip and no-xclip tkinter clipboard restoration/injection behavior,
   including Unicode/multiline selections and unavailable-display errors.
 - Linux CUDA driver routing without Windows loader calls.
-- v0.4 PyInstaller, PNG icon, desktop launcher, and AppStream metadata.
-- preservation of the legacy v0.3 Windows packaging selection.
+- v0.5 PyInstaller, native icons, desktop launcher, and AppStream metadata.
+- preservation of historical specs while the standard helper selects v0.5.
+- strict semantic versions and exact product/platform/architecture selection.
+- Ed25519 manifest verification, immutable release URLs, size and SHA-256 checks.
+- resumable bounded downloads, Range validation, cancellation, and oversize refusal.
+- update-operation generation IDs and stale worker-event rejection.
+- external replacement health confirmation and automatic rollback with dummy files.
+- settings schema migration, atomic writes, per-field salvage, and backup.
+- stable v0.5 Windows/Linux packaging and release-manifest tooling.
 
 Focused commands:
 
@@ -38,6 +45,9 @@ python -m pytest -q tests/core/test_config_paths.py
 python -m pytest -q tests/core/test_transcription_backend.py
 python -m pytest -q tests/core/test_feedback_capture.py
 python -m pytest -q tests/core/test_local_corrections.py
+python -m pytest -q tests/core/test_update_manager.py
+python -m pytest -q tests/core/test_update_helper.py
+python -m pytest -q tests/core/test_release_tools.py
 ```
 
 The tests stub optional GUI/audio packages during headless collection. Passing
@@ -65,7 +75,7 @@ application.
 ## Physical Ubuntu/X11 acceptance checklist
 
 These checks must be performed by the release parent/operator against the exact
-source environment and again against `dist/CtrlSpeak_v0.4`:
+source environment and again against `dist/CtrlSpeak`:
 
 1. Sign into **Ubuntu on Xorg** and confirm `echo "$XDG_SESSION_TYPE"` reports
    `x11` and `DISPLAY` is set.
@@ -96,14 +106,36 @@ source environment and again against `dist/CtrlSpeak_v0.4`:
 10. Validate the manual `.desktop` result and icon only after placeholder
     replacement. Confirm no launcher was installed by the build itself.
 
+## Packaged updater acceptance
+
+The updater cannot be proven end to end by source-mode unit tests. Against the
+exact signed artifacts on clean Windows and Ubuntu/X11 hosts:
+
+1. Install v0.5.0 as `CtrlSpeak.exe` or `CtrlSpeak` and confirm the tray/control
+   center show 0.5.0.
+2. Publish a controlled signed v0.5.1 release with both required platform
+   artifacts and the three metadata assets.
+3. Check for the update from the GUI, inspect version/size, download, and confirm
+   the UI remains responsive.
+4. Restart and verify the same stable path now reports 0.5.1 while API URL/token,
+   mode, input device, models, CUDA files, and corrections remain intact.
+5. Interrupt and resume a download; confirm the final artifact hash matches the
+   signed manifest.
+6. Test offline, GitHub rate-limit, corrupt signature, wrong hash, and unwritable
+   install-location messages without closing the current app.
+7. Use a deliberately non-healthy candidate in a controlled test release and
+   confirm the helper restores/relaunches the previous executable.
+8. Confirm a source checkout can report the release but never enables binary
+   installation.
+
 ## Packaging validation
 
 The actual build is intentionally an operator step:
 
 ```bash
 python -m utils.build_exe
-test -x dist/CtrlSpeak_v0.4
-file dist/CtrlSpeak_v0.4
+test -x dist/CtrlSpeak
+file dist/CtrlSpeak
 ```
 
 When available:

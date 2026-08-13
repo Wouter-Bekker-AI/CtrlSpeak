@@ -40,6 +40,7 @@ from utils.hotkeys import (
     is_right_control,
     key_name as hotkey_key_name,
 )
+from utils.version import APP_VERSION
 
 
 logger = get_logger(__name__)
@@ -100,7 +101,6 @@ def get_processing_waveform(n: int = 512) -> np.ndarray:
 
 
 # ---------------- Public constants ----------------
-APP_VERSION = "0.4.0"
 SPLASH_DURATION_MS = 1000
 ERROR_LOG_FILENAME = "CtrlSpeak-error.log"
 LOCK_FILENAME = "CtrlSpeak.lock"
@@ -1143,6 +1143,23 @@ def open_management_dialog(icon, item):
     ensure_management_ui_thread()
     enqueue_management_task(_show_management_window, icon)
 
+
+def check_for_updates_from_tray(icon, item):
+    from utils.gui import ensure_management_ui_thread, _show_management_window
+
+    def _open_and_check() -> None:
+        _show_management_window(icon)
+        try:
+            from utils.gui import management_window as active_window
+
+            if active_window is not None:
+                active_window.check_for_updates()
+        except Exception:
+            logger.exception("Failed to start update check from tray")
+
+    ensure_management_ui_thread()
+    enqueue_management_task(_open_and_check)
+
 def run_tray():
     from utils.gui import ensure_management_ui_thread, run_management_ui_loop, request_management_ui_shutdown
     ensure_management_ui_thread()  # make sure tk_root exists for overlay
@@ -1167,7 +1184,7 @@ def run_tray():
         notify(message, title="CtrlSpeak tray")
 
         class _ManagementOnlyIcon:
-            title = f"CtrlSpeak ({tray_mode})"
+            title = f"CtrlSpeak {APP_VERSION} ({tray_mode})"
 
             @staticmethod
             def stop() -> None:
@@ -1184,10 +1201,17 @@ def run_tray():
         return
 
     menu_items = [
+        pystray.MenuItem(f"CtrlSpeak {APP_VERSION}", lambda _icon, _item: None, enabled=False),
         pystray.MenuItem("Manage CtrlSpeak", open_management_dialog),
+        pystray.MenuItem("Check for updates", check_for_updates_from_tray),
         pystray.MenuItem("Quit", on_exit),
     ]
-    icon = pystray.Icon("CtrlSpeak", create_icon_image(), f"CtrlSpeak ({tray_mode})", menu=pystray.Menu(*menu_items))
+    icon = pystray.Icon(
+        "CtrlSpeak",
+        create_icon_image(),
+        f"CtrlSpeak {APP_VERSION} ({tray_mode})",
+        menu=pystray.Menu(*menu_items),
+    )
     def _run_icon() -> None:
         tray_failed = False
         try:
@@ -1409,6 +1433,27 @@ def parse_cli_args(argv: list[str]) -> argparse.Namespace:
         help="Download CUDA runtime assets and exit without launching the UI",
     )
     parser.add_argument("--automation-flow", action="store_true", help="Run the automated end-to-end regression workflow")
+    parser.add_argument("--version", action="store_true", dest="show_version", help="Print the CtrlSpeak version and exit")
+    parser.add_argument(
+        "--health-check-file",
+        metavar="PATH",
+        help="Write a packaged runtime/version smoke-test result and exit",
+    )
+    parser.add_argument(
+        "--apply-update",
+        metavar="TRANSACTION",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--post-update",
+        metavar="TRANSACTION_ID",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--rollback-notice",
+        metavar="TRANSACTION_ID",
+        help=argparse.SUPPRESS,
+    )
     args, _ = parser.parse_known_args(argv[1:])
     return args
 

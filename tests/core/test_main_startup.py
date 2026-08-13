@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
 import types
 
@@ -105,3 +106,32 @@ def test_invalid_configuration_is_shown_when_windowed_build_has_no_stderr(
     assert app.main(["ctrlspeak"]) == 2
     assert len(app._test_startup_errors) == 1
     assert "http:// or https://" in app._test_startup_errors[0][1]
+
+
+def test_packaged_health_check_file_exits_before_normal_startup(tmp_path, monkeypatch) -> None:
+    app = _import_main_without_runtime_gui(monkeypatch)
+    target = tmp_path / "health.json"
+    monkeypatch.setattr(
+        app,
+        "acquire_single_instance_lock",
+        lambda: (_ for _ in ()).throw(AssertionError("normal startup must not run")),
+    )
+
+    assert app.main(["ctrlspeak", "--health-check-file", str(target)]) == 0
+
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["product"] == "ctrlspeak"
+    assert payload["version"] == app.APP_VERSION
+    assert isinstance(payload["frozen"], bool)
+
+
+def test_version_mode_exits_before_normal_startup(monkeypatch, capsys) -> None:
+    app = _import_main_without_runtime_gui(monkeypatch)
+    monkeypatch.setattr(
+        app,
+        "acquire_single_instance_lock",
+        lambda: (_ for _ in ()).throw(AssertionError("normal startup must not run")),
+    )
+
+    assert app.main(["ctrlspeak", "--version"]) == 0
+    assert capsys.readouterr().out.strip() == app.APP_VERSION

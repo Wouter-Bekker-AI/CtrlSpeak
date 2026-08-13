@@ -1,10 +1,10 @@
-# CtrlSpeak v0.4 Linux user flow
+# CtrlSpeak v0.5 user flow
 
 ## 1. Launch and platform readiness
 
-1. CtrlSpeak parses maintenance/backend arguments, acquires the per-user XDG
-   instance lock, loads `settings.json`, validates the backend URL, and pins the
-   effective backend for the process.
+1. CtrlSpeak parses maintenance/backend/update arguments, acquires the per-user
+   instance lock, salvages and migrates `settings.json` field by field, validates
+   the backend URL, and pins the effective backend for the process.
 2. The splash and hidden Tk root are created on the main thread.
 3. When the tray runtime starts, the Linux path validates the desktop session
    before importing/starting `pynput`. X11 continues; Wayland or a missing
@@ -109,6 +109,8 @@ feedback in the management window when the workflow is unsuitable.
 The tray's **Manage CtrlSpeak** action raises one Tk management window. It
 contains:
 
+- current version, stable update channel, last-check time, signed update status,
+  download progress, release link, and update controls;
 - embedded/API selection, complete base URL, masked token, feedback method, and
   redacted active/saved status;
 - legacy embedded role/network controls;
@@ -121,7 +123,31 @@ Backend changes explicitly require restart. On Linux, the destructive Windows
 **Delete CtrlSpeak** flow only reports that automatic uninstall is unsupported;
 the user/operator removes their manually installed files.
 
-## 7. Shutdown
+## 7. Signed update flow
+
+1. **Check for updates** queries GitHub's latest stable CtrlSpeak Release on a
+   worker thread. The tray and control center share one generation-aware
+   coordinator, so a late older request cannot overwrite a newer result.
+2. CtrlSpeak downloads and verifies the canonical manifest and Ed25519
+   signature, then selects exactly one standard artifact for the current OS and
+   x86-64 architecture.
+3. After the user confirms, the artifact streams into an AppData/XDG transaction
+   directory. Compatible partials resume only with a correct HTTP Range response.
+4. Declared size and SHA-256 must match before the candidate becomes installable.
+5. A second confirmation starts a copied external helper. CtrlSpeak stops its
+   hotkey, discovery/server, tray, UI, and instance lock, then exits normally.
+6. The helper preserves a verified previous executable, atomically swaps the
+   stable installed filename, and launches the new version.
+7. The new process confirms its transaction, version, path, settings migration,
+   backend activation, and readiness. If it cannot do so, the helper restores
+   and relaunches the previous executable.
+8. A successful update may show bounded plain-text What's New information once.
+   A rollback reports restoration instead of claiming success.
+
+Source checkouts are discovery-only. They never run Git commands or overwrite
+working files from the GUI.
+
+## 8. Shutdown
 
 Quit stops the hotkey/recording path, hides overlays, cleans temporary audio,
 stops embedded discovery/server threads, stops the tray, exits Tk, and releases

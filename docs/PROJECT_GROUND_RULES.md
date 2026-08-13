@@ -10,7 +10,7 @@
 
 ## Repository mutability lifecycle
 - During development (source checkout inside Git), the repository can be freely read and written so contributors and AI agents can iterate. Use version control to manage those edits.
-- Once CtrlSpeak is packaged into an executable, treat the installed directory as **read-only** at runtime. Assets resolve relative to the application base via `get_app_base_dir`, so the running program must never create or modify files beside the executable bundle.【F:utils/config_paths.py†L106-L120】
+- Once CtrlSpeak is packaged into an executable, treat the installed directory as **read-only during ordinary runtime**. Assets resolve relative to the application base via `get_app_base_dir`, so recording, models, settings, logs, caches, and other runtime features must never create or modify files beside the executable bundle. The only approved exception is an explicit, signed update transaction: after user confirmation and full manifest/size/hash verification, the detached updater may create a verified sibling candidate and atomically replace the stable installed executable. It must retain a verified rollback copy in the AppData/XDG transaction directory and may not use this exception for general persistence.【F:utils/config_paths.py†L106-L120】
 
 ## Runtime storage boundaries
 - All persistent runtime data lives under the CtrlSpeak application data directory: `%APPDATA%\CtrlSpeak` on Windows or the platform-equivalent configuration root elsewhere. `get_config_dir` creates the required subdirectories (`models/`, `cuda/`, `temp/`, and `logs/`) ahead of time—place every generated file under this tree.【F:utils/config_paths.py†L33-L68】
@@ -54,6 +54,16 @@
 - Execute the core headless pytest suite on every change: `python -m pytest -m core_headless`. This fast suite guards configuration helpers, CLI parsing, and discovery utilities. The run must succeed; if it fails, stop, investigate, and explain the failure in your status update before proceeding.【F:tests/TESTING.md†L1-L34】
 - Regularly run the full GUI/integration suite (`CTRLSPEAK_RUN_FULL_TESTS=1 python -m pytest -m full_gui`) and the combined run (`CTRLSPEAK_RUN_FULL_TESTS=1 python -m pytest`) to catch regressions that span the entire pipeline.【F:tests/TESTING.md†L18-L52】
 - v0.4 Linux changes additionally require focused routing, XDG, packaging metadata, CUDA-loader, clipboard restoration, and observer-only Enter tests. Physical X11 microphone/tray/injection validation and the actual PyInstaller build remain release-host checks that headless tests cannot prove.
+- v0.5 update changes additionally require manifest/signature, exact asset selection, resume/range, bounded download, coordinator generation, settings migration, helper replacement, health receipt, rollback, stable-filename packaging, and release-tool tests. Core tests use dummy files only and must never replace the running CtrlSpeak executable.
+
+## Application update trust and lifecycle
+
+- Standard CtrlSpeak trusts only the hard-coded `Wouter-Bekker-AI/CtrlSpeak` stable channel, product `ctrlspeak`, variant `standard`, and embedded Ed25519 public key. These are not user-editable settings.
+- Never install from a tag alone, a loosely matched filename, an unsigned manifest, an invalid signature, an unexpected redirect, a wrong product/platform/architecture, or a size/hash mismatch.
+- Network, download, hashing, and update discovery run off the Tk thread. UI changes return through the management queue and stale worker generations are ignored.
+- Source checkouts are informational only. The GUI must never run Git or overwrite source with a packaged executable.
+- The external helper must wait for the current process to exit, preserve a verified old executable, replace atomically, demand a matching new-process health receipt, and roll back on launch/health failure.
+- Update journals, partials, backups, health markers, and updater logs live under the platform CtrlSpeak data directory. API tokens, transcripts, clipboard content, cookies, and signing secrets never enter updater logs.
 
 ## Documentation synchronization
 - When code changes alter behavior, configuration, or user interaction, update the relevant Markdown documentation (`README.md`, files in `docs/`, `tests/TESTING.md`, etc.) in the same change set.

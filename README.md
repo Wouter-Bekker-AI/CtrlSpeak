@@ -1,9 +1,9 @@
-# CtrlSpeak v0.4 for Ubuntu/Linux
+# CtrlSpeak v0.5
 
-CtrlSpeak is a native desktop speech-to-text client. Hold the **right Ctrl**
+CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into
-the active field. v0.4 adds a maintained Ubuntu/Linux path while preserving the
-v0.3 backend design:
+the active field. v0.5 adds signed in-application updates with a stable installed
+filename while preserving the v0.4 Linux and transcription-backend design:
 
 - **Embedded / local** runs the bundled `faster-whisper` workflow and retains
   the existing model (`small` or `large-v3`) and device (`cpu` or `cuda`)
@@ -15,6 +15,35 @@ v0.3 backend design:
 The legacy **Client + Server** and **Client Only** roles remain inside the
 embedded/local backend. Remote API mode is independent of those roles and does
 not start discovery, a local server, or a model download.
+
+## Application updates
+
+The standard packaged application is installed with one stable name:
+
+- Windows: `CtrlSpeak.exe`
+- Linux: `CtrlSpeak`
+
+The tray menu shows the running version and contains **Check for updates**. The
+same action is available in the control center's **Application updates** card.
+Update checks and downloads run in the background and do not freeze recording,
+the tray, or Tk.
+
+CtrlSpeak accepts an update only when a signed stable manifest identifies the
+exact standard product, operating system, x86-64 architecture, release tag, and
+artifact. It verifies the Ed25519 manifest signature, declared byte length, and
+SHA-256 before asking to restart. A copied external helper atomically replaces
+the executable, waits for a health receipt from the new version, and restores
+the previous verified executable automatically if startup fails. Settings,
+models, CUDA files, logs, API credentials, and local corrections stay in the
+per-user CtrlSpeak data directory and are not replaced.
+
+A source checkout may check which release is published, but it cannot overwrite
+itself with a release binary. Update source checkouts through Git. v0.4 and
+earlier builds do not contain updater code, so v0.5.0 is the one final manual
+replacement under the stable filename; v0.5.1 and later can use the GUI.
+
+See `docs/UPDATING.md` for the end-user flow, release process, failure recovery,
+and maintainer checklist.
 
 ## Linux support boundary
 
@@ -154,7 +183,7 @@ approved edits create exact raw-transcript-to-final-text overrides in
 
 CPU is the safe default. On Linux, CtrlSpeak can select `cuda` when
 `libcuda.so.1` reports an NVIDIA device and CTranslate2 can use the installed
-CUDA/cuDNN runtime. CtrlSpeak v0.4 does **not** install Linux GPU drivers or
+CUDA/cuDNN runtime. CtrlSpeak v0.5 does **not** install Linux GPU drivers or
 system CUDA libraries. The management window offers **Recheck system CUDA**;
 the Windows wheel-based installer remains Windows-only. `--download-cuda-only`
 therefore validates Linux system readiness and reports the missing operator
@@ -190,24 +219,26 @@ when whole-field selection is unsuitable.
 --force-sendinput             Windows-only SendInput preference
 --automation-flow             Legacy provisioned-workstation harness
 --uninstall                   Automatic self-removal on Windows only
+--version                     Print the source/runtime version and exit
 ```
 
 Use `python main.py --help` for parser details. On Linux, remove a manually
 installed executable, icon, and desktop file manually; CtrlSpeak does not run a
 package manager or delete arbitrary installation paths.
 
-## Linux packaging and launcher template
+## Windows/Linux packaging and launcher template
 
-The maintained Linux build command is:
+The maintained native build command is:
 
 ```bash
 python -m utils.build_exe
 ```
 
-It selects `packaging/CtrlSpeak_v0.4.spec` and produces the clearly named
-one-file executable `dist/CtrlSpeak_v0.4` on a Linux build host. The PNG icon and
-runtime assets are bundled; model weights and system CUDA libraries remain
-external. PyInstaller does not cross-compile this artifact from Windows.
+It selects `packaging/CtrlSpeak_v0.5.spec` and produces the stable one-file
+executable `dist/CtrlSpeak.exe` on Windows or `dist/CtrlSpeak` on Linux. The
+native icon, updater verification key, and runtime assets are bundled; model
+weights and system CUDA libraries remain external. PyInstaller does not
+cross-compile the Linux artifact from Windows or vice versa.
 
 The repository includes:
 
@@ -225,6 +256,7 @@ or deploys an API.
 ```bash
 python -m pytest -m core_headless
 python -m pytest -q tests/core
+python -m pytest -q tests/core/test_update_manager.py tests/core/test_update_helper.py
 python -m compileall .
 git diff --check
 ```
@@ -251,6 +283,12 @@ lines, and protect transcription/correction data according to its sensitivity.
 The legacy embedded `/transcribe` plus UDP-discovery protocol is intended for a
 controlled trusted LAN and has no bearer-auth contract. Do not publish it to the
 Internet.
+
+Application updates trust only the hard-coded
+`Wouter-Bekker-AI/CtrlSpeak` stable-release identity and the embedded Ed25519
+public key. Repository identity, product, variant, and signing key are not
+editable settings. HTTPS is required but does not replace signature, size, and
+hash verification.
 
 ## License
 

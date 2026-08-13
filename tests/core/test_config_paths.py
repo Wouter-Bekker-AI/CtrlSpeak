@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import stat
 
 import pytest
@@ -65,6 +66,79 @@ def test_settings_round_trip(tmp_path, monkeypatch):
     assert "unit_test_marker" in settings_file.read_text(encoding="utf-8")
     if not config_paths.sys.platform.startswith("win"):
         assert stat.S_IMODE(settings_file.stat().st_mode) == 0o600
+
+
+def test_v04_settings_migration_salvages_valid_fields(tmp_path, monkeypatch):
+    config_home = tmp_path / "cfg"
+    config_home.mkdir()
+    if config_paths.sys.platform.startswith("win"):
+        monkeypatch.setenv("APPDATA", str(config_home))
+    else:
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+
+    import importlib
+
+    importlib.reload(config_paths)
+    settings_file = config_paths.get_config_file_path()
+    settings_file.write_text(
+        json.dumps(
+            {
+                "mode": "client_server",
+                "device_preference": "cuda",
+                "model_name": "large-v3",
+                "transcription_backend": "api",
+                "api_url": "http://192.168.1.22:8765",
+                "api_token": "keep-this-secret",
+                "show_whats_new_on_update": "not-a-boolean",
+                "future_field": {"preserve": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = config_paths.load_settings()
+
+    assert loaded["settings_schema_version"] == config_paths.SETTINGS_SCHEMA_VERSION
+    assert loaded["mode"] == "client_server"
+    assert loaded["device_preference"] == "cuda"
+    assert loaded["model_name"] == "large-v3"
+    assert loaded["transcription_backend"] == "api"
+    assert loaded["api_url"] == "http://192.168.1.22:8765"
+    assert loaded["api_token"] == "keep-this-secret"
+    assert loaded["show_whats_new_on_update"] is True
+    assert loaded["future_field"] == {"preserve": True}
+
+    backups = list(settings_file.parent.glob("settings.pre-migration-v1.*.json"))
+    assert len(backups) == 1
+    original = json.loads(backups[0].read_text(encoding="utf-8"))
+    assert original["api_token"] == "keep-this-secret"
+    migrated = json.loads(settings_file.read_text(encoding="utf-8"))
+    assert migrated["api_token"] == "keep-this-secret"
+    assert migrated["show_whats_new_on_update"] is True
+
+
+def test_corrupt_settings_are_backed_up_before_defaults_are_written(tmp_path, monkeypatch):
+    config_home = tmp_path / "cfg"
+    config_home.mkdir()
+    if config_paths.sys.platform.startswith("win"):
+        monkeypatch.setenv("APPDATA", str(config_home))
+    else:
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+
+    import importlib
+
+    importlib.reload(config_paths)
+    settings_file = config_paths.get_config_file_path()
+    settings_file.write_text("{definitely not json", encoding="utf-8")
+
+    loaded = config_paths.load_settings()
+
+    assert loaded["settings_schema_version"] == config_paths.SETTINGS_SCHEMA_VERSION
+    assert loaded["transcription_backend"] == "bundled"
+    backups = list(settings_file.parent.glob("settings.pre-migration-v1.*.json"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == "{definitely not json"
+    assert json.loads(settings_file.read_text(encoding="utf-8"))["model_name"] == "small"
 
 
 def test_settings_persistence_failure_is_returned_to_the_caller(monkeypatch):
