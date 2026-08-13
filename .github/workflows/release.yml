@@ -54,8 +54,10 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path release -Force | Out-Null
-          & .\dist\CtrlSpeak.exe --health-check-file "$env:RUNNER_TEMP\ctrlspeak-health.json"
-          if ($LASTEXITCODE -ne 0) { throw "CtrlSpeak.exe health check failed" }
+          $process = Start-Process -FilePath .\dist\CtrlSpeak.exe `
+            -ArgumentList @('--health-check-file', "$env:RUNNER_TEMP\ctrlspeak-health.json") `
+            -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "CtrlSpeak.exe health check failed" }
           $health = Get-Content -Raw "$env:RUNNER_TEMP\ctrlspeak-health.json" | ConvertFrom-Json
           $expectedVersion = ('${{ github.ref_name }}').Substring(1)
           if ($health.product -ne 'ctrlspeak' -or $health.version -ne $expectedVersion -or -not $health.frozen) { throw "Invalid packaged health metadata" }
