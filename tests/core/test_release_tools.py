@@ -16,9 +16,9 @@ pytestmark = pytest.mark.core_headless
 
 
 def test_release_version_gate_matches_v05():
-    assert release.read_app_version() == "0.5.1"
-    assert release.read_server_versions() == ("0.5.1", "0.5.1")
-    assert release.check_version("v0.5.1") == "0.5.1"
+    assert release.read_app_version() == "0.5.2"
+    assert release.read_server_versions() == ("0.5.2", "0.5.2")
+    assert release.check_version("v0.5.2") == "0.5.2"
     with pytest.raises(SystemExit, match="tag/version mismatch"):
         release.check_version("v0.5.0")
 
@@ -46,14 +46,14 @@ def test_generate_and_verify_complete_release_set(tmp_path, monkeypatch):
     monkeypatch.setattr(release, "verify_signed_manifest", verify_with_test_key)
     release.generate(
         Namespace(
-            tag="v0.5.1",
+            tag="v0.5.2",
             windows=str(windows),
             linux=str(linux),
             output_dir=str(tmp_path),
             published_at="2026-08-14T12:00:00Z",
         )
     )
-    release.verify(Namespace(directory=str(tmp_path), tag="v0.5.1"))
+    release.verify(Namespace(directory=str(tmp_path), tag="v0.5.2"))
 
     assert (tmp_path / "update-manifest.json").is_file()
     assert (tmp_path / "update-manifest.sig").is_file()

@@ -103,6 +103,21 @@ def test_semantic_version_rejects_non_release_values(value):
         update_manager.SemanticVersion.parse(value)
 
 
+def test_update_discovery_classifies_an_unavailable_ca_bundle_as_tls_failure() -> None:
+    class MissingCaSession:
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+
+        def get(self, *_args, **_kwargs):
+            raise OSError("Could not find a suitable TLS CA certificate bundle")
+
+    with pytest.raises(update_manager.UpdateError) as captured:
+        update_manager.discover_update("0.5.1", session=MissingCaSession())
+
+    assert captured.value.code == "tls_failure"
+    assert "certificate bundle" in captured.value.user_message
+
+
 def test_signed_manifest_selects_exact_target():
     artifact = b"signed executable bytes"
     release, _ = _signed_release(artifact)

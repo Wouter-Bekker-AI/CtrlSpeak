@@ -1,4 +1,4 @@
-# CtrlSpeak v0.5.1
+# CtrlSpeak v0.5.2
 
 CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into
@@ -31,6 +31,12 @@ This setting prevents CtrlSpeak from accepting a reported language outside the
 configured list. It constrains speech recognition/decoding; it is not an
 arbitrary translation feature. Backend and language changes are pinned for the
 running process and take effect after restarting CtrlSpeak.
+
+v0.5.2 fixes post-update HTTPS checks on one-file builds. A newly launched
+version now replaces certificate paths inherited from the previous temporary
+PyInstaller extraction, and updater subprocesses no longer pass those temporary
+paths forward. Copied update diagnostics also include the redacted status
+message alongside the finite error category.
 
 ## Application updates
 
@@ -168,7 +174,7 @@ is hardcoded. API mode calls:
 
 When output languages are configured, the request includes an ordered
 comma-separated `allowed_languages` multipart field such as `en` or `en,af`.
-The maintained v0.5.1 server validates a maximum of five codes, forces one of
+The maintained v0.5.2 server validates a maximum of five codes, forces one of
 them, uses the first as a fallback, and refuses to return a reported language
 outside the list. Omitting the field preserves automatic detection. The legacy
 single `language` field is still accepted by the server.
@@ -202,7 +208,7 @@ preventing a partially switched runtime.
 
 The maintained CUDA API service, Ubuntu user-service setup, and server tests
 are under `server/whisper_transcription`. See `docs/API.md` for authentication,
-all routes, request/response examples, errors, and the v0.5.1 language-policy
+all routes, request/response examples, errors, and the current language-policy
 contract. A running server publishes OpenAPI at `/openapi.json`, Swagger UI at
 `/docs`, and ReDoc at `/redoc`.
 

@@ -1,4 +1,4 @@
-# CtrlSpeak v0.5.1 user flow
+# CtrlSpeak v0.5.2 user flow
 
 ## 1. Launch and platform readiness
 
@@ -72,7 +72,7 @@ authentication, network, or schema errors are shown and never trigger embedded
 fallback.
 
 When configured, the ordered language policy is sent as the multipart
-`allowed_languages` field. The maintained v0.5.1 server validates and enforces
+`allowed_languages` field. The maintained server validates and enforces
 it, and the client independently refuses an out-of-policy response.
 
 ### Linux insertion

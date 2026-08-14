@@ -2089,6 +2089,7 @@ class ManagementWindow:
             f"Runtime: {self._update_runtime}",
             f"State: {event.state}",
             f"Error category: {event.error_code or 'none'}",
+            f"Message: {event.message}",
             f"Target version: {release.version if release else 'none'}",
             f"Release tag: {release.tag if release else 'none'}",
             f"Manifest SHA-256: {release.manifest_sha256 if release else 'none'}",

@@ -387,6 +387,11 @@ def _request(
         raise UpdateError("network_timeout", "The update server did not respond in time.") from exc
     except requests.exceptions.SSLError as exc:
         raise UpdateError("tls_failure", "A secure connection to GitHub could not be verified.") from exc
+    except OSError as exc:
+        raise UpdateError(
+            "tls_failure",
+            "CtrlSpeak could not load its secure certificate bundle. Restart CtrlSpeak and try again.",
+        ) from exc
     except requests.exceptions.RequestException as exc:
         raise UpdateError("network_error", "CtrlSpeak could not reach GitHub to check for updates.") from exc
     _validate_download_response(response)
@@ -451,6 +456,11 @@ def discover_update(
             raise UpdateError("network_timeout", "GitHub did not respond before the update check timed out.") from exc
         except requests.exceptions.SSLError as exc:
             raise UpdateError("tls_failure", "A secure connection to GitHub could not be verified.") from exc
+        except OSError as exc:
+            raise UpdateError(
+                "tls_failure",
+                "CtrlSpeak could not load its secure certificate bundle. Restart CtrlSpeak and try again.",
+            ) from exc
         except requests.exceptions.RequestException as exc:
             raise UpdateError("network_error", "CtrlSpeak could not reach GitHub to check for updates.") from exc
 

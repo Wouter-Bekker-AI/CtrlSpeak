@@ -65,7 +65,7 @@ def audio_form(**data: str) -> dict[str, Any]:
     }
 
 
-def test_health_and_openapi_report_v051_language_contract(tmp_path: Path) -> None:
+def test_health_and_openapi_report_current_language_contract(tmp_path: Path) -> None:
     backend = FakeBackend()
     with make_client(tmp_path, backend) as client:
         response = client.get("/health")
@@ -78,7 +78,7 @@ def test_health_and_openapi_report_v051_language_contract(tmp_path: Path) -> Non
         "model": "fake-whisper",
         "device": "fake-cuda",
     }
-    assert SERVICE_VERSION == "0.5.1"
+    assert SERVICE_VERSION == "0.5.2"
     rendered = str(document)
     assert "allowed_languages" in rendered
     assert "server-enforced" in rendered

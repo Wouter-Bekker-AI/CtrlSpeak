@@ -1,4 +1,4 @@
-# CtrlSpeak v0.5.1 update and release guide
+# CtrlSpeak v0.5.2 update and release guide
 
 ## End-user update flow
 
@@ -35,6 +35,14 @@ v0.5.1 is the first normal in-application patch update. It adds the selectable
 output-language allowlist and the version-matched maintained Ubuntu Whisper API.
 An existing v0.5.0 Desktop installation should discover v0.5.1 through **Check
 for updates**; it must not be replaced manually when validating that flow.
+
+v0.5.2 fixes a post-update TLS handoff defect found during that first live
+exercise. v0.5.1 inherited `SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE` paths from
+the previous one-file extraction while it still existed; after cleanup, later
+checks could not load that old CA file. v0.5.2 recognizes and replaces inherited
+PyInstaller-temporary CA paths and sanitizes them from future helper launches.
+An affected v0.5.1 process needs one ordinary quit/reopen before it can discover
+v0.5.2; after v0.5.2, this extra restart is not expected.
 
 ## Trust and safety model
 
@@ -86,7 +94,7 @@ For each release:
 3. Perform the physical Windows/Ubuntu checks in `docs/TESTING.md` appropriate
    to the change.
 4. Commit and push the reviewed `v0.5` branch.
-5. Create an immutable annotated tag such as `v0.5.1` at that commit and push it.
+5. Create an immutable annotated tag such as `v0.5.2` at that commit and push it.
 6. Observe `.github/workflows/release.yml` through all three stages:
 
    - clean Windows/Linux tests and native one-file builds;
@@ -96,7 +104,7 @@ For each release:
 7. Independently download the five release assets and run:
 
    ```text
-   python scripts/release.py verify --directory <asset-directory> --tag v0.5.1
+   python scripts/release.py verify --directory <asset-directory> --tag v0.5.2
    ```
 
 8. Test the update from the immediately previous stable version on both

@@ -46,6 +46,33 @@ from utils.version import APP_VERSION
 logger = get_logger(__name__)
 
 
+_TLS_CA_ENVIRONMENT_VARIABLES = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
+
+
+def _is_pyinstaller_temporary_path(value: object) -> bool:
+    """Recognize a CA path inherited from a one-file PyInstaller extraction."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        return any(part.upper().startswith("_MEI") for part in Path(value).parts)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _should_replace_runtime_ca(current: str | None, bundled: Path) -> bool:
+    if not current:
+        return True
+    try:
+        current_path = Path(current)
+        if current_path.resolve() == bundled.resolve():
+            return False
+        if _is_pyinstaller_temporary_path(current):
+            return True
+        return not current_path.exists()
+    except (OSError, TypeError, ValueError):
+        return True
+
+
 def _bootstrap_runtime_environment() -> None:
     """
     Ensure third-party services can establish HTTPS connections when running
@@ -74,9 +101,9 @@ def _bootstrap_runtime_environment() -> None:
     if not cert_path.exists():
         return
 
-    for env_name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+    for env_name in _TLS_CA_ENVIRONMENT_VARIABLES:
         current = os.environ.get(env_name)
-        if not current or not Path(current).exists():
+        if _should_replace_runtime_ca(current, cert_path):
             os.environ[env_name] = str(cert_path)
 
 

@@ -41,6 +41,7 @@ FILE_UNLOCK_TIMEOUT_SECONDS = 30.0
 HEALTH_TIMEOUT_SECONDS = 90.0
 HEALTH_GRACE_SECONDS = 3.0
 POLL_INTERVAL_SECONDS = 0.2
+_TLS_CA_ENVIRONMENT_VARIABLES = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
 
 
 def _append_update_log(transaction: UpdateTransaction, message: str) -> None:
@@ -119,11 +120,23 @@ def _copy_verified(source: Path, destination: Path, expected_hash: str, expected
 
 
 def _detached_process_kwargs() -> dict[str, object]:
+    environment = dict(os.environ)
+    for name in _TLS_CA_ENVIRONMENT_VARIABLES:
+        value = environment.get(name, "")
+        try:
+            is_pyinstaller_path = any(
+                part.upper().startswith("_MEI") for part in Path(value).parts
+            )
+        except (OSError, TypeError, ValueError):
+            is_pyinstaller_path = False
+        if is_pyinstaller_path:
+            environment.pop(name, None)
     kwargs: dict[str, object] = {
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
         "close_fds": True,
+        "env": environment,
     }
     if sys.platform.startswith("win"):
         kwargs["creationflags"] = (

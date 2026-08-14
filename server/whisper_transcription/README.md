@@ -1,4 +1,4 @@
-# CtrlSpeak Whisper Transcription API v0.5.1
+# CtrlSpeak Whisper Transcription API v0.5.2
 
 This directory is the maintained Ubuntu GPU backend for CtrlSpeak. It loads
 `large-v3-turbo` with faster-whisper on CUDA float16 and intentionally has no
@@ -101,7 +101,7 @@ It does not expose credentials or transcription content.
 
 `scripts/hermes-stt-api INPUT_AUDIO LANGUAGE OUTPUT_TEXT` preserves the existing
 Hermes command-provider integration. It reads the user-service LAN drop-in when
-present, sends the requested single language through the v0.5.1
+present, sends the requested single language through the
 `allowed_languages` contract, and writes only the corrected transcript to the
 requested output file. Its established downstream name-normalization rules are
 retained. The adapter never prints the bearer value.
