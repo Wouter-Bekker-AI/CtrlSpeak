@@ -1,4 +1,4 @@
-# CtrlSpeak v0.5.2 user flow
+# CtrlSpeak v0.5.3 user flow
 
 ## 1. Launch and platform readiness
 
@@ -46,7 +46,8 @@ All persistent data is below `$XDG_CONFIG_HOME/CtrlSpeak` or
    selected/default PortAudio input device.
 3. The waveform overlay updates while the key is held.
 4. Releasing right Ctrl stops recording, changes the overlay to Processing, and
-   starts the processing sound.
+   starts the processing sound. The packaged chime is uniformly attenuated when
+   necessary to remain at or below the -6 dBFS peak ceiling.
 5. Audio/open-device errors are logged and reported; they do not leave a
    recording beside the executable.
 
@@ -88,11 +89,19 @@ it, and the client independently refuses an out-of-policy response.
    reported. A non-text clipboard is not overwritten; only safe single-line
    ASCII direct typing is then attempted. Native Wayland stops at the earlier
    capability check.
-4. Only after successful injection does CtrlSpeak make the result eligible for
-   edit feedback.
+4. Before insertion, CtrlSpeak retains the successful text as the one in-memory
+   **Copy last transcript** recovery value. Only after successful injection does
+   it make the result eligible for edit feedback.
 
 The processing sound/overlay stops and the temporary WAV is cleaned in every
 result path.
+
+### Tray recovery
+
+The tray's **Copy last transcript** item is disabled until transcription first
+succeeds. It copies the retained text even if active-field insertion failed and
+reports the clipboard outcome. CtrlSpeak retains exactly one result in memory;
+it does not persist transcript history, and the value disappears on exit.
 
 ## 5. Best-effort correction feedback
 

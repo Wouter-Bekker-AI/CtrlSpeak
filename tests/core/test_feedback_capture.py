@@ -325,6 +325,7 @@ def test_system_hotkey_hooks_only_observe_events_and_track_api_result(monkeypatc
 def test_actual_injection_tracks_feedback_only_after_success(monkeypatch) -> None:
     calls: list[tuple[str, object]] = []
     result = TranscriptionResult(text="insert this", transcription_id="tx-10")
+    monkeypatch.setattr(system, "_last_transcript", None)
     monkeypatch.setattr(
         system,
         "insert_text_into_focus",
@@ -339,11 +340,13 @@ def test_actual_injection_tracks_feedback_only_after_success(monkeypatch) -> Non
     system.inject_transcription_result(result)
 
     assert calls == [("insert", "insert this"), ("track", result)]
+    assert system.get_last_transcript() == "insert this"
 
 
 def test_failed_injection_never_tracks_feedback(monkeypatch) -> None:
     tracked: list[TranscriptionResult] = []
     result = TranscriptionResult(text="insert this", transcription_id="tx-11")
+    monkeypatch.setattr(system, "_last_transcript", None)
 
     def fail_insertion(_text: str) -> None:
         raise RuntimeError("insertion failed")
@@ -355,6 +358,43 @@ def test_failed_injection_never_tracks_feedback(monkeypatch) -> None:
         system.inject_transcription_result(result)
 
     assert tracked == []
+    assert system.get_last_transcript() == "insert this"
+
+
+def test_copy_last_transcript_is_memory_only_and_reports_outcome(monkeypatch) -> None:
+    copied: list[str] = []
+    notifications: list[tuple[str, str]] = []
+    tray_refreshes: list[bool] = []
+    tray_icon = type("TrayIcon", (), {"update_menu": lambda self: tray_refreshes.append(True)})()
+    monkeypatch.setattr(system, "_last_transcript", None)
+    monkeypatch.setattr(system, "_tray_icon", tray_icon)
+    monkeypatch.setattr(system, "set_clipboard_text", lambda text: copied.append(text) is None)
+    monkeypatch.setattr(
+        system,
+        "notify",
+        lambda message, *, title="CtrlSpeak": notifications.append((title, message)),
+    )
+
+    assert system.has_last_transcript() is False
+    assert system.copy_last_transcript_from_tray() is False
+    assert copied == []
+
+    assert system.remember_last_transcript("Recovered dictated text") is True
+    assert system.has_last_transcript() is True
+    assert tray_refreshes == [True]
+    assert system.copy_last_transcript_from_tray() is True
+    assert copied == ["Recovered dictated text"]
+    assert notifications == [
+        ("CtrlSpeak", "No successful transcription is available yet."),
+        ("CtrlSpeak", "Last transcript copied to the clipboard."),
+    ]
+
+
+def test_empty_transcript_never_replaces_last_recoverable_text(monkeypatch) -> None:
+    monkeypatch.setattr(system, "_last_transcript", "keep this")
+
+    assert system.remember_last_transcript("  \n") is False
+    assert system.get_last_transcript() == "keep this"
 
 
 def test_system_submits_bundled_feedback_to_the_local_library(monkeypatch) -> None:

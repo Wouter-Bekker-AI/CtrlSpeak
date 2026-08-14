@@ -1,5 +1,6 @@
 # Python intermediates
 __pycache__/
+.pytest-*/
 *.py[cod]
 *.pyo
 

@@ -1,4 +1,4 @@
-# CtrlSpeak Whisper Transcription API v0.5.2
+# CtrlSpeak Whisper Transcription API v0.5.3
 
 This directory is the maintained Ubuntu backend for CtrlSpeak. It defaults to
 `large-v3-turbo` with faster-whisper on CUDA float16. A deployment may instead

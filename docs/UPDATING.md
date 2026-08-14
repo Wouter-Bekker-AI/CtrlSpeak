@@ -1,4 +1,4 @@
-# CtrlSpeak v0.5.2 update and release guide
+# CtrlSpeak v0.5.3 update and release guide
 
 ## End-user update flow
 
@@ -43,6 +43,12 @@ checks could not load that old CA file. v0.5.2 recognizes and replaces inherited
 PyInstaller-temporary CA paths and sanitizes them from future helper launches.
 An affected v0.5.1 process needs one ordinary quit/reopen before it can discover
 v0.5.2; after v0.5.2, this extra restart is not expected.
+
+v0.5.3 is a quality-of-life patch. It adds an in-memory-only **Copy last
+transcript** tray action that can recover a successful result even when text
+insertion fails, and it lowers the nearly full-scale processing-chime attack to
+a transparent -6 dBFS peak ceiling. The API contract is unchanged; the
+version-matched maintained service reports v0.5.3.
 
 ## Trust and safety model
 
@@ -94,7 +100,7 @@ For each release:
 3. Perform the physical Windows/Ubuntu checks in `docs/TESTING.md` appropriate
    to the change.
 4. Commit and push the reviewed `v0.5` branch.
-5. Create an immutable annotated tag such as `v0.5.2` at that commit and push it.
+5. Create an immutable annotated tag such as `v0.5.3` at that commit and push it.
 6. Observe `.github/workflows/release.yml` through all three stages:
 
    - clean Windows/Linux tests and native one-file builds;
@@ -104,7 +110,7 @@ For each release:
 7. Independently download the five release assets and run:
 
    ```text
-   python scripts/release.py verify --directory <asset-directory> --tag v0.5.2
+   python scripts/release.py verify --directory <asset-directory> --tag v0.5.3
    ```
 
 8. Test the update from the immediately previous stable version on both

@@ -19,7 +19,7 @@ from app.corrections import CorrectionStore
 from app.languages import choose_allowed_language, normalize_language_policy
 
 
-SERVICE_VERSION = "0.5.2"
+SERVICE_VERSION = "0.5.3"
 LOGGER = logging.getLogger("ctrlspeak_whisper_transcription")
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = Path(os.environ.get("WHISPER_DATA_DIR", ROOT / "data"))

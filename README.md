@@ -1,4 +1,4 @@
-# CtrlSpeak v0.5.2
+# CtrlSpeak v0.5.3
 
 CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into
@@ -17,6 +17,21 @@ transcription-backend design:
 The legacy **Client + Server** and **Client Only** roles remain inside the
 embedded/local backend. Remote API mode is independent of those roles and does
 not start discovery, a local server, or a model download.
+
+## v0.5.3 quality-of-life patch
+
+The tray now includes **Copy last transcript**. CtrlSpeak keeps exactly one
+successful transcription in memory, records it before attempting active-field
+insertion, and can therefore recover the text when focus changed or a target
+application rejected the paste. The item is disabled until a result exists;
+copying gives explicit success or failure feedback. Transcript content is never
+written to settings, logs, the correction database, or any other persistent
+history, and is discarded when CtrlSpeak exits.
+
+The looping processing chime now has a transparent -6 dBFS peak ceiling. The
+bundled WAV previously reached almost full scale during its opening attack;
+v0.5.3 attenuates that clip uniformly at load time so it is less harsh through
+loud headphones without hard clipping or changing its pitch.
 
 ## Output-language control
 
@@ -174,7 +189,7 @@ is hardcoded. API mode calls:
 
 When output languages are configured, the request includes an ordered
 comma-separated `allowed_languages` multipart field such as `en` or `en,af`.
-The maintained v0.5.2 server validates a maximum of five codes, forces one of
+The maintained v0.5.3 server validates a maximum of five codes, forces one of
 them, uses the first as a fallback, and refuses to return a reported language
 outside the list. Omitting the field preserves automatic detection. The legacy
 single `language` field is still accepted by the server.

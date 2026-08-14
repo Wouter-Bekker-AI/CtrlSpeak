@@ -5,6 +5,7 @@ from datetime import datetime
 
 import atexit
 import argparse
+from array import array
 import http.client
 import json
 import os
@@ -132,6 +133,7 @@ SPLASH_DURATION_MS = 1000
 ERROR_LOG_FILENAME = "CtrlSpeak-error.log"
 LOCK_FILENAME = "CtrlSpeak.lock"
 PROCESSING_SAMPLE_RATE = 44100
+PROCESSING_SOUND_MAX_PEAK = 0.5  # -6.02 dBFS; keeps the processing loop headphone-safe
 
 INSTANCE_PORT = int(os.environ.get("CTRLSPEAK_SINGLE_INSTANCE_PORT", "54329"))
 
@@ -216,6 +218,9 @@ last_connected_server: Optional[ServerInfo] = None
 _feedback_coordinator = None
 _feedback_modifiers: set[str] = set()
 _feedback_capture_in_progress = False
+_last_transcript_lock = threading.Lock()
+_last_transcript: Optional[str] = None
+_tray_icon: Optional[object] = None
 
 
 def _capture_active_feedback_field() -> str | None:
@@ -316,7 +321,8 @@ def track_feedback_injection(result) -> None:
 
 
 def inject_transcription_result(result) -> None:
-    """Insert once, then make that successful injection eligible for feedback."""
+    """Retain the result, insert once, then make a successful injection eligible for feedback."""
+    remember_last_transcript(result.text)
     insert_text_into_focus(result.text)
     track_feedback_injection(result)
 
@@ -439,12 +445,58 @@ def write_error_log(context: str, snippet: str) -> None:
         logger.exception("Failed to write error log entry")
 
 
-def copy_to_clipboard(text: str) -> None:
+def copy_to_clipboard(text: str) -> bool:
     try:
         if not set_clipboard_text(text):
             logger.warning("Failed to stage clipboard text")
+            return False
+        return True
     except Exception:
         logger.exception("Failed to copy text to clipboard")
+        return False
+
+
+def remember_last_transcript(text: str) -> bool:
+    """Retain one successful transcript in memory without persisting its content."""
+    if not isinstance(text, str) or not text.strip():
+        return False
+    global _last_transcript
+    with _last_transcript_lock:
+        _last_transcript = text
+    _refresh_tray_menu()
+    return True
+
+
+def get_last_transcript() -> Optional[str]:
+    with _last_transcript_lock:
+        return _last_transcript
+
+
+def has_last_transcript(_item=None) -> bool:
+    return get_last_transcript() is not None
+
+
+def _refresh_tray_menu() -> None:
+    icon = _tray_icon
+    if icon is None:
+        return
+    try:
+        icon.update_menu()
+    except Exception:
+        logger.exception("Failed to refresh the tray after retaining a transcript")
+
+
+def copy_last_transcript_from_tray(_icon=None, _item=None) -> bool:
+    text = get_last_transcript()
+    if text is None:
+        notify("No successful transcription is available yet.", title="CtrlSpeak")
+        return False
+    if not copy_to_clipboard(text):
+        notify("The last transcript could not be copied to the clipboard.", title="CtrlSpeak")
+        return False
+    notify("Last transcript copied to the clipboard.", title="CtrlSpeak")
+    return True
+
 
 def notify_error(context: str, details: str) -> None:
     snippet = (details or "").strip() or "Unknown error"
@@ -575,6 +627,39 @@ def generate_fallback_sound():
     settings_audio = {"channels": 1, "rate": PROCESSING_SAMPLE_RATE, "width": 2}
     return int_data.tobytes(), settings_audio
 
+
+def limit_processing_sound_peak(
+    frames: bytes,
+    settings_audio: Dict[str, int],
+    *,
+    max_peak: float = PROCESSING_SOUND_MAX_PEAK,
+) -> bytes:
+    """Apply transparent whole-clip attenuation when 16-bit audio exceeds the peak ceiling."""
+    if settings_audio.get("width") != 2 or not frames:
+        return frames
+    samples = array("h")
+    samples.frombytes(frames)
+    if sys.byteorder == "big":
+        samples.byteswap()
+    if not samples:
+        return frames
+    peak = max(abs(sample) for sample in samples)
+    target = max(1, min(32767, int(round(32767 * max_peak))))
+    if peak <= target:
+        return frames
+    gain = target / peak
+    softened = array(
+        "h",
+        (
+            max(-32768, min(32767, int(round(sample * gain))))
+            for sample in samples
+        ),
+    )
+    if sys.byteorder == "big":
+        softened.byteswap()
+    return softened.tobytes()
+
+
 def load_processing_sound():
     global processing_sound_data, processing_sound_settings
     if processing_sound_data is not None and processing_sound_settings is not None:
@@ -587,6 +672,7 @@ def load_processing_sound():
     except Exception:
         logger.exception("Failed to load processing sound from %s; using fallback tone", asset_path("loading.wav"))
         frames, settings_audio = generate_fallback_sound()
+    frames = limit_processing_sound_peak(frames, settings_audio)
     processing_sound_data = frames
     processing_sound_settings = settings_audio
     return processing_sound_data, processing_sound_settings
@@ -1157,6 +1243,8 @@ def register_manual_server(host: str, port: int, update_preference: bool = True)
 
 # ---------------- Tray ----------------
 def on_exit(icon, item):
+    global _tray_icon
+    _tray_icon = None
     stop_client_listener(); shutdown_server()
     try:
         from utils.gui import request_management_ui_shutdown
@@ -1188,6 +1276,7 @@ def check_for_updates_from_tray(icon, item):
     enqueue_management_task(_open_and_check)
 
 def run_tray():
+    global _tray_icon
     from utils.gui import ensure_management_ui_thread, run_management_ui_loop, request_management_ui_shutdown
     ensure_management_ui_thread()  # make sure tk_root exists for overlay
     start_client_listener()
@@ -1230,6 +1319,11 @@ def run_tray():
     menu_items = [
         pystray.MenuItem(f"CtrlSpeak {APP_VERSION}", lambda _icon, _item: None, enabled=False),
         pystray.MenuItem("Manage CtrlSpeak", open_management_dialog),
+        pystray.MenuItem(
+            "Copy last transcript",
+            copy_last_transcript_from_tray,
+            enabled=has_last_transcript,
+        ),
         pystray.MenuItem("Check for updates", check_for_updates_from_tray),
         pystray.MenuItem("Quit", on_exit),
     ]
@@ -1239,6 +1333,7 @@ def run_tray():
         f"CtrlSpeak {APP_VERSION} ({tray_mode})",
         menu=pystray.Menu(*menu_items),
     )
+    _tray_icon = icon
     def _run_icon() -> None:
         tray_failed = False
         try:

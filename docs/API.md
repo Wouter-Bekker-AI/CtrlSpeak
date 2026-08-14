@@ -1,7 +1,7 @@
-# CtrlSpeak Whisper API v0.5.2
+# CtrlSpeak Whisper API v0.5.3
 
 The maintained API implementation is in `server/whisper_transcription`. Its
-OpenAPI title and version are **CtrlSpeak Whisper Transcription API 0.5.2**.
+OpenAPI title and version are **CtrlSpeak Whisper Transcription API 0.5.3**.
 All examples below use the default base URL `http://127.0.0.1:8765`; use the
 URL configured for your deployment.
 
@@ -26,7 +26,7 @@ ready, otherwise:
 ```json
 {
   "status": "ready",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "model": "large-v3-turbo",
   "device": "cuda",
   "compute_type": "float16"
@@ -126,7 +126,7 @@ an exact raw-transcript override. At least one of `rule_ids` or
   "capture_method": "active_field_on_enter",
   "client_metadata": {
     "client": "CtrlSpeak",
-    "version": "0.5.2"
+    "version": "0.5.3"
   }
 }
 ```
