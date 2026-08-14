@@ -1,17 +1,23 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+# Runtime library paths are set before Python imports CTranslate2.
+set -eu
 
-SERVICE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENV_DIR="${WHISPER_VENV_DIR:-${SERVICE_ROOT}/.venv}"
-
-if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
+SERVICE_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+VENV_DIR=${WHISPER_VENV_DIR:-"${SERVICE_ROOT}/.venv"}
+[ -x "${VENV_DIR}/bin/python" ] || {
   echo "CtrlSpeak Whisper virtual environment is missing: ${VENV_DIR}" >&2
   exit 1
-fi
+}
+
+. "${SERVICE_ROOT}/scripts/runtime-config"
+whisper_validate_runtime_config
+BIND_HOST=$(whisper_bind_host)
+export WHISPER_DATA_DIR="${WHISPER_DATA_DIR:-${SERVICE_ROOT}/data}"
+export HF_HUB_DISABLE_XET=1
 
 # NVIDIA pip wheels keep shared libraries below site-packages. Add those exact
 # package paths without changing the host CUDA installation.
-NVIDIA_LIBS="$(${VENV_DIR}/bin/python - <<'PY'
+NVIDIA_LIBS="$("${VENV_DIR}/bin/python" - <<'PY'
 from pathlib import Path
 import site
 
@@ -23,12 +29,14 @@ for root in map(Path, site.getsitepackages()):
 print(":".join(paths))
 PY
 )"
-if [[ -n "${NVIDIA_LIBS}" ]]; then
+if [ -n "${NVIDIA_LIBS}" ]; then
   export LD_LIBRARY_PATH="${NVIDIA_LIBS}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 fi
 
 cd "${SERVICE_ROOT}"
 exec "${VENV_DIR}/bin/python" -m uvicorn app.main:app \
-  --host "${WHISPER_HOST:-127.0.0.1}" \
+  --host "${BIND_HOST}" \
   --port "${WHISPER_PORT:-8765}" \
+  --workers 1 \
+  --no-proxy-headers \
   --log-level "${WHISPER_LOG_LEVEL:-info}"

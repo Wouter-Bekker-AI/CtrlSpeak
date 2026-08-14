@@ -1,17 +1,23 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
-SERVICE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SERVICE_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 UNIT_SOURCE="${SERVICE_ROOT}/systemd/whisper-transcription.service"
 UNIT_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
 UNIT_TARGET="${UNIT_DIR}/whisper-transcription.service"
 
-mkdir -p "${UNIT_DIR}"
-sed "s|@SERVICE_ROOT@|${SERVICE_ROOT}|g" "${UNIT_SOURCE}" > "${UNIT_TARGET}"
-chmod 600 "${UNIT_TARGET}"
+[ -x "${SERVICE_ROOT}/.venv/bin/python" ] || {
+  echo "Missing project venv: ${SERVICE_ROOT}/.venv" >&2
+  exit 1
+}
+mkdir -p "${SERVICE_ROOT}/data/uploads" "${SERVICE_ROOT}/data/models" "${UNIT_DIR}"
+chmod 700 "${SERVICE_ROOT}/data" "${SERVICE_ROOT}/data/uploads" "${SERVICE_ROOT}/data/models"
+generated_unit="${UNIT_TARGET}.new"
+sed "s|@SERVICE_ROOT@|${SERVICE_ROOT}|g" "${UNIT_SOURCE}" > "${generated_unit}"
+chmod 600 "${generated_unit}"
+mv "${generated_unit}" "${UNIT_TARGET}"
 systemctl --user daemon-reload
-systemctl --user enable whisper-transcription.service
+systemctl --user enable --now whisper-transcription.service
 
 echo "Installed ${UNIT_TARGET}"
-echo "Configure a protected systemd drop-in before LAN use; see README.md."
-echo "Start with: systemctl --user start whisper-transcription.service"
+systemctl --user status --no-pager whisper-transcription.service

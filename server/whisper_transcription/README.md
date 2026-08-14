@@ -29,7 +29,7 @@ python -m pytest -q
 Run on loopback for local testing:
 
 ```bash
-WHISPER_HOST=127.0.0.1 scripts/run-service
+WHISPER_BIND_HOST=127.0.0.1 scripts/run-service
 ```
 
 Run the redacted configuration summary with `scripts/runtime-config`. It never
@@ -46,7 +46,7 @@ systemctl --user edit whisper-transcription.service
 
 ```ini
 [Service]
-Environment=WHISPER_HOST=0.0.0.0
+Environment=WHISPER_BIND_HOST=0.0.0.0
 Environment=WHISPER_BEARER_TOKEN=replace-with-a-long-random-secret
 ```
 
@@ -96,3 +96,12 @@ default upload limit is 100 MiB and can be changed with
 
 The health endpoint reports only readiness, service version, model, and device.
 It does not expose credentials or transcription content.
+
+## Hermes adapter compatibility
+
+`scripts/hermes-stt-api INPUT_AUDIO LANGUAGE OUTPUT_TEXT` preserves the existing
+Hermes command-provider integration. It reads the user-service LAN drop-in when
+present, sends the requested single language through the v0.5.1
+`allowed_languages` contract, and writes only the corrected transcript to the
+requested output file. Its established downstream name-normalization rules are
+retained. The adapter never prints the bearer value.

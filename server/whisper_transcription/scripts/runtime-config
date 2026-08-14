@@ -1,15 +1,61 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+# Shared runtime validation. This file is sourced by run-service and is also
+# intentionally side-effect free so configuration can be checked in tests.
 
-SERVICE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-echo "service_root=${SERVICE_ROOT}"
-echo "host=${WHISPER_HOST:-127.0.0.1}"
-echo "port=${WHISPER_PORT:-8765}"
-echo "data_dir=${WHISPER_DATA_DIR:-${SERVICE_ROOT}/data}"
-echo "model=large-v3-turbo"
-echo "device=cuda"
-if [[ -n "${WHISPER_BEARER_TOKEN:-}" ]]; then
-  echo "bearer_token=configured"
-else
-  echo "bearer_token=not-configured"
+whisper_bind_host() {
+  printf '%s\n' "${WHISPER_BIND_HOST:-${WHISPER_HOST:-127.0.0.1}}"
+}
+
+whisper_is_loopback_bind_host() (
+  host=$1
+  case "$host" in
+    localhost|::1)
+      return 0
+      ;;
+    127.*)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  old_ifs=$IFS
+  IFS=.
+  set -- $host
+  IFS=$old_ifs
+  [ "$#" -eq 4 ] || return 1
+  [ "$1" = 127 ] || return 1
+  for octet in "$@"; do
+    case "$octet" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$octet" -le 255 ] || return 1
+  done
+)
+
+whisper_validate_runtime_config() {
+  bind_host=$(whisper_bind_host)
+  whisper_is_loopback_bind_host "$bind_host" && return 0
+  if [ -z "${WHISPER_BEARER_TOKEN:-}" ]; then
+    printf '%s\n' \
+      'Refusing non-loopback binding: configure WHISPER_BEARER_TOKEN first.' >&2
+    return 64
+  fi
+}
+
+whisper_print_runtime_config() {
+  printf 'host=%s\n' "$(whisper_bind_host)"
+  printf 'port=%s\n' "${WHISPER_PORT:-8765}"
+  printf 'model=large-v3-turbo\n'
+  printf 'device=cuda\n'
+  if [ -n "${WHISPER_BEARER_TOKEN:-}" ]; then
+    printf 'bearer_token=configured\n'
+  else
+    printf 'bearer_token=not-configured\n'
+  fi
+}
+
+if [ "${0##*/}" = "runtime-config" ]; then
+  whisper_validate_runtime_config
+  whisper_print_runtime_config
 fi

@@ -1,18 +1,23 @@
 [Unit]
-Description=CtrlSpeak CUDA Whisper Transcription API
-After=network-online.target
-Wants=network-online.target
+Description=CtrlSpeak CUDA Whisper large-v3-turbo transcription API
+After=default.target
 
 [Service]
 Type=simple
 WorkingDirectory=@SERVICE_ROOT@
 ExecStart=@SERVICE_ROOT@/scripts/run-service
 Restart=on-failure
-RestartSec=5
-Environment=WHISPER_HOST=127.0.0.1
+RestartSec=15
+TimeoutStartSec=infinity
+TimeoutStopSec=30
+Environment=WHISPER_BIND_HOST=127.0.0.1
 Environment=WHISPER_PORT=8765
-NoNewPrivileges=true
-PrivateTmp=true
+Environment=WHISPER_DATA_DIR=@SERVICE_ROOT@/data
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=default.target
