@@ -1,1 +1,1 @@
-"""CtrlSpeak CUDA Whisper transcription service."""
+"""CtrlSpeak configurable Whisper transcription service."""

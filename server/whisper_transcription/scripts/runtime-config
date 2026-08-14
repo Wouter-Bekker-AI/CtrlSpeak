@@ -44,10 +44,21 @@ whisper_validate_runtime_config() {
 }
 
 whisper_print_runtime_config() {
+  device=${WHISPER_DEVICE:-cuda}
+  if [ -n "${WHISPER_COMPUTE_TYPE:-}" ]; then
+    compute_type=$WHISPER_COMPUTE_TYPE
+  elif [ "$device" = cuda ]; then
+    compute_type=float16
+  else
+    compute_type=int8
+  fi
   printf 'host=%s\n' "$(whisper_bind_host)"
   printf 'port=%s\n' "${WHISPER_PORT:-8765}"
-  printf 'model=large-v3-turbo\n'
-  printf 'device=cuda\n'
+  printf 'model=%s\n' "${WHISPER_MODEL_NAME:-large-v3-turbo}"
+  printf 'device=%s\n' "$device"
+  printf 'compute_type=%s\n' "$compute_type"
+  printf 'cpu_threads=%s\n' "${WHISPER_CPU_THREADS:-4}"
+  printf 'model_workers=%s\n' "${WHISPER_NUM_WORKERS:-1}"
   if [ -n "${WHISPER_BEARER_TOKEN:-}" ]; then
     printf 'bearer_token=configured\n'
   else

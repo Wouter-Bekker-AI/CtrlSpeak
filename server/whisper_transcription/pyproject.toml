@@ -5,8 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ctrlspeak-whisper-service"
 version = "0.5.2"
-description = "Authenticated CUDA Whisper transcription backend for CtrlSpeak"
-requires-python = ">=3.11,<3.12"
+description = "Authenticated configurable Whisper transcription backend for CtrlSpeak"
+requires-python = ">=3.11,<3.13"
 dependencies = [
   "fastapi>=0.115,<1",
   "uvicorn[standard]>=0.30,<1",

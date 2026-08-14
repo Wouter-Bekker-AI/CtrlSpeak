@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -14,6 +15,7 @@ from app.main import FasterWhisperBackend, SERVICE_VERSION, create_app
 class FakeBackend:
     name = "fake-whisper"
     device = "fake-cuda"
+    compute_type = "fake-float16"
 
     def __init__(self, *, response_language: str | None = None) -> None:
         self.response_language = response_language
@@ -77,6 +79,7 @@ def test_health_and_openapi_report_current_language_contract(tmp_path: Path) -> 
         "version": SERVICE_VERSION,
         "model": "fake-whisper",
         "device": "fake-cuda",
+        "compute_type": "fake-float16",
     }
     assert SERVICE_VERSION == "0.5.2"
     rendered = str(document)
@@ -244,3 +247,45 @@ def test_faster_whisper_backend_forces_selected_language_and_transcribe_task(tmp
     assert result["language"] == "af"
     assert backend.model.calls[0]["language"] == "af"
     assert backend.model.calls[0]["task"] == "transcribe"
+
+
+def test_faster_whisper_backend_loads_explicit_cpu_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    class FakeModel:
+        def __init__(self, model_name: str, **kwargs: Any) -> None:
+            calls["model_name"] = model_name
+            calls.update(kwargs)
+
+    def get_supported_compute_types(device: str) -> set[str]:
+        calls["device_probe"] = device
+        return {"int8", "float32"}
+
+    fake_ctranslate2 = SimpleNamespace(get_supported_compute_types=get_supported_compute_types)
+    fake_faster_whisper = SimpleNamespace(WhisperModel=FakeModel)
+    monkeypatch.setitem(sys.modules, "ctranslate2", fake_ctranslate2)
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_faster_whisper)
+
+    backend = FasterWhisperBackend(
+        tmp_path / "models",
+        model_name="large-v3-turbo",
+        device="cpu",
+        compute_type="int8",
+        cpu_threads=3,
+        num_workers=2,
+    )
+    backend.load()
+
+    assert calls == {
+        "device_probe": "cpu",
+        "model_name": "large-v3-turbo",
+        "device": "cpu",
+        "compute_type": "int8",
+        "download_root": str(tmp_path / "models"),
+        "cpu_threads": 3,
+        "num_workers": 2,
+    }
+    assert backend.model is not None

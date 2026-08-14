@@ -206,8 +206,8 @@ Backend settings are pinned at startup. Saving a backend, URL, token, or
 feedback/language change in the management window requires a restart,
 preventing a partially switched runtime.
 
-The maintained CUDA API service, Ubuntu user-service setup, and server tests
-are under `server/whisper_transcription`. See `docs/API.md` for authentication,
+The maintained configurable API service, Ubuntu user-service setup, and server
+tests are under `server/whisper_transcription`. See `docs/API.md` for authentication,
 all routes, request/response examples, errors, and the current language-policy
 contract. A running server publishes OpenAPI at `/openapi.json`, Swagger UI at
 `/docs`, and ReDoc at `/redoc`.

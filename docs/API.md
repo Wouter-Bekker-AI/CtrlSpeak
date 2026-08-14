@@ -20,16 +20,22 @@ Missing configuration returns `403`; missing or invalid credentials return
 
 ## Health
 
-`GET /health` returns `503` until the CUDA model is ready, otherwise:
+`GET /health` returns `503` until the explicitly configured model/runtime is
+ready, otherwise:
 
 ```json
 {
   "status": "ready",
   "version": "0.5.2",
   "model": "large-v3-turbo",
-  "device": "cuda"
+  "device": "cuda",
+  "compute_type": "float16"
 }
 ```
+
+CUDA/float16 is the default. A CPU deployment explicitly configures
+`WHISPER_DEVICE=cpu` and `WHISPER_COMPUTE_TYPE=int8`; there is no automatic
+fallback between runtimes.
 
 ## Transcribe audio
 

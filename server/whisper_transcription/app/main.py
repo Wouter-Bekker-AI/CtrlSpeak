@@ -25,7 +25,17 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = Path(os.environ.get("WHISPER_DATA_DIR", ROOT / "data"))
 DEFAULT_MAX_UPLOAD_BYTES = int(os.environ.get("WHISPER_MAX_UPLOAD_BYTES", 100 * 1024 * 1024))
 DEFAULT_BEARER_TOKEN = os.environ.get("WHISPER_BEARER_TOKEN") or None
-MODEL_NAME = "large-v3-turbo"
+MODEL_NAME = os.environ.get("WHISPER_MODEL_NAME", "large-v3-turbo").strip() or "large-v3-turbo"
+MODEL_DEVICE = os.environ.get("WHISPER_DEVICE", "cuda").strip().casefold() or "cuda"
+MODEL_COMPUTE_TYPE = (
+    os.environ.get(
+        "WHISPER_COMPUTE_TYPE",
+        "float16" if MODEL_DEVICE == "cuda" else "int8",
+    ).strip().casefold()
+    or ("float16" if MODEL_DEVICE == "cuda" else "int8")
+)
+MODEL_CPU_THREADS = max(1, int(os.environ.get("WHISPER_CPU_THREADS", "4")))
+MODEL_NUM_WORKERS = max(1, int(os.environ.get("WHISPER_NUM_WORKERS", "1")))
 
 
 def collect_text_from_segments(segments: Iterable[Mapping[str, Any]]) -> str:
@@ -59,35 +69,49 @@ class Backend(Protocol):
 
 
 class FasterWhisperBackend:
-    name = MODEL_NAME
-    device = "cuda"
-
-    def __init__(self, model_dir: Path) -> None:
+    def __init__(
+        self,
+        model_dir: Path,
+        *,
+        model_name: str = MODEL_NAME,
+        device: str = MODEL_DEVICE,
+        compute_type: str = MODEL_COMPUTE_TYPE,
+        cpu_threads: int = MODEL_CPU_THREADS,
+        num_workers: int = MODEL_NUM_WORKERS,
+    ) -> None:
         self.model_dir = model_dir
+        self.name = model_name.strip() or "large-v3-turbo"
+        self.device = device.strip().casefold()
+        self.compute_type = compute_type.strip().casefold()
+        self.cpu_threads = max(1, cpu_threads)
+        self.num_workers = max(1, num_workers)
         self.model: Any | None = None
 
     def load(self) -> None:
-        """Load only CUDA float16; any CUDA/model error aborts service startup."""
+        """Load only the explicitly configured runtime; never silently fall back."""
         try:
             import ctranslate2
             from faster_whisper import WhisperModel
 
-            supported = ctranslate2.get_supported_compute_types("cuda")
-            if "float16" not in supported:
+            supported = ctranslate2.get_supported_compute_types(self.device)
+            if self.compute_type not in supported:
                 raise RuntimeError(
-                    f"CUDA float16 is unavailable; supported compute types: {sorted(supported)}"
+                    f"{self.device} {self.compute_type} is unavailable; "
+                    f"supported compute types: {sorted(supported)}"
                 )
             self.model_dir.mkdir(parents=True, exist_ok=True)
             self.model = WhisperModel(
-                MODEL_NAME,
-                device="cuda",
-                compute_type="float16",
+                self.name,
+                device=self.device,
+                compute_type=self.compute_type,
                 download_root=str(self.model_dir),
+                cpu_threads=self.cpu_threads,
+                num_workers=self.num_workers,
             )
         except Exception as exc:
             raise RuntimeError(
-                "Failed to load Whisper large-v3-turbo with CUDA float16. CPU fallback is "
-                "intentionally disabled. Check NVIDIA driver and CUDA 12/cuDNN runtime libraries."
+                f"Failed to load Whisper {self.name} with {self.device}/{self.compute_type}. "
+                "Automatic device or compute-type fallback is intentionally disabled."
             ) from exc
 
     def _detect_language(self, audio_path: Path) -> str | None:
@@ -233,7 +257,7 @@ def create_app(
             )
             yield
         except Exception:
-            LOGGER.exception("Whisper startup failed; refusing CPU fallback")
+            LOGGER.exception("Whisper startup failed; refusing automatic runtime fallback")
             raise
         finally:
             app.state.ready = False
@@ -242,8 +266,8 @@ def create_app(
         title="CtrlSpeak Whisper Transcription API",
         version=SERVICE_VERSION,
         description=(
-            "CUDA Whisper backend for CtrlSpeak. The multipart allowed_languages field is an "
-            "ordered, server-enforced output-language allowlist."
+            "Configured Whisper backend for CtrlSpeak. The multipart allowed_languages field "
+            "is an ordered, server-enforced output-language allowlist."
         ),
         lifespan=lifespan,
     )
@@ -283,6 +307,7 @@ def create_app(
             "version": SERVICE_VERSION,
             "model": getattr(backend, "name", "fake"),
             "device": getattr(backend, "device", "fake"),
+            "compute_type": getattr(backend, "compute_type", "fake"),
         }
 
     @app.post("/v1/corrections", status_code=201, tags=["corrections"])

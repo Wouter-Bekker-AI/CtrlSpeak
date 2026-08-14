@@ -1,9 +1,10 @@
 # CtrlSpeak Whisper Transcription API v0.5.2
 
-This directory is the maintained Ubuntu GPU backend for CtrlSpeak. It loads
-`large-v3-turbo` with faster-whisper on CUDA float16 and intentionally has no
-CPU fallback. The API supports ordered, server-enforced output-language
-allowlists as of v0.5.1.
+This directory is the maintained Ubuntu backend for CtrlSpeak. It defaults to
+`large-v3-turbo` with faster-whisper on CUDA float16. A deployment may instead
+explicitly select CPU/int8; there is never an automatic device or compute-type
+fallback. The API supports ordered, server-enforced output-language allowlists
+as of v0.5.1.
 
 The desktop client and this service share a release version, but they have
 different roles: the Windows/Linux desktop records and inserts text; this
@@ -13,8 +14,9 @@ from Git.
 
 ## Python and installation
 
-The production target is Ubuntu 22.04 with Python 3.11, a working NVIDIA
-driver, and a CUDA-capable GPU.
+Supported service runtimes are Python 3.11 and 3.12. The primary production
+target is Ubuntu 22.04 with a working NVIDIA driver and CUDA-capable GPU. The
+OpenStack CPU deployment uses Ubuntu 24.04 and Python 3.12.
 
 ```bash
 cd server/whisper_transcription
@@ -34,6 +36,19 @@ WHISPER_BIND_HOST=127.0.0.1 scripts/run-service
 
 Run the redacted configuration summary with `scripts/runtime-config`. It never
 prints the token value.
+
+CUDA float16 is the default. To run an explicitly configured CPU service, set:
+
+```ini
+WHISPER_DEVICE=cpu
+WHISPER_COMPUTE_TYPE=int8
+WHISPER_CPU_THREADS=4
+WHISPER_NUM_WORKERS=1
+```
+
+`WHISPER_MODEL_NAME` defaults to `large-v3-turbo`. Startup fails closed when
+the selected device or compute type is unavailable; the service never silently
+changes from CUDA to CPU or vice versa.
 
 ## User systemd service and LAN access
 
@@ -94,8 +109,8 @@ transcription audit records below `data/`. Override this with
 default upload limit is 100 MiB and can be changed with
 `WHISPER_MAX_UPLOAD_BYTES`.
 
-The health endpoint reports only readiness, service version, model, and device.
-It does not expose credentials or transcription content.
+The health endpoint reports only readiness, service version, model, device, and
+compute type. It does not expose credentials or transcription content.
 
 ## Hermes adapter compatibility
 

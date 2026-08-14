@@ -172,7 +172,9 @@ python -m compileall app tests
 
 The server tests cover the OpenAPI version/field, authentication boundary,
 legacy single-language compatibility, ordered allowlist propagation, invalid
-policy rejection, hard refusal of out-of-policy responses, corrections, and
-confirmed-text feedback. A deployment acceptance test must additionally use
-real audio against the CUDA service and assert the response language occurs in
-the requested allowlist.
+policy rejection, hard refusal of out-of-policy responses, corrections,
+confirmed-text feedback, and explicit CPU runtime selection. The suite and
+editable package metadata are checked on Python 3.11 and 3.12. A deployment
+acceptance test must additionally use real audio against its explicitly
+configured CUDA or CPU service and assert the response language occurs in the
+requested allowlist.

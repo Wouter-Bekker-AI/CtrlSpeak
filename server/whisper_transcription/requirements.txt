@@ -1,4 +1,4 @@
-# Production top-level pins verified on Python 3.11 / Ubuntu 22.04.
+# Production top-level pins verified on Python 3.11 and 3.12.
 fastapi==0.139.0
 uvicorn[standard]==0.51.0
 faster-whisper==1.2.1
