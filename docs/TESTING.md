@@ -160,7 +160,7 @@ acceptance test. Do not use its host-level guidance on an Ubuntu system.
 
 ## Companion API tests
 
-The maintained v0.5.3 remote service is in `server/whisper_transcription`. Its
+The maintained v0.6.0 role-aware service is in `server/whisper_transcription`. Its
 headless suite uses a fake model and does not download CUDA/model assets, bind a
 network port, restart systemd, or change a firewall:
 

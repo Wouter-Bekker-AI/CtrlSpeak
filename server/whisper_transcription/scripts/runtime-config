@@ -6,6 +6,10 @@ whisper_bind_host() {
   printf '%s\n' "${WHISPER_BIND_HOST:-${WHISPER_HOST:-127.0.0.1}}"
 }
 
+ctrlspeak_service_role() {
+  printf '%s\n' "${CTRLSPEAK_SERVICE_ROLE:-standalone}"
+}
+
 whisper_is_loopback_bind_host() (
   host=$1
   case "$host" in
@@ -34,16 +38,43 @@ whisper_is_loopback_bind_host() (
 )
 
 whisper_validate_runtime_config() {
+  role=$(ctrlspeak_service_role)
+  case "$role" in
+    standalone|gateway|worker) ;;
+    *)
+      printf '%s\n' 'CTRLSPEAK_SERVICE_ROLE must be standalone, gateway, or worker.' >&2
+      return 64
+      ;;
+  esac
   bind_host=$(whisper_bind_host)
   whisper_is_loopback_bind_host "$bind_host" && return 0
-  if [ -z "${WHISPER_BEARER_TOKEN:-}" ]; then
+  if [ "$role" = worker ]; then
+    if [ -z "${CTRLSPEAK_WORKER_TOKEN:-}" ]; then
+      printf '%s\n' \
+        'Refusing non-loopback worker binding: configure CTRLSPEAK_WORKER_TOKEN first.' >&2
+      return 64
+    fi
+    return 0
+  fi
+  if [ -z "${WHISPER_BEARER_TOKEN:-}" ] && [ -z "${CTRLSPEAK_CLIENTS_JSON:-}" ]; then
     printf '%s\n' \
-      'Refusing non-loopback binding: configure WHISPER_BEARER_TOKEN first.' >&2
+      'Refusing non-loopback binding: configure WHISPER_BEARER_TOKEN or CTRLSPEAK_CLIENTS_JSON first.' >&2
     return 64
+  fi
+  if [ "$role" = gateway ]; then
+    if [ -n "${CTRLSPEAK_WORKER_URL:-}" ] && [ -z "${CTRLSPEAK_WORKER_TOKEN:-}" ]; then
+      printf '%s\n' 'CTRLSPEAK_WORKER_URL requires CTRLSPEAK_WORKER_TOKEN.' >&2
+      return 64
+    fi
+    if [ -z "${CTRLSPEAK_WORKER_URL:-}" ] && [ -n "${CTRLSPEAK_WORKER_TOKEN:-}" ]; then
+      printf '%s\n' 'CTRLSPEAK_WORKER_TOKEN requires CTRLSPEAK_WORKER_URL in gateway mode.' >&2
+      return 64
+    fi
   fi
 }
 
 whisper_print_runtime_config() {
+  role=$(ctrlspeak_service_role)
   device=${WHISPER_DEVICE:-cuda}
   if [ -n "${WHISPER_COMPUTE_TYPE:-}" ]; then
     compute_type=$WHISPER_COMPUTE_TYPE
@@ -53,6 +84,7 @@ whisper_print_runtime_config() {
     compute_type=int8
   fi
   printf 'host=%s\n' "$(whisper_bind_host)"
+  printf 'role=%s\n' "$role"
   printf 'port=%s\n' "${WHISPER_PORT:-8765}"
   printf 'model=%s\n' "${WHISPER_MODEL_NAME:-large-v3-turbo}"
   printf 'device=%s\n' "$device"
@@ -63,6 +95,21 @@ whisper_print_runtime_config() {
     printf 'bearer_token=configured\n'
   else
     printf 'bearer_token=not-configured\n'
+  fi
+  if [ -n "${CTRLSPEAK_CLIENTS_JSON:-}" ]; then
+    printf 'client_identities=configured\n'
+  else
+    printf 'client_identities=not-configured\n'
+  fi
+  if [ -n "${CTRLSPEAK_WORKER_TOKEN:-}" ]; then
+    printf 'worker_token=configured\n'
+  else
+    printf 'worker_token=not-configured\n'
+  fi
+  if [ -n "${CTRLSPEAK_WORKER_URL:-}" ]; then
+    printf 'worker_url=configured\n'
+  else
+    printf 'worker_url=not-configured\n'
   fi
 }
 

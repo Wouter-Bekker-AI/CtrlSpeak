@@ -1,4 +1,4 @@
-"""Select and run the native CtrlSpeak v0.5 PyInstaller specification.
+"""Select and run the native CtrlSpeak v0.6 PyInstaller specification.
 
 The standard Windows and Linux artifact uses the stable name ``dist/CtrlSpeak``
 (with ``.exe`` added by PyInstaller on Windows). From the project root run::
@@ -14,7 +14,7 @@ import sys
 
 project_root = Path(__file__).resolve().parent.parent
 assets_dir = project_root / "assets"
-standard_spec_path = project_root / "packaging" / "CtrlSpeak_v0.5.spec"
+standard_spec_path = project_root / "packaging" / "CtrlSpeak_v0.6.spec"
 watcher_spec_path = project_root / "packaging" / "CtrlSpeak_Watcher.spec"
 
 
@@ -55,7 +55,7 @@ def _resolve_build_config(
         if watcher:
             raise SystemExit("The Watcher white-label build is Windows-only.")
         return BuildConfig(
-            name="CtrlSpeak v0.5 Linux",
+            name="CtrlSpeak v0.6 Linux",
             spec_path=standard_spec_path,
             intro_video_label="welcome video",
             intro_video_path=assets_dir / "TrueAI_Intro_Video.mp4",
@@ -74,7 +74,7 @@ def _resolve_build_config(
             icon_path=assets_dir / "icon.ico",
         )
     return BuildConfig(
-        name="CtrlSpeak v0.5 Windows",
+        name="CtrlSpeak v0.6 Windows",
         spec_path=standard_spec_path,
         intro_video_label="welcome video",
         intro_video_path=assets_dir / "TrueAI_Intro_Video.mp4",

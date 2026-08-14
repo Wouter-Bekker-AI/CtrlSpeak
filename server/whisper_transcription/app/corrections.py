@@ -85,6 +85,61 @@ class CorrectionStore:
                 """
             )
             self._migrate_feedback_rule_cascade(conn)
+            self._migrate_v06_scope_columns(conn)
+
+    @staticmethod
+    def _add_column_if_missing(
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        definition: str,
+    ) -> None:
+        columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    @classmethod
+    def _migrate_v06_scope_columns(cls, conn: sqlite3.Connection) -> None:
+        cls._add_column_if_missing(
+            conn, "correction_rules", "scope", "TEXT NOT NULL DEFAULT 'global'"
+        )
+        cls._add_column_if_missing(conn, "correction_rules", "owner_id", "TEXT")
+        cls._add_column_if_missing(
+            conn, "correction_rules", "language_codes", "TEXT NOT NULL DEFAULT '[]'"
+        )
+        cls._add_column_if_missing(
+            conn, "correction_rules", "send_as_keyword", "INTEGER NOT NULL DEFAULT 0"
+        )
+        cls._add_column_if_missing(
+            conn, "transcriptions", "principal_id", "TEXT NOT NULL DEFAULT 'legacy'"
+        )
+        exact_columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(exact_transcript_overrides)").fetchall()
+        }
+        if "principal_id" not in exact_columns:
+            conn.executescript(
+                """
+                ALTER TABLE exact_transcript_overrides RENAME TO exact_transcript_overrides_v05;
+                CREATE TABLE exact_transcript_overrides (
+                  id TEXT PRIMARY KEY,
+                  principal_id TEXT NOT NULL DEFAULT 'legacy',
+                  raw_text TEXT NOT NULL,
+                  corrected_text TEXT NOT NULL,
+                  source_feedback_id TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  use_count INTEGER NOT NULL DEFAULT 0,
+                  UNIQUE(principal_id, raw_text),
+                  FOREIGN KEY(source_feedback_id) REFERENCES transcript_edit_feedback(id) ON DELETE RESTRICT
+                );
+                INSERT INTO exact_transcript_overrides
+                  (id,principal_id,raw_text,corrected_text,source_feedback_id,created_at,updated_at,use_count)
+                  SELECT id,'legacy',raw_text,corrected_text,source_feedback_id,created_at,updated_at,use_count
+                  FROM exact_transcript_overrides_v05;
+                DROP TABLE exact_transcript_overrides_v05;
+                """
+            )
 
     @staticmethod
     def _migrate_transcription_audit_columns(conn: sqlite3.Connection) -> None:
@@ -119,8 +174,10 @@ class CorrectionStore:
     def _row(row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
         data["enabled"] = bool(data["enabled"])
+        data["send_as_keyword"] = bool(data.get("send_as_keyword", 0))
         data["context_terms"] = _json_list(data["context_terms"])
         data["tags"] = _json_list(data["tags"])
+        data["language_codes"] = _json_list(data.get("language_codes"))
         return data
 
     def create_rule(
@@ -132,9 +189,17 @@ class CorrectionStore:
         tags: list[str] | None = None,
         enabled: bool = True,
         priority: int = 0,
+        scope: str = "global",
+        owner_id: str | None = None,
+        language_codes: list[str] | None = None,
+        send_as_keyword: bool = False,
     ) -> dict[str, Any]:
         if not source_phrase or not source_phrase.strip() or not replacement_phrase:
             raise ValueError("source_phrase and replacement_phrase must be non-empty")
+        if scope not in {"global", "user"}:
+            raise ValueError("scope must be global or user")
+        if scope == "user" and not owner_id:
+            raise ValueError("user-scoped correction rules require an owner_id")
         now, rule_id = _now(), str(uuid.uuid4())
         values = (
             rule_id,
@@ -146,45 +211,105 @@ class CorrectionStore:
             priority,
             now,
             now,
+            scope,
+            owner_id,
+            json.dumps(language_codes or []),
+            int(send_as_keyword),
         )
         with self._connection() as conn:
             conn.execute(
                 """INSERT INTO correction_rules
-                (id,source_phrase,replacement_phrase,context_terms,tags,enabled,priority,created_at,updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (id,source_phrase,replacement_phrase,context_terms,tags,enabled,priority,created_at,
+                 updated_at,scope,owner_id,language_codes,send_as_keyword)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 values,
             )
         return self.get_rule(rule_id)  # type: ignore[return-value]
 
-    def list_rules(self, enabled: bool | None = None) -> list[dict[str, Any]]:
+    def list_rules(
+        self,
+        enabled: bool | None = None,
+        *,
+        principal_id: str | None = None,
+        language: str | None = None,
+        include_all: bool = False,
+    ) -> list[dict[str, Any]]:
         query = "SELECT * FROM correction_rules"
-        params: tuple[Any, ...] = ()
+        clauses: list[str] = []
+        params: list[Any] = []
         if enabled is not None:
-            query += " WHERE enabled = ?"
-            params = (int(enabled),)
+            clauses.append("enabled = ?")
+            params.append(int(enabled))
+        if principal_id is not None and not include_all:
+            clauses.append("(scope = 'global' OR (scope = 'user' AND owner_id = ?))")
+            params.append(principal_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY priority DESC, length(source_phrase) DESC, created_at ASC"
         with self._connection() as conn:
-            return [self._row(row) for row in conn.execute(query, params).fetchall()]
+            rules = [self._row(row) for row in conn.execute(query, tuple(params)).fetchall()]
+        if language:
+            language = language.casefold()
+            rules = [
+                rule
+                for rule in rules
+                if not rule["language_codes"] or language in rule["language_codes"]
+            ]
+        return rules
 
-    def get_rule(self, rule_id: str) -> dict[str, Any] | None:
+    def get_rule(
+        self,
+        rule_id: str,
+        *,
+        principal_id: str | None = None,
+        include_all: bool = False,
+    ) -> dict[str, Any] | None:
         with self._connection() as conn:
             row = conn.execute("SELECT * FROM correction_rules WHERE id = ?", (rule_id,)).fetchone()
-        return self._row(row) if row else None
+        rule = self._row(row) if row else None
+        if (
+            rule
+            and principal_id is not None
+            and not include_all
+            and rule["scope"] != "global"
+            and rule["owner_id"] != principal_id
+        ):
+            return None
+        return rule
 
-    def update_rule(self, rule_id: str, changes: dict[str, Any]) -> dict[str, Any] | None:
-        allowed = {"source_phrase", "replacement_phrase", "context_terms", "tags", "enabled", "priority"}
+    def update_rule(
+        self,
+        rule_id: str,
+        changes: dict[str, Any],
+        *,
+        principal_id: str | None = None,
+        include_all: bool = False,
+    ) -> dict[str, Any] | None:
+        existing = self.get_rule(rule_id, principal_id=principal_id, include_all=include_all)
+        if existing is None:
+            return None
+        allowed = {
+            "source_phrase",
+            "replacement_phrase",
+            "context_terms",
+            "tags",
+            "enabled",
+            "priority",
+            "language_codes",
+            "send_as_keyword",
+        }
         fields, values = [], []
         for key, value in changes.items():
             if key not in allowed or value is None:
                 continue
-            if key in {"context_terms", "tags"}:
+            if key in {"context_terms", "tags", "language_codes"}:
                 value = json.dumps(value)
-            if key == "enabled":
+            if key in {"enabled", "send_as_keyword"}:
                 value = int(value)
             fields.append(f"{key} = ?")
             values.append(value)
         if not fields:
-            return self.get_rule(rule_id)
+            return existing
         if "source_phrase" in changes and not str(changes["source_phrase"]).strip():
             raise ValueError("source_phrase must be non-empty")
         if "replacement_phrase" in changes and not changes["replacement_phrase"]:
@@ -193,25 +318,56 @@ class CorrectionStore:
         values.extend([_now(), rule_id])
         with self._connection() as conn:
             cursor = conn.execute(f"UPDATE correction_rules SET {', '.join(fields)} WHERE id = ?", values)
-        return self.get_rule(rule_id) if cursor.rowcount else None
+        return self.get_rule(rule_id, principal_id=principal_id, include_all=include_all) if cursor.rowcount else None
 
-    def delete_rule(self, rule_id: str) -> bool:
+    def delete_rule(
+        self,
+        rule_id: str,
+        *,
+        principal_id: str | None = None,
+        include_all: bool = False,
+    ) -> bool:
+        if self.get_rule(rule_id, principal_id=principal_id, include_all=include_all) is None:
+            return False
         with self._connection() as conn:
             return conn.execute("DELETE FROM correction_rules WHERE id = ?", (rule_id,)).rowcount > 0
 
-    def apply(self, raw_text: str, context: str | None = None) -> tuple[str, list[str]]:
+    def apply(
+        self,
+        raw_text: str,
+        context: str | None = None,
+        *,
+        principal_id: str = "legacy",
+        language: str | None = None,
+    ) -> tuple[str, list[str]]:
         corpus = f"{context or ''}\n{raw_text}".casefold()
         candidates = []
-        for rule in self.list_rules(enabled=True):
+        for rule in self.list_rules(
+            enabled=True,
+            principal_id=principal_id,
+            language=language,
+        ):
             if all(term.casefold() in corpus for term in rule["context_terms"]):
                 candidates.append(rule)
         candidates.sort(key=lambda rule: (-len(rule["source_phrase"]), -rule["priority"], rule["created_at"]))
         corrected, applied = raw_text, []
-        for rule in candidates:
-            pattern = re.compile(r"(?<!\w)" + re.escape(rule["source_phrase"]) + r"(?!\w)", re.IGNORECASE)
-            corrected, substitutions = pattern.subn(rule["replacement_phrase"], corrected)
-            if substitutions:
-                applied.append(rule["id"])
+        if candidates:
+            pattern = re.compile(
+                "|".join(
+                    f"(?P<R{index}>(?<!\\w){re.escape(rule['source_phrase'])}(?!\\w))"
+                    for index, rule in enumerate(candidates)
+                ),
+                re.IGNORECASE,
+            )
+
+            def replace(match: re.Match[str]) -> str:
+                index = int(str(match.lastgroup)[1:])
+                rule = candidates[index]
+                if rule["id"] not in applied:
+                    applied.append(rule["id"])
+                return str(rule["replacement_phrase"])
+
+            corrected = pattern.sub(replace, raw_text)
         if applied:
             with self._connection() as conn:
                 conn.executemany(
@@ -224,11 +380,15 @@ class CorrectionStore:
         self,
         raw_text: str,
         context: str | None = None,
+        *,
+        principal_id: str = "legacy",
+        language: str | None = None,
     ) -> tuple[str, list[str], str | None]:
         with self._connection() as conn:
             override = conn.execute(
-                "SELECT id, corrected_text FROM exact_transcript_overrides WHERE raw_text = ?",
-                (raw_text,),
+                """SELECT id, corrected_text FROM exact_transcript_overrides
+                   WHERE principal_id = ? AND raw_text = ?""",
+                (principal_id, raw_text),
             ).fetchone()
             if override:
                 conn.execute(
@@ -236,8 +396,35 @@ class CorrectionStore:
                     (_now(), override["id"]),
                 )
                 return str(override["corrected_text"]), [], str(override["id"])
-        corrected, applied = self.apply(raw_text, context)
+        corrected, applied = self.apply(
+            raw_text,
+            context,
+            principal_id=principal_id,
+            language=language,
+        )
         return corrected, applied, None
+
+    def keyword_hints(
+        self,
+        *,
+        principal_id: str,
+        language: str | None = None,
+        limit: int = 100,
+    ) -> list[str]:
+        hints: list[str] = []
+        for rule in self.list_rules(
+            enabled=True,
+            principal_id=principal_id,
+            language=language,
+        ):
+            if not rule["send_as_keyword"]:
+                continue
+            for phrase in (rule["source_phrase"], rule["replacement_phrase"]):
+                if phrase not in hints:
+                    hints.append(phrase)
+                if len(hints) >= limit:
+                    return hints
+        return hints
 
     def create_transcription(
         self,
@@ -249,13 +436,15 @@ class CorrectionStore:
         applied_rule_ids: list[str],
         context: str | None = None,
         metadata: dict[str, Any] | None = None,
+        principal_id: str = "legacy",
     ) -> str:
         transcription_id, now = str(uuid.uuid4()), _now()
         with self._connection() as conn:
             conn.execute(
                 """INSERT INTO transcriptions
-                   (id,raw_text,corrected_text,language,segments,applied_rule_ids,created_at,context,metadata)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                   (id,raw_text,corrected_text,language,segments,applied_rule_ids,created_at,context,
+                    metadata,principal_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (
                     transcription_id,
                     raw_text,
@@ -266,16 +455,25 @@ class CorrectionStore:
                     now,
                     context,
                     json.dumps(metadata or {}),
+                    principal_id,
                 ),
             )
         return transcription_id
 
-    def get_transcription(self, transcription_id: str) -> dict[str, Any] | None:
+    def get_transcription(
+        self,
+        transcription_id: str,
+        *,
+        principal_id: str | None = None,
+        include_all: bool = False,
+    ) -> dict[str, Any] | None:
         with self._connection() as conn:
             row = conn.execute("SELECT * FROM transcriptions WHERE id = ?", (transcription_id,)).fetchone()
         if not row:
             return None
         result = dict(row)
+        if principal_id is not None and not include_all and result["principal_id"] != principal_id:
+            return None
         result["segments"] = _json_list(result.get("segments"))
         result["applied_rule_ids"] = _json_list(result.get("applied_rule_ids"))
         result["metadata"] = json.loads(result.get("metadata") or "{}")
@@ -288,12 +486,18 @@ class CorrectionStore:
         confirmed_text: str,
         capture_method: str,
         client_metadata: dict[str, Any] | None = None,
+        principal_id: str = "legacy",
+        include_all: bool = False,
     ) -> dict[str, str] | None:
         if not confirmed_text or not confirmed_text.strip():
             raise ValueError("confirmed_text must be non-empty")
         if not capture_method or not capture_method.strip():
             raise ValueError("capture_method must be non-empty")
-        transcription = self.get_transcription(transcription_id)
+        transcription = self.get_transcription(
+            transcription_id,
+            principal_id=principal_id,
+            include_all=include_all,
+        )
         if transcription is None:
             return None
         if confirmed_text == transcription["corrected_text"]:
@@ -318,14 +522,15 @@ class CorrectionStore:
             )
             conn.execute(
                 """INSERT INTO exact_transcript_overrides
-                   (id,raw_text,corrected_text,source_feedback_id,created_at,updated_at,use_count)
-                   VALUES (?,?,?,?,?,?,0)
-                   ON CONFLICT(raw_text) DO UPDATE SET
+                   (id,principal_id,raw_text,corrected_text,source_feedback_id,created_at,updated_at,use_count)
+                   VALUES (?,?,?,?,?,?,?,0)
+                   ON CONFLICT(principal_id,raw_text) DO UPDATE SET
                      corrected_text=excluded.corrected_text,
                      source_feedback_id=excluded.source_feedback_id,
                      updated_at=excluded.updated_at""",
                 (
                     proposed_override_id,
+                    principal_id,
                     transcription["raw_text"],
                     confirmed_text,
                     feedback_id,
@@ -334,8 +539,9 @@ class CorrectionStore:
                 ),
             )
             override = conn.execute(
-                "SELECT id FROM exact_transcript_overrides WHERE raw_text = ?",
-                (transcription["raw_text"],),
+                """SELECT id FROM exact_transcript_overrides
+                   WHERE principal_id = ? AND raw_text = ?""",
+                (principal_id, transcription["raw_text"]),
             ).fetchone()
         return {"feedback_id": feedback_id, "override_id": str(override["id"])}
 
@@ -361,13 +567,18 @@ class CorrectionStore:
         transcription_id: str,
         rule_ids: list[str],
         note: str | None = None,
+        *,
+        principal_id: str = "legacy",
+        include_all: bool = False,
     ) -> list[str] | None:
         with self._connection() as conn:
             exists = conn.execute(
-                "SELECT 1 FROM transcriptions WHERE id = ?",
+                "SELECT principal_id FROM transcriptions WHERE id = ?",
                 (transcription_id,),
             ).fetchone()
-            if not exists:
+            if not exists or (
+                not include_all and str(exists["principal_id"]) != principal_id
+            ):
                 return None
             found = (
                 {
@@ -383,6 +594,13 @@ class CorrectionStore:
             )
             if found != set(rule_ids):
                 raise KeyError("one or more correction rules do not exist")
+            for rule_id in rule_ids:
+                if self.get_rule(
+                    rule_id,
+                    principal_id=principal_id,
+                    include_all=include_all,
+                ) is None:
+                    raise KeyError("one or more correction rules do not exist")
             conn.executemany(
                 """INSERT INTO transcription_feedback (transcription_id,rule_id,note,created_at)
                    VALUES (?,?,?,?) ON CONFLICT(transcription_id,rule_id)

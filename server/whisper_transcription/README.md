@@ -1,122 +1,100 @@
-# CtrlSpeak Whisper Transcription API v0.5.3
+# CtrlSpeak transcription service v0.6.0
 
-This directory is the maintained Ubuntu backend for CtrlSpeak. It defaults to
-`large-v3-turbo` with faster-whisper on CUDA float16. A deployment may instead
-explicitly select CPU/int8; there is never an automatic device or compute-type
-fallback. The API supports ordered, server-enforced output-language allowlists
-as of v0.5.1.
+This directory contains both CtrlSpeak server roles:
 
-The desktop client and this service share a release version, but they have
-different roles: the Windows/Linux desktop records and inserts text; this
-service performs GPU transcription and stores correction/audit records. Runtime
-state (`data/`), the virtual environment, and service credentials are excluded
-from Git.
+- Nova runs `CTRLSPEAK_SERVICE_ROLE=gateway` and owns client authentication,
+  routing, known words/corrections, feedback, and audit records.
+- The local Ubuntu GPU host runs `CTRLSPEAK_SERVICE_ROLE=worker` and exposes
+  raw `large-v3-turbo` CUDA/float16 inference to the gateway over WireGuard.
+- `standalone` preserves the v0.5 combined local-model/API behavior.
 
-## Python and installation
+Runtime state, virtual environments, and credentials remain outside Git.
 
-Supported service runtimes are Python 3.11 and 3.12. The primary production
-target is Ubuntu 22.04 with a working NVIDIA driver and CUDA-capable GPU. The
-OpenStack CPU deployment uses Ubuntu 24.04 and Python 3.12.
+## Install profiles
+
+Python 3.11 and 3.12 are supported.
+
+Gateway (CPU-only tiny fallback, no NVIDIA wheels):
 
 ```bash
-cd server/whisper_transcription
-python3.11 -m venv .venv
+python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-gateway.txt
 python -m pip install -e . --no-deps
-python -m pytest -q
 ```
 
-Run on loopback for local testing:
+GPU worker:
 
 ```bash
-WHISPER_BIND_HOST=127.0.0.1 scripts/run-service
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-worker.txt
+python -m pip install -e . --no-deps
 ```
 
-Run the redacted configuration summary with `scripts/runtime-config`. It never
-prints the token value.
+Run tests with `python -m pytest -q`. `scripts/runtime-config` validates and
+prints a redacted configuration summary.
 
-CUDA float16 is the default. To run an explicitly configured CPU service, set:
+## Worker configuration
 
-```ini
-WHISPER_DEVICE=cpu
-WHISPER_COMPUTE_TYPE=int8
-WHISPER_CPU_THREADS=4
-WHISPER_NUM_WORKERS=1
-```
-
-`WHISPER_MODEL_NAME` defaults to `large-v3-turbo`. Startup fails closed when
-the selected device or compute type is unavailable; the service never silently
-changes from CUDA to CPU or vice versa.
-
-## User systemd service and LAN access
-
-`scripts/install-user-service` installs a user unit with loopback binding by
-default. For an intended trusted-LAN deployment, create a protected drop-in:
-
-```bash
-systemctl --user edit whisper-transcription.service
-```
+Use a protected systemd drop-in. Bind only to the WireGuard/LAN interface
+needed by the gateway when practical.
 
 ```ini
 [Service]
-Environment=WHISPER_BIND_HOST=0.0.0.0
-Environment=WHISPER_BEARER_TOKEN=replace-with-a-long-random-secret
+Environment=CTRLSPEAK_SERVICE_ROLE=worker
+Environment=CTRLSPEAK_WORKER_TOKEN=replace-with-a-dedicated-random-secret
+Environment=WHISPER_BIND_HOST=10.83.233.2
+Environment=WHISPER_PORT=8765
+Environment=WHISPER_MODEL_NAME=large-v3-turbo
+Environment=WHISPER_DEVICE=cuda
+Environment=WHISPER_COMPUTE_TYPE=float16
 ```
 
-Then run:
+The worker publishes `/health`, `/v1/capabilities`, and
+`/v1/worker/transcribe`. It does not publish client transcription,
+correction, or feedback routes.
+
+## Gateway configuration
+
+```ini
+[Service]
+Environment=CTRLSPEAK_SERVICE_ROLE=gateway
+Environment=WHISPER_BIND_HOST=0.0.0.0
+Environment=WHISPER_PORT=8765
+Environment=CTRLSPEAK_CLIENTS_JSON={"wouter":{"token":"replace-client-token","admin":true,"providers":["*"]}}
+Environment=CTRLSPEAK_WORKER_URL=http://10.83.233.2:8765
+Environment=CTRLSPEAK_WORKER_TOKEN=replace-with-the-worker-secret
+Environment=CTRLSPEAK_DEFAULT_STRATEGY=resilient-quality
+Environment=CTRLSPEAK_FALLBACK_MODEL=tiny
+Environment=CTRLSPEAK_FALLBACK_COMPUTE_TYPE=int8
+Environment=CTRLSPEAK_FALLBACK_CPU_THREADS=2
+```
+
+Systemd quoting rules apply; for production, an `EnvironmentFile` with mode
+`0600` is usually easier and safer for JSON and secrets. Never configure a
+server-owned OpenAI key. The client supplies its own key on an individual
+request and the gateway keeps it only for that call.
+
+The default quality cascade is Ubuntu GPU → OpenAI `gpt-transcribe` with the
+caller's key → local CPU `tiny`. Invalid keys and exhausted OpenAI quota are
+terminal; retryable availability failures may fall through.
+
+Install/reload the user unit:
 
 ```bash
+scripts/install-user-service
 systemctl --user daemon-reload
-systemctl --user enable --now whisper-transcription.service
-systemctl --user status whisper-transcription.service
+systemctl --user restart whisper-transcription.service
+systemctl --user status --no-pager whisper-transcription.service
 ```
 
-Non-loopback requests are rejected unless `WHISPER_BEARER_TOKEN` is configured
-and the request supplies `Authorization: Bearer ...`. Loopback requests do not
-require the bearer token. Use a trusted LAN/VPN or add an HTTPS reverse proxy;
-plain HTTP does not protect audio or credentials on an untrusted network.
+See the repository-level `docs/API.md` for the full request/response,
+authentication, capability, routing, correction, and error contracts. Swagger
+UI is available at `/docs`, ReDoc at `/redoc`, and OpenAPI at `/openapi.json`.
 
-## Output-language contract
-
-`POST /v1/transcribe` accepts `allowed_languages` as an ordered,
-comma-separated list of one to five Whisper language codes.
-
-- Omitted or empty: automatic Whisper language selection, with no restriction.
-- One code, such as `en`: the server forces that decoding language.
-- Several codes, such as `en,af`: the server detects the spoken language once;
-  if it is in the list, that code is forced, otherwise the first code is the
-  fallback.
-- A response whose reported language is outside a non-empty allowlist is
-  blocked by the server.
-
-The older single `language` multipart field remains supported. If both fields
-are supplied, `language` must occur in `allowed_languages`. The language
-setting controls transcription/recognition; it is not arbitrary translation
-between languages.
-
-See the repository-level `docs/API.md` for every route, fields, examples, and
-response/error contracts. Interactive OpenAPI documentation is available at
-`/docs`, the ReDoc view at `/redoc`, and the OpenAPI document at
-`/openapi.json` while the service is running.
-
-## Runtime data and limits
-
-By default the service stores model files, uploads, SQLite corrections, and
-transcription audit records below `data/`. Override this with
-`WHISPER_DATA_DIR`. Temporary uploads are deleted after each request. The
-default upload limit is 100 MiB and can be changed with
-`WHISPER_MAX_UPLOAD_BYTES`.
-
-The health endpoint reports only readiness, service version, model, device, and
-compute type. It does not expose credentials or transcription content.
-
-## Hermes adapter compatibility
-
-`scripts/hermes-stt-api INPUT_AUDIO LANGUAGE OUTPUT_TEXT` preserves the existing
-Hermes command-provider integration. It reads the user-service LAN drop-in when
-present, sends the requested single language through the
-`allowed_languages` contract, and writes only the corrected transcript to the
-requested output file. Its established downstream name-normalization rules are
-retained. The adapter never prints the bearer value.
+The Hermes command adapter now targets the gateway. Set
+`CTRLSPEAK_GATEWAY_URL` and a dedicated `CTRLSPEAK_CLIENT_TOKEN`; do not point
+it at the Ubuntu worker route.

@@ -1,5 +1,5 @@
 [Unit]
-Description=CtrlSpeak CUDA Whisper large-v3-turbo transcription API
+Description=CtrlSpeak role-aware transcription service
 After=default.target
 
 [Service]
@@ -13,6 +13,7 @@ TimeoutStopSec=30
 Environment=WHISPER_BIND_HOST=127.0.0.1
 Environment=WHISPER_PORT=8765
 Environment=WHISPER_DATA_DIR=@SERVICE_ROOT@/data
+Environment=CTRLSPEAK_SERVICE_ROLE=standalone
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes

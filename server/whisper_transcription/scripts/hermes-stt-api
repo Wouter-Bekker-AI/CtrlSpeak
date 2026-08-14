@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hermes command-provider adapter for the local CtrlSpeak Whisper API.
+# Hermes command-provider adapter for a client-facing CtrlSpeak gateway.
 # Usage: hermes-stt-api INPUT_AUDIO LANGUAGE OUTPUT_TEXT
 set -euo pipefail
 
@@ -24,7 +24,8 @@ if [[ -r "${service_override}" ]]; then
     esac
   done < "${service_override}"
 fi
-api_base_url=${WHISPER_API_URL:-"http://${api_host}:8765"}
+api_base_url=${CTRLSPEAK_GATEWAY_URL:-${WHISPER_API_URL:-"http://${api_host}:8765"}}
+api_token=${CTRLSPEAK_CLIENT_TOKEN:-${api_token}}
 api_url="${api_base_url%/}/v1/transcribe"
 
 if [[ ! -r "${input_path}" ]]; then

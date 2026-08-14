@@ -77,11 +77,12 @@ def test_health_and_openapi_report_current_language_contract(tmp_path: Path) -> 
     assert response.json() == {
         "status": "ready",
         "version": SERVICE_VERSION,
+        "role": "standalone",
         "model": "fake-whisper",
         "device": "fake-cuda",
         "compute_type": "fake-float16",
     }
-    assert SERVICE_VERSION == "0.5.3"
+    assert SERVICE_VERSION == "0.6.0"
     rendered = str(document)
     assert "allowed_languages" in rendered
     assert "server-enforced" in rendered
@@ -171,7 +172,7 @@ def test_server_blocks_backend_output_outside_requested_allowlist(tmp_path: Path
             **audio_form(allowed_languages="en,af"),
         )
 
-    assert response.status_code == 500
+    assert response.status_code == 502
     assert "violated the requested language policy" in response.json()["detail"]
 
 

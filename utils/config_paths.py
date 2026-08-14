@@ -21,7 +21,7 @@ from utils.languages import is_valid_allowed_output_languages_setting
 CONFIG_FILENAME = "settings.json"
 LOG_DIR_NAME = "logs"
 ASSETS_DIR_NAME = "assets"
-SETTINGS_SCHEMA_VERSION = 2
+SETTINGS_SCHEMA_VERSION = 3
 SETTINGS_BACKUP_PREFIX = "settings.pre-migration-v2"
 
 DEFAULT_SETTINGS: Dict[str, object] = {
@@ -40,6 +40,7 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "api_token": None,
     "feedback_capture_method": "active_field_on_enter",
     "allowed_output_languages": [],
+    "provider_strategy": "server-default",
     "update_channel": "stable",
     "last_update_check_at": None,
     "show_whats_new_on_update": True,
@@ -92,6 +93,7 @@ _SETTING_VALIDATORS: Dict[str, Callable[[object], bool]] = {
     "api_token": _is_optional_string,
     "feedback_capture_method": lambda value: value in {"active_field_on_enter", "disabled"},
     "allowed_output_languages": is_valid_allowed_output_languages_setting,
+    "provider_strategy": lambda value: isinstance(value, str) and bool(value.strip()),
     "update_channel": lambda value: value == "stable",
     "last_update_check_at": _is_optional_string,
     "show_whats_new_on_update": lambda value: isinstance(value, bool),

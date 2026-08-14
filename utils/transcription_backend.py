@@ -34,6 +34,7 @@ class BackendPersistenceError(RuntimeError):
 
 class HttpSession(Protocol):
     def post(self, url: str, **kwargs: Any) -> Any: ...
+    def get(self, url: str, **kwargs: Any) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class BackendConfig:
     api_token: str | None = dataclass_field(repr=False)
     feedback_capture_method: str
     allowed_output_languages: tuple[str, ...] = ()
+    provider_strategy: str = "server-default"
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,17 @@ class TranscriptionResult:
 
 
 _runtime_backend_config: BackendConfig | None = None
+_session_openai_api_key: str | None = None
+
+
+def set_session_openai_api_key(value: str | None) -> None:
+    """Keep the caller's OpenAI key in this process only; never write it to settings."""
+    global _session_openai_api_key
+    _session_openai_api_key = value.strip() if value and value.strip() else None
+
+
+def has_session_openai_api_key() -> bool:
+    return bool(_session_openai_api_key)
 
 
 def backend_display_name(backend: str) -> str:
@@ -154,12 +167,22 @@ def get_backend_config(environ: Mapping[str, str] | None = None) -> BackendConfi
             else "allowed_output_languages setting"
         ),
     )
+    provider_strategy = str(
+        env.get(
+            "CTRLSPEAK_PROVIDER_STRATEGY",
+            saved.get("provider_strategy", "server-default"),
+        )
+        or "server-default"
+    ).strip()
+    if not provider_strategy:
+        provider_strategy = "server-default"
     return BackendConfig(
         backend,
         api_url,
         api_token,
         feedback_capture_method,
         allowed_output_languages,
+        provider_strategy,
     )
 
 
@@ -182,6 +205,7 @@ def save_backend_config(
     api_token: str | None,
     feedback_capture_method: str,
     allowed_output_languages: object | None = None,
+    provider_strategy: str = "server-default",
 ) -> BackendConfig:
     normalized_backend = _validated_backend_choice(backend, source="backend")
     normalized_capture = _normalized_choice(
@@ -201,6 +225,9 @@ def save_backend_config(
         current_languages if allowed_output_languages is None else allowed_output_languages,
         source="allowed output languages",
     )
+    normalized_strategy = str(provider_strategy or "server-default").strip()
+    if not normalized_strategy:
+        raise ValueError("provider strategy must be non-empty")
     with config_paths.settings_lock:
         previous = dict(config_paths.settings)
         config_paths.settings.update(
@@ -209,6 +236,7 @@ def save_backend_config(
             api_token=normalized_token,
             feedback_capture_method=normalized_capture,
             allowed_output_languages=list(normalized_languages),
+            provider_strategy=normalized_strategy,
         )
     if not config_paths.save_settings():
         with config_paths.settings_lock:
@@ -224,6 +252,7 @@ def save_backend_config(
         normalized_token,
         normalized_capture,
         normalized_languages,
+        normalized_strategy,
     )
 
 
@@ -257,6 +286,7 @@ class ApiTranscriptionClient:
         *,
         session: HttpSession | None = None,
         timeout_seconds: float = 300.0,
+        openai_api_key: str | None = None,
     ) -> None:
         self.config = config
         if session is None:
@@ -267,6 +297,8 @@ class ApiTranscriptionClient:
             session = requests.Session()
         self.session = session
         self.timeout_seconds = timeout_seconds
+        supplied_key = openai_api_key if openai_api_key is not None else _session_openai_api_key
+        self._openai_api_key = supplied_key.strip() if supplied_key else None
 
     def _headers(self) -> dict[str, str]:
         if not self.config.api_token:
@@ -278,17 +310,30 @@ class ApiTranscriptionClient:
         try:
             payload = response.json()
             if isinstance(payload, dict) and payload.get("detail"):
-                return str(payload["detail"])
+                detail = payload["detail"]
+                if isinstance(detail, dict):
+                    message = str(detail.get("message") or detail.get("category") or detail)
+                    action = detail.get("action")
+                    return f"{message} {action}".strip() if action else message
+                return str(detail)
         except Exception:
             pass
         return str(getattr(response, "text", ""))[:400].strip() or "no response detail"
 
-    def _post(self, path: str, **kwargs: Any) -> dict[str, Any]:
+    def _post(
+        self,
+        path: str,
+        *,
+        extra_headers: Mapping[str, str] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         url = f"{self.config.api_url}{path}"
+        headers = self._headers()
+        headers.update(extra_headers or {})
         try:
             response = self.session.post(
                 url,
-                headers=self._headers(),
+                headers=headers,
                 timeout=self.timeout_seconds,
                 **kwargs,
             )
@@ -309,6 +354,36 @@ class ApiTranscriptionClient:
             raise ApiBackendError("Whisper API returned a JSON response with the wrong shape")
         return payload
 
+    def get_capabilities(self) -> dict[str, Any]:
+        url = f"{self.config.api_url}/v1/capabilities"
+        try:
+            response = self.session.get(
+                url,
+                headers=self._headers(),
+                timeout=min(self.timeout_seconds, 10.0),
+            )
+        except Exception as exc:
+            raise ApiBackendError(
+                f"Could not read capabilities from {self.config.api_url}: "
+                f"{exc.__class__.__name__}: {exc}"
+            ) from exc
+        if response.status_code < 200 or response.status_code >= 300:
+            raise ApiBackendError(
+                f"CtrlSpeak API returned HTTP {response.status_code}: "
+                f"{self._response_detail(response)}"
+            )
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise ApiBackendError("CtrlSpeak API returned invalid capability JSON") from exc
+        if not isinstance(payload, dict):
+            raise ApiBackendError("CtrlSpeak capability response has the wrong shape")
+        if payload.get("accepts_client_transcriptions") is not True:
+            raise ApiBackendError(
+                "The configured endpoint is a worker, not a client-facing CtrlSpeak gateway"
+            )
+        return payload
+
     def transcribe(self, audio_path: Path) -> TranscriptionResult:
         path = Path(audio_path)
         try:
@@ -316,11 +391,25 @@ class ApiTranscriptionClient:
                 request: dict[str, Any] = {
                     "files": {"audio": (path.name, audio_file, "audio/wav")},
                 }
+                request_data: dict[str, str] = {}
                 if self.config.allowed_output_languages:
-                    request["data"] = {
+                    request_data.update({
                         "allowed_languages": ",".join(self.config.allowed_output_languages),
-                    }
-                payload = self._post("/v1/transcribe", **request)
+                    })
+                if self.config.provider_strategy != "server-default":
+                    request_data["strategy"] = self.config.provider_strategy
+                if request_data:
+                    request["data"] = request_data
+                secret_headers = (
+                    {"X-CtrlSpeak-OpenAI-Key": self._openai_api_key}
+                    if self._openai_api_key
+                    else None
+                )
+                payload = self._post(
+                    "/v1/transcribe",
+                    extra_headers=secret_headers,
+                    **request,
+                )
         except ApiBackendError:
             raise
         except OSError as exc:

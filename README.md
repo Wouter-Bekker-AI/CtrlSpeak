@@ -1,11 +1,12 @@
-# CtrlSpeak v0.5.3
+# CtrlSpeak v0.6.0
 
 CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into
 the active field. v0.5 adds signed in-application updates with a stable installed
 filename. v0.5.1 adds an ordered output-language allowlist enforced by both the
 embedded model and maintained remote API, while preserving the v0.4 Linux and
-transcription-backend design:
+transcription-backend design. v0.6 adds capability-aware gateway routing and a
+dedicated GPU worker role:
 
 - **Embedded / local** runs the bundled `faster-whisper` workflow and retains
   the existing model (`small` or `large-v3`) and device (`cpu` or `cuda`)
@@ -17,6 +18,33 @@ transcription-backend design:
 The legacy **Client + Server** and **Client Only** roles remain inside the
 embedded/local backend. Remote API mode is independent of those roles and does
 not start discovery, a local server, or a model download.
+
+## v0.6 gateway and provider routing
+
+The desktop now checks `GET /v1/capabilities` before treating a remote endpoint
+as its gateway. The control center's **Check gateway** button shows available
+providers and populates the published routing strategies. A worker-only
+endpoint is rejected as a desktop backend.
+
+The production layout separates responsibility:
+
+- the Nova instance is the authenticated gateway and owns routing,
+  identity-scoped known words/corrections, feedback, and audit records;
+- the local Ubuntu GPU machine is a raw `large-v3-turbo` CUDA inference worker
+  reachable by Nova over WireGuard; and
+- OpenAI `gpt-transcribe` is an optional paid provider using the caller's own
+  key, followed by Nova's lazy CPU `tiny` emergency fallback.
+
+The default `resilient-quality` cascade is Ubuntu GPU → OpenAI → Nova tiny.
+Responses state which provider ran, which attempts failed, and whether the
+result is degraded. Invalid OpenAI credentials and exhausted credit/quota are
+returned as terminal, actionable errors instead of being hidden by fallback.
+
+The OpenAI key entered in the control center exists only in the running desktop
+process. It is never written to `settings.json`, packaged into the executable,
+stored by Nova, or sent to the Ubuntu worker. It is attached only to individual
+gateway transcription requests. The gateway must still be trusted because its
+process handles the request transiently.
 
 ## v0.5.3 quality-of-life patch
 
@@ -174,6 +202,7 @@ The defaults are:
   "api_token": null,
   "feedback_capture_method": "active_field_on_enter",
   "allowed_output_languages": [],
+  "provider_strategy": "server-default",
   "device_preference": "cpu",
   "model_name": "small"
 }
@@ -183,13 +212,14 @@ The API URL is a complete configurable `http://` or `https://` base URL. It may
 point to loopback, a LAN/VPN host, or an HTTPS service. No current LAN address
 is hardcoded. API mode calls:
 
+- `GET <base-url>/v1/capabilities` to verify the gateway and list routes.
 - `POST <base-url>/v1/transcribe` with multipart WAV audio.
 - `POST <base-url>/v1/transcriptions/{id}/feedback` with the confirmed final
   text, capture method, and client audit metadata.
 
 When output languages are configured, the request includes an ordered
 comma-separated `allowed_languages` multipart field such as `en` or `en,af`.
-The maintained v0.5.3 server validates a maximum of five codes, forces one of
+The maintained v0.6.0 gateway validates a maximum of five codes, forces one of
 them, uses the first as a fallback, and refuses to return a reported language
 outside the list. Omitting the field preserves automatic detection. The legacy
 single `language` field is still accepted by the server.
@@ -214,6 +244,7 @@ export CTRLSPEAK_BACKEND=api
 export CTRLSPEAK_API_URL=https://whisper.example.test/base
 export CTRLSPEAK_API_TOKEN='...'
 export CTRLSPEAK_OUTPUT_LANGUAGES=en,af
+export CTRLSPEAK_PROVIDER_STRATEGY=resilient-quality
 python main.py
 ```
 

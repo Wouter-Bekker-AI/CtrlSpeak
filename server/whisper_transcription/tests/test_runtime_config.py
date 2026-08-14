@@ -20,6 +20,10 @@ def _run_shell(command: str, **environment: str) -> subprocess.CompletedProcess[
         "WHISPER_COMPUTE_TYPE",
         "WHISPER_CPU_THREADS",
         "WHISPER_NUM_WORKERS",
+        "CTRLSPEAK_SERVICE_ROLE",
+        "CTRLSPEAK_CLIENTS_JSON",
+        "CTRLSPEAK_WORKER_URL",
+        "CTRLSPEAK_WORKER_TOKEN",
     ):
         env.pop(key, None)
     env.update(environment)
@@ -75,3 +79,61 @@ def test_runtime_summary_reports_explicit_cpu_configuration() -> None:
     assert "compute_type=int8" in result.stdout
     assert "cpu_threads=3" in result.stdout
     assert "model_workers=2" in result.stdout
+
+
+def test_worker_non_loopback_binding_requires_dedicated_worker_token() -> None:
+    blocked = _run_shell(
+        "whisper_validate_runtime_config",
+        CTRLSPEAK_SERVICE_ROLE="worker",
+        WHISPER_BIND_HOST="10.83.233.2",
+        WHISPER_BEARER_TOKEN="client-token-is-not-a-worker-token",
+    )
+    allowed = _run_shell(
+        "whisper_validate_runtime_config",
+        CTRLSPEAK_SERVICE_ROLE="worker",
+        WHISPER_BIND_HOST="10.83.233.2",
+        CTRLSPEAK_WORKER_TOKEN="dedicated-worker-token",
+    )
+
+    assert blocked.returncode != 0
+    assert "CTRLSPEAK_WORKER_TOKEN" in blocked.stderr
+    assert allowed.returncode == 0
+
+
+def test_gateway_requires_paired_worker_url_and_token() -> None:
+    missing_token = _run_shell(
+        "whisper_validate_runtime_config",
+        CTRLSPEAK_SERVICE_ROLE="gateway",
+        WHISPER_BIND_HOST="0.0.0.0",
+        WHISPER_BEARER_TOKEN="client-token",
+        CTRLSPEAK_WORKER_URL="http://10.83.233.2:8765",
+    )
+    configured = _run_shell(
+        "whisper_validate_runtime_config",
+        CTRLSPEAK_SERVICE_ROLE="gateway",
+        WHISPER_BIND_HOST="0.0.0.0",
+        WHISPER_BEARER_TOKEN="client-token",
+        CTRLSPEAK_WORKER_URL="http://10.83.233.2:8765",
+        CTRLSPEAK_WORKER_TOKEN="worker-token",
+    )
+
+    assert missing_token.returncode != 0
+    assert "CTRLSPEAK_WORKER_TOKEN" in missing_token.stderr
+    assert configured.returncode == 0
+
+
+def test_runtime_summary_reports_secret_presence_without_values() -> None:
+    result = _run_shell(
+        "whisper_print_runtime_config",
+        CTRLSPEAK_SERVICE_ROLE="gateway",
+        CTRLSPEAK_CLIENTS_JSON='{"alice":{"token":"never-print-client-secret"}}',
+        CTRLSPEAK_WORKER_URL="http://10.83.233.2:8765",
+        CTRLSPEAK_WORKER_TOKEN="never-print-worker-secret",
+    )
+
+    assert result.returncode == 0
+    assert "role=gateway" in result.stdout
+    assert "client_identities=configured" in result.stdout
+    assert "worker_token=configured" in result.stdout
+    assert "worker_url=configured" in result.stdout
+    assert "never-print" not in result.stdout

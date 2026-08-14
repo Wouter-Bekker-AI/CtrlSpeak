@@ -18,6 +18,7 @@ from utils.transcription_backend import (
     get_backend_config,
     get_backend_status,
     get_runtime_backend_config,
+    set_session_openai_api_key,
     uses_bundled_runtime,
     save_backend_config,
     transcribe_selected,
@@ -47,6 +48,10 @@ class RecordingSession:
         files = kwargs.get("files")
         audio_bytes = files["audio"][1].read() if files else None
         self.calls.append({"url": url, "audio_bytes": audio_bytes, **kwargs})
+        return self.response
+
+    def get(self, url: str, **kwargs):
+        self.calls.append({"url": url, **kwargs})
         return self.response
 
 
@@ -316,6 +321,65 @@ def test_api_failure_is_actionable_and_does_not_fall_back_to_bundled(tmp_path: P
         )
 
     assert bundled_calls == []
+
+
+def test_gateway_strategy_is_persisted_and_sent_with_request_scoped_openai_key(
+    tmp_path: Path,
+) -> None:
+    audio = tmp_path / "clip.wav"
+    audio.write_bytes(b"wave-data")
+    payload = {
+        "id": "tx-routed",
+        "raw_text": "hello",
+        "text": "hello",
+        "language": "en",
+        "provider_used": "openai-gpt-transcribe",
+    }
+    session = RecordingSession(FakeResponse(200, payload))
+    saved = save_backend_config(
+        backend="api",
+        api_url=DEFAULT_API_URL,
+        api_token="client-token",
+        feedback_capture_method="disabled",
+        provider_strategy="openai-then-local",
+    )
+    set_session_openai_api_key("request-only-key")
+    try:
+        ApiTranscriptionClient(saved, session=session).transcribe(audio)
+    finally:
+        set_session_openai_api_key(None)
+
+    call = session.calls[0]
+    assert call["data"] == {"strategy": "openai-then-local"}
+    assert call["headers"] == {
+        "Authorization": "Bearer client-token",
+        "X-CtrlSpeak-OpenAI-Key": "request-only-key",
+    }
+    persisted = json.loads(config_paths.get_config_file_path().read_text("utf-8"))
+    assert persisted["provider_strategy"] == "openai-then-local"
+    assert "openai_api_key" not in persisted
+    assert "request-only-key" not in json.dumps(persisted)
+    assert "request-only-key" not in repr(saved)
+
+
+def test_capability_probe_rejects_worker_endpoint() -> None:
+    session = RecordingSession(
+        FakeResponse(
+            200,
+            {
+                "version": "0.6.0",
+                "role": "worker",
+                "accepts_client_transcriptions": False,
+            },
+        )
+    )
+    client = ApiTranscriptionClient(
+        BackendConfig("api", DEFAULT_API_URL, "client-token", "disabled"),
+        session=session,
+    )
+
+    with pytest.raises(ApiBackendError, match="worker, not.*gateway"):
+        client.get_capabilities()
 
 
 def test_bundled_transcription_records_and_applies_only_local_exact_overrides(

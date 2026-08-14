@@ -65,6 +65,9 @@ from utils.config_paths import app_icon_path, asset_path, get_logger
 from utils.cuda_probe import automatic_runtime_install_supported
 from utils.transcription_backend import (
     BACKEND_DISPLAY_NAMES,
+    ApiBackendError,
+    ApiTranscriptionClient,
+    BackendConfig,
     BackendPersistenceError,
     backend_display_name,
     backend_from_display_name,
@@ -72,6 +75,7 @@ from utils.transcription_backend import (
     get_backend_status,
     get_runtime_backend_config,
     save_backend_config,
+    set_session_openai_api_key,
 )
 from utils.languages import language_choices
 from utils.update_helper import prepare_update_handoff
@@ -1491,6 +1495,8 @@ class ManagementWindow:
             saved_token = settings.get("api_token")
         self.api_token_var = tk.StringVar(value=str(saved_token) if saved_token else "")
         self.feedback_capture_var = tk.StringVar(value=active_backend.feedback_capture_method)
+        self.provider_strategy_var = tk.StringVar(value=active_backend.provider_strategy)
+        self.openai_api_key_var = tk.StringVar(value="")
 
         backend_row = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
         backend_row.pack(fill=tk.X, pady=(8, 6))
@@ -1564,6 +1570,41 @@ class ManagementWindow:
         token_row.pack(fill=tk.X, pady=6)
         ttk.Label(token_row, text="Bearer token", style="Body.TLabel", width=18).pack(side=tk.LEFT)
         ttk.Entry(token_row, textvariable=self.api_token_var, show="•").pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        strategy_row = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
+        strategy_row.pack(fill=tk.X, pady=6)
+        ttk.Label(strategy_row, text="Gateway route", style="Body.TLabel", width=18).pack(side=tk.LEFT)
+        self.provider_strategy_combo = ttk.Combobox(
+            strategy_row,
+            textvariable=self.provider_strategy_var,
+            values=tuple(dict.fromkeys(("server-default", active_backend.provider_strategy))),
+            state="readonly",
+            width=24,
+            style="Modern.TCombobox",
+        )
+        self.provider_strategy_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.capabilities_button = ttk.Button(
+            strategy_row,
+            text="Check gateway",
+            style="Subtle.TButton",
+            command=self._refresh_gateway_capabilities,
+        )
+        self.capabilities_button.pack(side=tk.LEFT, padx=(12, 0))
+
+        openai_row = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
+        openai_row.pack(fill=tk.X, pady=6)
+        ttk.Label(openai_row, text="OpenAI API key", style="Body.TLabel", width=18).pack(side=tk.LEFT)
+        ttk.Entry(openai_row, textvariable=self.openai_api_key_var, show="*").pack(
+            side=tk.LEFT, fill=tk.X, expand=True
+        )
+        ttk.Label(
+            backend_card,
+            text=("The OpenAI key stays only in this CtrlSpeak process and is sent per "
+                  "transcription; it is never saved."),
+            style="Caption.TLabel",
+            wraplength=520,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(0, 6))
 
         feedback_row = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
         feedback_row.pack(fill=tk.X, pady=6)
@@ -2322,6 +2363,7 @@ class ManagementWindow:
         token = self.api_token_var.get()
         capture_method = self.feedback_capture_var.get().strip()
         allowed_output_languages = self._selected_output_languages()
+        provider_strategy = self.provider_strategy_var.get().strip() or "server-default"
 
         try:
             saved = save_backend_config(
@@ -2330,6 +2372,7 @@ class ManagementWindow:
                 api_token=token,
                 feedback_capture_method=capture_method,
                 allowed_output_languages=allowed_output_languages,
+                provider_strategy=provider_strategy,
             )
         except ValueError as exc:
             messagebox.showerror("Invalid backend settings", str(exc), parent=self.window)
@@ -2337,6 +2380,8 @@ class ManagementWindow:
         except BackendPersistenceError as exc:
             messagebox.showerror("Backend settings not saved", str(exc), parent=self.window)
             return
+
+        set_session_openai_api_key(self.openai_api_key_var.get())
 
         active = get_runtime_backend_config()
         effective = get_backend_config()
@@ -2354,6 +2399,59 @@ class ManagementWindow:
         if effective != saved:
             message += " Environment variables currently override one or more saved values."
         messagebox.showinfo("Backend settings saved", message, parent=self.window)
+
+    def _refresh_gateway_capabilities(self) -> None:
+        api_url = self.api_url_var.get().strip()
+        api_token = self.api_token_var.get().strip() or None
+        probe_config = BackendConfig("api", api_url, api_token, "disabled")
+        self.capabilities_button.state(["disabled"])
+
+        def finish_error(message: str) -> None:
+            self.capabilities_button.state(["!disabled"])
+            messagebox.showerror("Gateway check failed", message, parent=self.window)
+
+        def finish_success(capabilities: dict[str, object]) -> None:
+            self.capabilities_button.state(["!disabled"])
+            raw_strategies = capabilities.get("strategies")
+            strategy_ids = [
+                str(item["id"])
+                for item in raw_strategies
+                if isinstance(item, dict) and item.get("id")
+            ] if isinstance(raw_strategies, list) else []
+            values = tuple(dict.fromkeys(["server-default", *strategy_ids]))
+            self.provider_strategy_combo.configure(values=values)
+            if self.provider_strategy_var.get() not in values:
+                self.provider_strategy_var.set("server-default")
+            raw_providers = capabilities.get("providers")
+            provider_lines = [
+                f"{item.get('id')}: {item.get('status')}"
+                for item in raw_providers
+                if isinstance(item, dict)
+            ] if isinstance(raw_providers, list) else []
+            messagebox.showinfo(
+                "CtrlSpeak gateway ready",
+                f"Gateway version: {capabilities.get('version', 'unknown')}\n\n"
+                + "\n".join(provider_lines),
+                parent=self.window,
+            )
+
+        def probe() -> None:
+            try:
+                capabilities = ApiTranscriptionClient(
+                    probe_config,
+                    timeout_seconds=10.0,
+                ).get_capabilities()
+            except (ApiBackendError, ValueError) as exc:
+                error_message = str(exc)
+                self.window.after(0, lambda: finish_error(error_message))
+                return
+            self.window.after(0, lambda: finish_success(capabilities))
+
+        threading.Thread(
+            target=probe,
+            name="ctrlspeak-capability-probe",
+            daemon=True,
+        ).start()
 
     def _selected_output_languages(self) -> tuple[str, ...]:
         return tuple(

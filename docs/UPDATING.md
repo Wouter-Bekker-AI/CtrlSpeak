@@ -1,4 +1,4 @@
-# CtrlSpeak v0.5.3 update and release guide
+# CtrlSpeak v0.6.0 update and release guide
 
 ## End-user update flow
 
@@ -50,6 +50,11 @@ insertion fails, and it lowers the nearly full-scale processing-chime attack to
 a transparent -6 dBFS peak ceiling. The API contract is unchanged; the
 version-matched maintained service reports v0.5.3.
 
+v0.6.0 adds the capability-aware Nova gateway, the worker-only Ubuntu GPU
+role, identity-scoped corrections, request-scoped OpenAI BYOK, and the explicit
+GPU → OpenAI → tiny provider cascade. Server roles are deployed administratively;
+the signed desktop binary continues to update through the existing GUI.
+
 ## Trust and safety model
 
 The standard client hard-codes:
@@ -99,8 +104,8 @@ For each release:
 
 3. Perform the physical Windows/Ubuntu checks in `docs/TESTING.md` appropriate
    to the change.
-4. Commit and push the reviewed `v0.5` branch.
-5. Create an immutable annotated tag such as `v0.5.3` at that commit and push it.
+4. Commit and push the reviewed `v0.6` branch.
+5. Create an immutable annotated tag such as `v0.6.0` at that commit and push it.
 6. Observe `.github/workflows/release.yml` through all three stages:
 
    - clean Windows/Linux tests and native one-file builds;
@@ -110,7 +115,7 @@ For each release:
 7. Independently download the five release assets and run:
 
    ```text
-   python scripts/release.py verify --directory <asset-directory> --tag v0.5.3
+   python scripts/release.py verify --directory <asset-directory> --tag v0.6.0
    ```
 
 8. Test the update from the immediately previous stable version on both

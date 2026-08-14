@@ -1,4 +1,4 @@
-# CtrlSpeak v0.5.3 user flow
+# CtrlSpeak v0.6.0 user flow
 
 ## 1. Launch and platform readiness
 
@@ -37,7 +37,11 @@ All persistent data is below `$XDG_CONFIG_HOME/CtrlSpeak` or
 1. Legacy role selection, discovery, local server startup, model download, and
    model warm-up are skipped.
 2. The configured HTTP(S) base URL and optional in-memory bearer token are used
-   directly. No LAN address is hardcoded and no backend fallback occurs.
+   directly. No LAN address is hardcoded.
+3. **Check gateway** reads authenticated capabilities, rejects a worker-only
+   endpoint, and populates the gateway's published provider strategies.
+4. An optional OpenAI key stays only in the desktop process. It is sent on each
+   transcription request and is never written to settings.
 
 ## 3. Recording
 
@@ -71,6 +75,11 @@ CtrlSpeak uploads multipart WAV audio to `<base-url>/v1/transcribe`. The result
 retains `id`, `raw_text`, corrected `text`, and all response metadata. HTTP,
 authentication, network, or schema errors are shown and never trigger embedded
 fallback.
+
+The gateway may use its selected published cascade. `provider_used`, `attempts`,
+and `degraded` make that routing visible. The default production cascade is the
+Ubuntu GPU worker, then OpenAI with the caller's key, then Nova's tiny CPU
+fallback. OpenAI key/quota errors remain terminal and actionable.
 
 When configured, the ordered language policy is sent as the multipart
 `allowed_languages` field. The maintained server validates and enforces
@@ -130,7 +139,8 @@ contains:
 - current version, stable update channel, last-check time, signed update status,
   download progress, release link, and update controls;
 - embedded/API selection, output-language multi-select, complete base URL,
-  masked token, feedback method, and redacted active/saved status;
+  masked client token, gateway capability check/strategy, session-only masked
+  OpenAI key, feedback method, and redacted active/saved status;
 - legacy embedded role/network controls;
 - microphone selection;
 - model selection/download;
