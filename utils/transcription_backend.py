@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from utils import config_paths
+from utils.languages import language_policy_display, normalize_allowed_output_languages
 
 
 DEFAULT_API_URL = "http://127.0.0.1:8765"
@@ -41,6 +42,7 @@ class BackendConfig:
     api_url: str
     api_token: str | None = dataclass_field(repr=False)
     feedback_capture_method: str
+    allowed_output_languages: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -139,7 +141,26 @@ def get_backend_config(environ: Mapping[str, str] | None = None) -> BackendConfi
         VALID_FEEDBACK_CAPTURE_METHODS,
         "active_field_on_enter",
     )
-    return BackendConfig(backend, api_url, api_token, feedback_capture_method)
+    language_source = (
+        env.get("CTRLSPEAK_OUTPUT_LANGUAGES")
+        if "CTRLSPEAK_OUTPUT_LANGUAGES" in env
+        else saved.get("allowed_output_languages", [])
+    )
+    allowed_output_languages = normalize_allowed_output_languages(
+        language_source,
+        source=(
+            "CTRLSPEAK_OUTPUT_LANGUAGES"
+            if "CTRLSPEAK_OUTPUT_LANGUAGES" in env
+            else "allowed_output_languages setting"
+        ),
+    )
+    return BackendConfig(
+        backend,
+        api_url,
+        api_token,
+        feedback_capture_method,
+        allowed_output_languages,
+    )
 
 
 def activate_runtime_backend_config(config: BackendConfig | None = None) -> BackendConfig:
@@ -160,6 +181,7 @@ def save_backend_config(
     api_url: str,
     api_token: str | None,
     feedback_capture_method: str,
+    allowed_output_languages: object | None = None,
 ) -> BackendConfig:
     normalized_backend = _validated_backend_choice(backend, source="backend")
     normalized_capture = _normalized_choice(
@@ -174,12 +196,19 @@ def save_backend_config(
     normalized_token = api_token.strip() if api_token and api_token.strip() else None
     normalized_url = normalize_api_url(api_url)
     with config_paths.settings_lock:
+        current_languages = config_paths.settings.get("allowed_output_languages", [])
+    normalized_languages = normalize_allowed_output_languages(
+        current_languages if allowed_output_languages is None else allowed_output_languages,
+        source="allowed output languages",
+    )
+    with config_paths.settings_lock:
         previous = dict(config_paths.settings)
         config_paths.settings.update(
             transcription_backend=normalized_backend,
             api_url=normalized_url,
             api_token=normalized_token,
             feedback_capture_method=normalized_capture,
+            allowed_output_languages=list(normalized_languages),
         )
     if not config_paths.save_settings():
         with config_paths.settings_lock:
@@ -189,7 +218,13 @@ def save_backend_config(
             f"Backend settings could not be saved to {config_paths.get_config_file_path()}. "
             "Check that the CtrlSpeak configuration directory is writable and try again."
         )
-    return BackendConfig(normalized_backend, normalized_url, normalized_token, normalized_capture)
+    return BackendConfig(
+        normalized_backend,
+        normalized_url,
+        normalized_token,
+        normalized_capture,
+        normalized_languages,
+    )
 
 
 def get_backend_status(config: BackendConfig | None = None) -> str:
@@ -198,10 +233,17 @@ def get_backend_status(config: BackendConfig | None = None) -> str:
         feedback = "automatic active-field capture on Enter"
     else:
         feedback = "disabled"
+    languages = language_policy_display(current.allowed_output_languages)
     if current.backend == "bundled":
-        return f"Embedded / local · bundled CtrlSpeak model · feedback: {feedback}"
+        return (
+            f"Embedded / local · bundled CtrlSpeak model · feedback: {feedback} "
+            f"· output languages: {languages}"
+        )
     auth = "bearer token configured" if current.api_token else "no bearer token"
-    return f"API · {current.api_url} · {auth} · feedback: {feedback}"
+    return (
+        f"API · {current.api_url} · {auth} · feedback: {feedback} "
+        f"· output languages: {languages}"
+    )
 
 
 def uses_bundled_runtime(config: BackendConfig | None = None) -> bool:
@@ -271,10 +313,14 @@ class ApiTranscriptionClient:
         path = Path(audio_path)
         try:
             with path.open("rb") as audio_file:
-                payload = self._post(
-                    "/v1/transcribe",
-                    files={"audio": (path.name, audio_file, "audio/wav")},
-                )
+                request: dict[str, Any] = {
+                    "files": {"audio": (path.name, audio_file, "audio/wav")},
+                }
+                if self.config.allowed_output_languages:
+                    request["data"] = {
+                        "allowed_languages": ",".join(self.config.allowed_output_languages),
+                    }
+                payload = self._post("/v1/transcribe", **request)
         except ApiBackendError:
             raise
         except OSError as exc:
@@ -289,6 +335,14 @@ class ApiTranscriptionClient:
             raise ApiBackendError("Whisper API response did not include a transcription id")
         if not isinstance(raw_text, str):
             raise ApiBackendError("Whisper API response did not include raw transcript metadata")
+        response_language = str(payload.get("language") or "").strip().casefold()
+        if (
+            self.config.allowed_output_languages
+            and response_language not in self.config.allowed_output_languages
+        ):
+            raise ApiBackendError(
+                "Whisper API returned a language outside the configured output-language allowlist"
+            )
         return TranscriptionResult(
             text=text,
             transcription_id=transcription_id,

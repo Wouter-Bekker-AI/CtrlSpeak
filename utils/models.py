@@ -60,6 +60,7 @@ from utils.system import get_best_server, CLIENT_ONLY_BUILD
 from utils.ui_theme import apply_modern_theme
 from utils.config_paths import app_icon_path, get_logger, asset_path, get_temp_dir
 from utils.cuda_probe import automatic_runtime_install_supported, probe_cuda_driver
+from utils.languages import choose_allowed_language
 
 
 # ---------------- Env / defaults ----------------
@@ -2257,6 +2258,25 @@ def _wav_duration_seconds(path: Path) -> Optional[float]:
         return None
 
 
+def _detect_spoken_language(model: Any, audio_path: Path) -> str | None:
+    """Run faster-whisper's lightweight language detector before restricted decode."""
+    try:
+        from faster_whisper.audio import decode_audio
+
+        audio = decode_audio(str(audio_path))
+        detected, _probability, _all_probabilities = model.detect_language(
+            audio=audio,
+            vad_filter=True,
+        )
+        return str(detected).strip().casefold() or None
+    except Exception:
+        logger.warning(
+            "Language detection failed before restricted transcription; using the configured fallback",
+            exc_info=True,
+        )
+        return None
+
+
 def _split_wav_into_chunks(
     path: Path,
     max_seconds: float = 50.0,
@@ -2309,23 +2329,37 @@ def transcribe_local(file_path: str, play_feedback: bool = True, allow_client: b
         return None
     if play_feedback:
         start_processing_feedback()
-    decode_kwargs = dict(
+    from utils.transcription_backend import get_runtime_backend_config
+
+    allowed_languages = get_runtime_backend_config().allowed_output_languages
+    source_path = Path(file_path)
+    detected_language = None
+    if len(allowed_languages) > 1:
+        detected_language = _detect_spoken_language(model, source_path)
+    selected_language = choose_allowed_language(allowed_languages, detected_language)
+    decode_kwargs: dict[str, Any] = dict(
         beam_size=5,
         vad_filter=True,
         temperature=0.2,
-        task="translate",
+        task="transcribe",
         condition_on_previous_text=False,
         compression_ratio_threshold=2.4,
         log_prob_threshold=-1.0,
         no_speech_threshold=0.6,
     )
+    if selected_language:
+        decode_kwargs["language"] = selected_language
     chunk_paths: List[Path] = []
     try:
-        source_path = Path(file_path)
         chunk_paths = _split_wav_into_chunks(source_path)
         text_parts: List[str] = []
         for chunk_path in chunk_paths:
-            segments, _ = model.transcribe(str(chunk_path), **decode_kwargs)
+            segments, info = model.transcribe(str(chunk_path), **decode_kwargs)
+            reported_language = str(getattr(info, "language", "") or "").strip().casefold()
+            if allowed_languages and reported_language not in allowed_languages:
+                raise RuntimeError(
+                    "Whisper returned a language outside the configured output-language allowlist"
+                )
             chunk_text = collect_text_from_segments(segments)
             if chunk_text:
                 text_parts.append(chunk_text)

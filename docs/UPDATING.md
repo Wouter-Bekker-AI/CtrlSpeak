@@ -1,4 +1,4 @@
-# CtrlSpeak v0.5 update and release guide
+# CtrlSpeak v0.5.1 update and release guide
 
 ## End-user update flow
 
@@ -30,6 +30,11 @@ and remain intact.
 
 v0.4 and earlier cannot update themselves. Install v0.5.0 manually one final
 time under the stable filename. Later signed versions can use the GUI.
+
+v0.5.1 is the first normal in-application patch update. It adds the selectable
+output-language allowlist and the version-matched maintained Ubuntu Whisper API.
+An existing v0.5.0 Desktop installation should discover v0.5.1 through **Check
+for updates**; it must not be replaced manually when validating that flow.
 
 ## Trust and safety model
 

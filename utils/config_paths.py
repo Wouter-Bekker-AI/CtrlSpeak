@@ -16,12 +16,13 @@ import threading
 from urllib.parse import urlsplit
 
 from utils.version import APP_VERSION
+from utils.languages import is_valid_allowed_output_languages_setting
 
 CONFIG_FILENAME = "settings.json"
 LOG_DIR_NAME = "logs"
 ASSETS_DIR_NAME = "assets"
-SETTINGS_SCHEMA_VERSION = 1
-SETTINGS_BACKUP_PREFIX = "settings.pre-migration-v1"
+SETTINGS_SCHEMA_VERSION = 2
+SETTINGS_BACKUP_PREFIX = "settings.pre-migration-v2"
 
 DEFAULT_SETTINGS: Dict[str, object] = {
     "settings_schema_version": SETTINGS_SCHEMA_VERSION,
@@ -38,6 +39,7 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "api_url": "http://127.0.0.1:8765",
     "api_token": None,
     "feedback_capture_method": "active_field_on_enter",
+    "allowed_output_languages": [],
     "update_channel": "stable",
     "last_update_check_at": None,
     "show_whats_new_on_update": True,
@@ -89,6 +91,7 @@ _SETTING_VALIDATORS: Dict[str, Callable[[object], bool]] = {
     "api_url": _is_http_url,
     "api_token": _is_optional_string,
     "feedback_capture_method": lambda value: value in {"active_field_on_enter", "disabled"},
+    "allowed_output_languages": is_valid_allowed_output_languages_setting,
     "update_channel": lambda value: value == "stable",
     "last_update_check_at": _is_optional_string,
     "show_whats_new_on_update": lambda value: isinstance(value, bool),

@@ -19,6 +19,8 @@ The core marker covers:
 - explicit embedded/API selection and pinned runtime configuration.
 - configurable HTTP(S) URLs, optional bearer auth, API transcription IDs, and
   final-text feedback routing.
+- ordered output-language validation, settings migration, API propagation, and
+  refusal of out-of-policy API responses.
 - exact-only local correction persistence.
 - observer-only bare Enter handling with no suppression, replay, or duplicate.
 - lazy Linux/Windows input routing and X11/Wayland capability reporting.
@@ -43,6 +45,7 @@ python -m pytest -q tests/core/test_linux_models.py
 python -m pytest -q tests/core/test_packaging_v04_linux.py
 python -m pytest -q tests/core/test_config_paths.py
 python -m pytest -q tests/core/test_transcription_backend.py
+python -m pytest -q tests/core/test_languages.py
 python -m pytest -q tests/core/test_feedback_capture.py
 python -m pytest -q tests/core/test_local_corrections.py
 python -m pytest -q tests/core/test_update_manager.py
@@ -157,7 +160,19 @@ acceptance test. Do not use its host-level guidance on an Ubuntu system.
 
 ## Companion API tests
 
-The remote service owns its own tests and deployment. Running this client suite
-does not bind, restart, or reconfigure it. If an operator explicitly validates a
-companion checkout, use that service's own documented environment and test
-command without changing its bind address or system service.
+The maintained v0.5.1 remote service is in `server/whisper_transcription`. Its
+headless suite uses a fake model and does not download CUDA/model assets, bind a
+network port, restart systemd, or change a firewall:
+
+```bash
+cd server/whisper_transcription
+python -m pytest -q
+python -m compileall app tests
+```
+
+The server tests cover the OpenAPI version/field, authentication boundary,
+legacy single-language compatibility, ordered allowlist propagation, invalid
+policy rejection, hard refusal of out-of-policy responses, corrections, and
+confirmed-text feedback. A deployment acceptance test must additionally use
+real audio against the CUDA service and assert the response language occurs in
+the requested allowlist.

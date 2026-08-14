@@ -53,6 +53,7 @@ def test_settings_round_trip(tmp_path, monkeypatch):
 
     loaded = config_paths.load_settings()
     assert loaded["model_name"] == config_paths.DEFAULT_SETTINGS["model_name"]
+    assert loaded["allowed_output_languages"] == []
 
     with config_paths.settings_lock:
         config_paths.settings["unit_test_marker"] = "ok"
@@ -106,9 +107,10 @@ def test_v04_settings_migration_salvages_valid_fields(tmp_path, monkeypatch):
     assert loaded["api_url"] == "http://192.168.1.22:8765"
     assert loaded["api_token"] == "keep-this-secret"
     assert loaded["show_whats_new_on_update"] is True
+    assert loaded["allowed_output_languages"] == []
     assert loaded["future_field"] == {"preserve": True}
 
-    backups = list(settings_file.parent.glob("settings.pre-migration-v1.*.json"))
+    backups = list(settings_file.parent.glob("settings.pre-migration-v2.*.json"))
     assert len(backups) == 1
     original = json.loads(backups[0].read_text(encoding="utf-8"))
     assert original["api_token"] == "keep-this-secret"
@@ -135,7 +137,7 @@ def test_corrupt_settings_are_backed_up_before_defaults_are_written(tmp_path, mo
 
     assert loaded["settings_schema_version"] == config_paths.SETTINGS_SCHEMA_VERSION
     assert loaded["transcription_backend"] == "bundled"
-    backups = list(settings_file.parent.glob("settings.pre-migration-v1.*.json"))
+    backups = list(settings_file.parent.glob("settings.pre-migration-v2.*.json"))
     assert len(backups) == 1
     assert backups[0].read_text(encoding="utf-8") == "{definitely not json"
     assert json.loads(settings_file.read_text(encoding="utf-8"))["model_name"] == "small"

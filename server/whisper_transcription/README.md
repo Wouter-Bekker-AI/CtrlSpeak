@@ -1,0 +1,98 @@
+# CtrlSpeak Whisper Transcription API v0.5.1
+
+This directory is the maintained Ubuntu GPU backend for CtrlSpeak. It loads
+`large-v3-turbo` with faster-whisper on CUDA float16 and intentionally has no
+CPU fallback. The API supports ordered, server-enforced output-language
+allowlists as of v0.5.1.
+
+The desktop client and this service share a release version, but they have
+different roles: the Windows/Linux desktop records and inserts text; this
+service performs GPU transcription and stores correction/audit records. Runtime
+state (`data/`), the virtual environment, and service credentials are excluded
+from Git.
+
+## Python and installation
+
+The production target is Ubuntu 22.04 with Python 3.11, a working NVIDIA
+driver, and a CUDA-capable GPU.
+
+```bash
+cd server/whisper_transcription
+python3.11 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -e . --no-deps
+python -m pytest -q
+```
+
+Run on loopback for local testing:
+
+```bash
+WHISPER_HOST=127.0.0.1 scripts/run-service
+```
+
+Run the redacted configuration summary with `scripts/runtime-config`. It never
+prints the token value.
+
+## User systemd service and LAN access
+
+`scripts/install-user-service` installs a user unit with loopback binding by
+default. For an intended trusted-LAN deployment, create a protected drop-in:
+
+```bash
+systemctl --user edit whisper-transcription.service
+```
+
+```ini
+[Service]
+Environment=WHISPER_HOST=0.0.0.0
+Environment=WHISPER_BEARER_TOKEN=replace-with-a-long-random-secret
+```
+
+Then run:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now whisper-transcription.service
+systemctl --user status whisper-transcription.service
+```
+
+Non-loopback requests are rejected unless `WHISPER_BEARER_TOKEN` is configured
+and the request supplies `Authorization: Bearer ...`. Loopback requests do not
+require the bearer token. Use a trusted LAN/VPN or add an HTTPS reverse proxy;
+plain HTTP does not protect audio or credentials on an untrusted network.
+
+## Output-language contract
+
+`POST /v1/transcribe` accepts `allowed_languages` as an ordered,
+comma-separated list of one to five Whisper language codes.
+
+- Omitted or empty: automatic Whisper language selection, with no restriction.
+- One code, such as `en`: the server forces that decoding language.
+- Several codes, such as `en,af`: the server detects the spoken language once;
+  if it is in the list, that code is forced, otherwise the first code is the
+  fallback.
+- A response whose reported language is outside a non-empty allowlist is
+  blocked by the server.
+
+The older single `language` multipart field remains supported. If both fields
+are supplied, `language` must occur in `allowed_languages`. The language
+setting controls transcription/recognition; it is not arbitrary translation
+between languages.
+
+See the repository-level `docs/API.md` for every route, fields, examples, and
+response/error contracts. Interactive OpenAPI documentation is available at
+`/docs`, the ReDoc view at `/redoc`, and the OpenAPI document at
+`/openapi.json` while the service is running.
+
+## Runtime data and limits
+
+By default the service stores model files, uploads, SQLite corrections, and
+transcription audit records below `data/`. Override this with
+`WHISPER_DATA_DIR`. Temporary uploads are deleted after each request. The
+default upload limit is 100 MiB and can be changed with
+`WHISPER_MAX_UPLOAD_BYTES`.
+
+The health endpoint reports only readiness, service version, model, and device.
+It does not expose credentials or transcription content.

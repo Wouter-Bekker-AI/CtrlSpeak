@@ -1,4 +1,4 @@
-# CtrlSpeak v0.5 user flow
+# CtrlSpeak v0.5.1 user flow
 
 ## 1. Launch and platform readiness
 
@@ -59,12 +59,21 @@ Client-Only role calls its trusted-LAN server). The exact local correction
 library applies only a previously approved byte-for-byte raw match. A new local
 result receives a local ID and feedback target.
 
+With no output languages selected, Whisper remains automatic and unrestricted.
+One selected language is forced. With two to five selected languages, CtrlSpeak
+accepts detection only inside that ordered allowlist and otherwise forces its
+first entry. A model-reported language outside the policy is refused.
+
 ### API result
 
 CtrlSpeak uploads multipart WAV audio to `<base-url>/v1/transcribe`. The result
 retains `id`, `raw_text`, corrected `text`, and all response metadata. HTTP,
 authentication, network, or schema errors are shown and never trigger embedded
 fallback.
+
+When configured, the ordered language policy is sent as the multipart
+`allowed_languages` field. The maintained v0.5.1 server validates and enforces
+it, and the client independently refuses an out-of-policy response.
 
 ### Linux insertion
 
@@ -111,8 +120,8 @@ contains:
 
 - current version, stable update channel, last-check time, signed update status,
   download progress, release link, and update controls;
-- embedded/API selection, complete base URL, masked token, feedback method, and
-  redacted active/saved status;
+- embedded/API selection, output-language multi-select, complete base URL,
+  masked token, feedback method, and redacted active/saved status;
 - legacy embedded role/network controls;
 - microphone selection;
 - model selection/download;

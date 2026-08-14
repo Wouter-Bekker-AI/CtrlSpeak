@@ -50,13 +50,29 @@ def _install_runtime_stubs() -> None:
     if "tkinter" not in sys.modules:
         tkinter = _install_stub_module("tkinter")
         tkinter.Tk = type("Tk", (), {"__init__": lambda self, *a, **k: None})
+        tkinter.Widget = type("Widget", (), {})
+        tkinter.Canvas = type("Canvas", (), {})
+        tkinter.Label = type("Label", (), {})
+        tkinter.BOTH = "both"
+        tkinter.CENTER = "center"
+        tkinter.SOLID = "solid"
+        ttk = types.ModuleType("tkinter.ttk")
+        ttk.Frame = type("Frame", (), {})
+        ttk.Label = type("Label", (), {})
+        ttk.Style = type("Style", (), {})
+        tkinter.ttk = ttk
+        sys.modules["tkinter.ttk"] = ttk
     if "PIL" not in sys.modules:
         pil = _install_stub_module("PIL")
         image_mod = types.ModuleType("PIL.Image")
         image_mod.open = lambda *a, **k: None
         image_mod.new = lambda *a, **k: None
+        image_tk_mod = types.ModuleType("PIL.ImageTk")
+        image_tk_mod.PhotoImage = type("PhotoImage", (), {})
         pil.Image = image_mod
+        pil.ImageTk = image_tk_mod
         sys.modules["PIL.Image"] = image_mod
+        sys.modules["PIL.ImageTk"] = image_tk_mod
     if "numpy" not in sys.modules:
         numpy = _install_stub_module("numpy")
         numpy.ndarray = list  # type: ignore[assignment]

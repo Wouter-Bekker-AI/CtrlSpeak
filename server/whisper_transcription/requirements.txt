@@ -1,0 +1,7 @@
+# Production top-level pins verified on Python 3.11 / Ubuntu 22.04.
+fastapi==0.139.0
+uvicorn[standard]==0.51.0
+faster-whisper==1.2.1
+python-multipart==0.0.32
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cudnn-cu12==9.24.0.43

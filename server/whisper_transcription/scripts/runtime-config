@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SERVICE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+echo "service_root=${SERVICE_ROOT}"
+echo "host=${WHISPER_HOST:-127.0.0.1}"
+echo "port=${WHISPER_PORT:-8765}"
+echo "data_dir=${WHISPER_DATA_DIR:-${SERVICE_ROOT}/data}"
+echo "model=large-v3-turbo"
+echo "device=cuda"
+if [[ -n "${WHISPER_BEARER_TOKEN:-}" ]]; then
+  echo "bearer_token=configured"
+else
+  echo "bearer_token=not-configured"
+fi

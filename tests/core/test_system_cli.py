@@ -63,7 +63,8 @@ def test_cli_backend_selection_persists_without_accepting_a_token_argument(capsy
     output = capsys.readouterr().out
     assert output == (
         "API · http://127.0.0.1:9000 · no bearer token · "
-        "feedback: automatic active-field capture on Enter\n"
+        "feedback: automatic active-field capture on Enter · "
+        "output languages: Automatic (no restriction)\n"
     )
     assert not hasattr(args, "api_token")
     with system.settings_lock:

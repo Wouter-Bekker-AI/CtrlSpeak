@@ -32,6 +32,11 @@ from utils.update_manager import (  # noqa: E402
 
 
 VERSION_PATTERN = re.compile(r'^APP_VERSION\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
+SERVER_PACKAGE_VERSION_PATTERN = re.compile(r'^version\s*=\s*"([^"]+)"\s*$', re.MULTILINE)
+SERVER_RUNTIME_VERSION_PATTERN = re.compile(
+    r'^SERVICE_VERSION\s*=\s*"([^"]+)"\s*$',
+    re.MULTILINE,
+)
 RELEASE_FILENAMES = {
     "windows": "CtrlSpeak-windows-x86_64.exe",
     "linux": "CtrlSpeak-linux-x86_64",
@@ -48,8 +53,28 @@ def read_app_version() -> str:
     return version
 
 
+def read_server_versions() -> tuple[str, str]:
+    server_root = ROOT / "server" / "whisper_transcription"
+    package_source = (server_root / "pyproject.toml").read_text(encoding="utf-8")
+    runtime_source = (server_root / "app" / "main.py").read_text(encoding="utf-8")
+    package_matches = SERVER_PACKAGE_VERSION_PATTERN.findall(package_source)
+    runtime_matches = SERVER_RUNTIME_VERSION_PATTERN.findall(runtime_source)
+    if len(package_matches) != 1 or len(runtime_matches) != 1:
+        raise SystemExit("the Whisper server must declare one package and one runtime version")
+    for version in (package_matches[0], runtime_matches[0]):
+        SemanticVersion.parse(version)
+    return package_matches[0], runtime_matches[0]
+
+
 def check_version(tag: str) -> str:
     version = read_app_version()
+    server_package_version, server_runtime_version = read_server_versions()
+    if (server_package_version, server_runtime_version) != (version, version):
+        raise SystemExit(
+            "desktop/server version mismatch: "
+            f"APP_VERSION={version!r}, server package={server_package_version!r}, "
+            f"server runtime={server_runtime_version!r}"
+        )
     if tag != f"v{version}":
         raise SystemExit(f"tag/version mismatch: tag={tag!r}, APP_VERSION={version!r}")
     return version

@@ -1,9 +1,11 @@
-# CtrlSpeak v0.5
+# CtrlSpeak v0.5.1
 
 CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into
 the active field. v0.5 adds signed in-application updates with a stable installed
-filename while preserving the v0.4 Linux and transcription-backend design:
+filename. v0.5.1 adds an ordered output-language allowlist enforced by both the
+embedded model and maintained remote API, while preserving the v0.4 Linux and
+transcription-backend design:
 
 - **Embedded / local** runs the bundled `faster-whisper` workflow and retains
   the existing model (`small` or `large-v3`) and device (`cpu` or `cuda`)
@@ -15,6 +17,20 @@ filename while preserving the v0.4 Linux and transcription-backend design:
 The legacy **Client + Server** and **Client Only** roles remain inside the
 embedded/local backend. Remote API mode is independent of those roles and does
 not start discovery, a local server, or a model download.
+
+## Output-language control
+
+The control center's **Output languages** list applies to both transcription
+backends. Select no languages for automatic, unrestricted Whisper detection;
+select one to force that recognition language; or select up to five in priority
+order. With several selected languages, an allowed detected language is used,
+otherwise the first selected language is the fallback. **English only** and
+**Clear (automatic)** provide quick choices.
+
+This setting prevents CtrlSpeak from accepting a reported language outside the
+configured list. It constrains speech recognition/decoding; it is not an
+arbitrary translation feature. Backend and language changes are pinned for the
+running process and take effect after restarting CtrlSpeak.
 
 ## Application updates
 
@@ -136,6 +152,7 @@ The defaults are:
   "api_url": "http://127.0.0.1:8765",
   "api_token": null,
   "feedback_capture_method": "active_field_on_enter",
+  "allowed_output_languages": [],
   "device_preference": "cpu",
   "model_name": "small"
 }
@@ -149,7 +166,16 @@ is hardcoded. API mode calls:
 - `POST <base-url>/v1/transcriptions/{id}/feedback` with the confirmed final
   text, capture method, and client audit metadata.
 
+When output languages are configured, the request includes an ordered
+comma-separated `allowed_languages` multipart field such as `en` or `en,af`.
+The maintained v0.5.1 server validates a maximum of five codes, forces one of
+them, uses the first as a fallback, and refuses to return a reported language
+outside the list. Omitting the field preserves automatic detection. The legacy
+single `language` field is still accepted by the server.
+
 The transcribe response must include non-empty `text`, `raw_text`, and `id`.
+For a restricted request it must also report a `language` inside the configured
+allowlist; the desktop client rejects an out-of-policy response.
 CtrlSpeak retains those fields plus the complete response metadata. A pending
 feedback item remains bound to the original URL and in-memory token even if
 saved settings are later changed. Network, HTTP, and response-schema failures
@@ -166,12 +192,19 @@ Environment overrides are:
 export CTRLSPEAK_BACKEND=api
 export CTRLSPEAK_API_URL=https://whisper.example.test/base
 export CTRLSPEAK_API_TOKEN='...'
+export CTRLSPEAK_OUTPUT_LANGUAGES=en,af
 python main.py
 ```
 
 Backend settings are pinned at startup. Saving a backend, URL, token, or
-feedback-method change in the management window requires a restart, preventing
-a partially switched runtime.
+feedback/language change in the management window requires a restart,
+preventing a partially switched runtime.
+
+The maintained CUDA API service, Ubuntu user-service setup, and server tests
+are under `server/whisper_transcription`. See `docs/API.md` for authentication,
+all routes, request/response examples, errors, and the v0.5.1 language-policy
+contract. A running server publishes OpenAPI at `/openapi.json`, Swagger UI at
+`/docs`, and ReDoc at `/redoc`.
 
 ## Embedded/local Whisper
 
@@ -257,6 +290,7 @@ or deploys an API.
 python -m pytest -m core_headless
 python -m pytest -q tests/core
 python -m pytest -q tests/core/test_update_manager.py tests/core/test_update_helper.py
+python -m pytest -q server/whisper_transcription/tests
 python -m compileall .
 git diff --check
 ```

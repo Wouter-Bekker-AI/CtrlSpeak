@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SERVICE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VENV_DIR="${WHISPER_VENV_DIR:-${SERVICE_ROOT}/.venv}"
+
+if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
+  echo "CtrlSpeak Whisper virtual environment is missing: ${VENV_DIR}" >&2
+  exit 1
+fi
+
+# NVIDIA pip wheels keep shared libraries below site-packages. Add those exact
+# package paths without changing the host CUDA installation.
+NVIDIA_LIBS="$(${VENV_DIR}/bin/python - <<'PY'
+from pathlib import Path
+import site
+
+paths = []
+for root in map(Path, site.getsitepackages()):
+    nvidia = root / "nvidia"
+    if nvidia.is_dir():
+        paths.extend(str(path) for path in nvidia.glob("*/lib") if path.is_dir())
+print(":".join(paths))
+PY
+)"
+if [[ -n "${NVIDIA_LIBS}" ]]; then
+  export LD_LIBRARY_PATH="${NVIDIA_LIBS}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
+
+cd "${SERVICE_ROOT}"
+exec "${VENV_DIR}/bin/python" -m uvicorn app.main:app \
+  --host "${WHISPER_HOST:-127.0.0.1}" \
+  --port "${WHISPER_PORT:-8765}" \
+  --log-level "${WHISPER_LOG_LEVEL:-info}"

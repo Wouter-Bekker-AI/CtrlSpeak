@@ -57,6 +57,8 @@ from utils.ui_theme import (
     ACCENT,
     BACKGROUND,
     DANGER,
+    TEXT_PRIMARY,
+    OUTLINE,
 )
 
 from utils.config_paths import app_icon_path, asset_path, get_logger
@@ -71,6 +73,7 @@ from utils.transcription_backend import (
     get_runtime_backend_config,
     save_backend_config,
 )
+from utils.languages import language_choices
 from utils.update_helper import prepare_update_handoff
 from utils.update_manager import (
     UpdateError,
@@ -1499,6 +1502,59 @@ class ManagementWindow:
             state="readonly", width=24, style="Modern.TCombobox",
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
+        language_frame = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
+        language_frame.pack(fill=tk.X, pady=(10, 4))
+        ttk.Label(
+            language_frame,
+            text="Allowed output languages",
+            style="Body.TLabel",
+            width=18,
+        ).pack(side=tk.LEFT, anchor=tk.N)
+        language_list_frame = ttk.Frame(language_frame, style="ModernCardInner.TFrame")
+        language_list_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        choices = language_choices()
+        self._output_language_codes = tuple(code for code, _name in choices)
+        self.output_language_list = tk.Listbox(
+            language_list_frame,
+            selectmode=tk.MULTIPLE,
+            exportselection=False,
+            height=7,
+            background=ELEVATED_SURFACE,
+            foreground=TEXT_PRIMARY,
+            selectbackground=ACCENT,
+            selectforeground=BACKGROUND,
+            highlightbackground=OUTLINE,
+            highlightcolor=ACCENT,
+            relief=tk.FLAT,
+            borderwidth=1,
+        )
+        language_scroll = ttk.Scrollbar(
+            language_list_frame,
+            orient=tk.VERTICAL,
+            command=self.output_language_list.yview,
+        )
+        self.output_language_list.configure(yscrollcommand=language_scroll.set)
+        self.output_language_list.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        language_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        for code, name in choices:
+            self.output_language_list.insert(tk.END, f"{name} ({code})")
+        self._set_output_language_selection(active_backend.allowed_output_languages)
+
+        language_buttons = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
+        language_buttons.pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(
+            language_buttons,
+            text="English only",
+            style="Subtle.TButton",
+            command=lambda: self._set_output_language_selection(("en",)),
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            language_buttons,
+            text="Clear (automatic)",
+            style="Subtle.TButton",
+            command=lambda: self._set_output_language_selection(()),
+        ).pack(side=tk.LEFT, padx=(12, 0))
+
         api_url_row = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
         api_url_row.pack(fill=tk.X, pady=6)
         ttk.Label(api_url_row, text="API base URL", style="Body.TLabel", width=18).pack(side=tk.LEFT)
@@ -1522,7 +1578,10 @@ class ManagementWindow:
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Label(
             backend_card,
-            text=("Automatic capture snapshots the active field when you press bare Enter, "
+            text=("Select no languages for automatic detection. Select one to force it, or "
+                  "select up to five; CtrlSpeak accepts automatic detection only within that "
+                  "list and uses the first selected language as its safe fallback. "
+                  "Automatic capture snapshots the active field when you press bare Enter, "
                   "then restores the clipboard and submits only changed text. Saving any "
                   "backend setting requires a CtrlSpeak restart. Environment variables "
                   "override saved API values."),
@@ -1531,7 +1590,7 @@ class ManagementWindow:
             justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(8, 0))
         ttk.Button(
-            backend_card, text="Save backend", style="Accent.TButton", command=self._apply_backend,
+            backend_card, text="Save backend and languages", style="Accent.TButton", command=self._apply_backend,
         ).pack(anchor=tk.W, pady=(12, 0))
         self.backend_status_var = tk.StringVar(value=get_backend_status(active_backend))
         ttk.Label(
@@ -2261,6 +2320,7 @@ class ManagementWindow:
         api_url = self.api_url_var.get().strip()
         token = self.api_token_var.get()
         capture_method = self.feedback_capture_var.get().strip()
+        allowed_output_languages = self._selected_output_languages()
 
         try:
             saved = save_backend_config(
@@ -2268,6 +2328,7 @@ class ManagementWindow:
                 api_url=api_url,
                 api_token=token,
                 feedback_capture_method=capture_method,
+                allowed_output_languages=allowed_output_languages,
             )
         except ValueError as exc:
             messagebox.showerror("Invalid backend settings", str(exc), parent=self.window)
@@ -2292,6 +2353,19 @@ class ManagementWindow:
         if effective != saved:
             message += " Environment variables currently override one or more saved values."
         messagebox.showinfo("Backend settings saved", message, parent=self.window)
+
+    def _selected_output_languages(self) -> tuple[str, ...]:
+        return tuple(
+            self._output_language_codes[int(index)]
+            for index in self.output_language_list.curselection()
+        )
+
+    def _set_output_language_selection(self, codes: tuple[str, ...]) -> None:
+        selected = set(codes)
+        self.output_language_list.selection_clear(0, tk.END)
+        for index, code in enumerate(self._output_language_codes):
+            if code in selected:
+                self.output_language_list.selection_set(index)
 
     def _reload_transcriber_async(
         self,

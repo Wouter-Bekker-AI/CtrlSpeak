@@ -57,7 +57,10 @@ def test_backend_display_names_are_explicit_and_round_trip() -> None:
     assert backend_from_display_name("Remote API") == "api"
     assert get_backend_status(
         BackendConfig("bundled", DEFAULT_API_URL, None, "disabled")
-    ) == "Embedded / local · bundled CtrlSpeak model · feedback: disabled"
+    ) == (
+        "Embedded / local · bundled CtrlSpeak model · feedback: disabled · "
+        "output languages: Automatic (no restriction)"
+    )
 
 
 def test_backend_config_defaults_to_bundled_and_loopback_and_env_takes_precedence(monkeypatch) -> None:
@@ -87,6 +90,35 @@ def test_backend_config_defaults_to_bundled_and_loopback_and_env_takes_precedenc
     )
     assert uses_bundled_runtime(BackendConfig("api", DEFAULT_API_URL, None, "disabled")) is False
     assert uses_bundled_runtime(BackendConfig("bundled", DEFAULT_API_URL, None, "disabled")) is True
+
+
+def test_ordered_output_languages_are_validated_persisted_and_overridden_by_environment(
+    monkeypatch,
+) -> None:
+    saved = save_backend_config(
+        backend="api",
+        api_url=DEFAULT_API_URL,
+        api_token=None,
+        feedback_capture_method="disabled",
+        allowed_output_languages=["English", "af", "en"],
+    )
+
+    assert saved.allowed_output_languages == ("en", "af")
+    persisted = json.loads(config_paths.get_config_file_path().read_text("utf-8"))
+    assert persisted["allowed_output_languages"] == ["en", "af"]
+    assert "English (en), Afrikaans (af)" in get_backend_status(saved)
+
+    monkeypatch.setenv("CTRLSPEAK_OUTPUT_LANGUAGES", "de, en")
+    assert get_backend_config().allowed_output_languages == ("de", "en")
+
+    with pytest.raises(ValueError, match="Unsupported Whisper language"):
+        save_backend_config(
+            backend="api",
+            api_url=DEFAULT_API_URL,
+            api_token=None,
+            feedback_capture_method="disabled",
+            allowed_output_languages=["not-a-language"],
+        )
 
 
 def test_invalid_saved_api_url_is_rejected_even_for_bundled_backend(monkeypatch) -> None:
@@ -197,7 +229,8 @@ def test_backend_status_and_persistence_never_disclose_token() -> None:
     status = get_backend_status(saved)
     assert status == (
         "API · http://127.0.0.1:8765 · bearer token configured · "
-        "feedback: automatic active-field capture on Enter"
+        "feedback: automatic active-field capture on Enter · "
+        "output languages: Automatic (no restriction)"
     )
     assert "do-not-print-me" not in status
     assert "do-not-print-me" not in repr(saved)
@@ -238,6 +271,30 @@ def test_api_transcription_uploads_audio_and_retains_audit_metadata(tmp_path: Pa
     assert call["url"] == "http://127.0.0.1:8765/v1/transcribe"
     assert call["audio_bytes"] == b"wave-data"
     assert call["headers"] == {"Authorization": "Bearer secret"}
+
+
+def test_api_transcription_sends_and_enforces_the_ordered_language_allowlist(
+    tmp_path: Path,
+) -> None:
+    audio = tmp_path / "clip.wav"
+    audio.write_bytes(b"wave-data")
+    payload = {
+        "id": "tx-allowed",
+        "raw_text": "hello",
+        "text": "hello",
+        "language": "en",
+    }
+    session = RecordingSession(FakeResponse(200, payload))
+    config = BackendConfig("api", DEFAULT_API_URL, None, "disabled", ("en", "af"))
+
+    result = ApiTranscriptionClient(config, session=session).transcribe(audio)
+
+    assert result.text == "hello"
+    assert session.calls[0]["data"] == {"allowed_languages": "en,af"}
+
+    rejected = RecordingSession(FakeResponse(200, {**payload, "language": "zh"}))
+    with pytest.raises(ApiBackendError, match="outside.*allowlist"):
+        ApiTranscriptionClient(config, session=rejected).transcribe(audio)
 
 
 def test_api_failure_is_actionable_and_does_not_fall_back_to_bundled(tmp_path: Path) -> None:
