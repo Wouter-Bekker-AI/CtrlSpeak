@@ -1,4 +1,4 @@
-# CtrlSpeak v0.6.0
+# CtrlSpeak v0.6.1
 
 CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into
@@ -19,6 +19,15 @@ The legacy **Client + Server** and **Client Only** roles remain inside the
 embedded/local backend. Remote API mode is independent of those roles and does
 not start discovery, a local server, or a model download.
 
+## v0.6.1 correction submission patch
+
+The tray now includes **Submit correction…**. It opens a small authenticated
+form for entering the phrase CtrlSpeak currently produces and the replacement
+it should return. By default, the new rule belongs to the current gateway
+identity. Administrators can choose to make it global for every gateway user.
+Successful rules become active immediately; secrets and correction text are
+not written to application logs.
+
 ## v0.6 gateway and provider routing
 
 The desktop now checks `GET /v1/capabilities` before treating a remote endpoint
@@ -28,23 +37,26 @@ endpoint is rejected as a desktop backend.
 
 The production layout separates responsibility:
 
-- the Nova instance is the authenticated gateway and owns routing,
-  identity-scoped known words/corrections, feedback, and audit records;
+- the dedicated OpenStack instance named `CtrlSpeak` is the authenticated
+  gateway and owns routing, identity-scoped known words/corrections, feedback,
+  and audit records;
 - the local Ubuntu GPU machine is a raw `large-v3-turbo` CUDA inference worker
-  reachable by Nova over WireGuard; and
+  reachable by the gateway over WireGuard;
 - OpenAI `gpt-transcribe` is an optional paid provider using the caller's own
-  key, followed by Nova's lazy CPU `tiny` emergency fallback.
+  key, followed by the gateway's lazy CPU `tiny` emergency fallback; and
+- the existing Nova instance remains the WireGuard transport hub only. It no
+  longer runs the CtrlSpeak application gateway.
 
-The default `resilient-quality` cascade is Ubuntu GPU → OpenAI → Nova tiny.
+The default `resilient-quality` cascade is Ubuntu GPU → OpenAI → gateway tiny.
 Responses state which provider ran, which attempts failed, and whether the
 result is degraded. Invalid OpenAI credentials and exhausted credit/quota are
 returned as terminal, actionable errors instead of being hidden by fallback.
 
 The OpenAI key entered in the control center exists only in the running desktop
 process. It is never written to `settings.json`, packaged into the executable,
-stored by Nova, or sent to the Ubuntu worker. It is attached only to individual
-gateway transcription requests. The gateway must still be trusted because its
-process handles the request transiently.
+stored by the gateway, or sent to the Ubuntu worker. It is attached only to
+individual gateway transcription requests. The gateway must still be trusted
+because its process handles the request transiently.
 
 ## v0.5.3 quality-of-life patch
 
@@ -219,7 +231,7 @@ is hardcoded. API mode calls:
 
 When output languages are configured, the request includes an ordered
 comma-separated `allowed_languages` multipart field such as `en` or `en,af`.
-The maintained v0.6.0 gateway validates a maximum of five codes, forces one of
+The maintained v0.6.1 gateway validates a maximum of five codes, forces one of
 them, uses the first as a fallback, and refuses to return a reported language
 outside the list. Omitting the field preserves automatic detection. The legacy
 single `language` field is still accepted by the server.

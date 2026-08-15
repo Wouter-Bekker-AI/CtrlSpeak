@@ -384,6 +384,47 @@ class ApiTranscriptionClient:
             )
         return payload
 
+    def create_correction(
+        self,
+        source_phrase: str,
+        replacement_phrase: str,
+        *,
+        scope: str = "user",
+    ) -> dict[str, Any]:
+        """Create one explicit phrase correction on the configured gateway."""
+        if self.config.backend != "api":
+            raise ValueError("correction submission requires the Remote API backend")
+        source = str(source_phrase).strip()
+        replacement = str(replacement_phrase).strip()
+        if not source:
+            raise ValueError("the phrase to replace must be non-empty")
+        if not replacement:
+            raise ValueError("the replacement phrase must be non-empty")
+        if source == replacement:
+            raise ValueError("the replacement must differ from the original phrase")
+        normalized_scope = str(scope).strip().casefold()
+        if normalized_scope not in {"user", "global"}:
+            raise ValueError("correction scope must be 'user' or 'global'")
+
+        payload = self._post(
+            "/v1/corrections",
+            json={
+                "source_phrase": source,
+                "replacement_phrase": replacement,
+                "enabled": True,
+                "scope": normalized_scope,
+            },
+        )
+        rule_id = payload.get("id")
+        if not isinstance(rule_id, str) or not rule_id:
+            raise ApiBackendError("CtrlSpeak API did not return a correction-rule id")
+        if (
+            payload.get("source_phrase") != source
+            or payload.get("replacement_phrase") != replacement
+        ):
+            raise ApiBackendError("CtrlSpeak API returned a mismatched correction rule")
+        return payload
+
     def transcribe(self, audio_path: Path) -> TranscriptionResult:
         path = Path(audio_path)
         try:

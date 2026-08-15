@@ -1,4 +1,4 @@
-# CtrlSpeak v0.6.0 user flow
+# CtrlSpeak v0.6.1 user flow
 
 ## 1. Launch and platform readiness
 
@@ -78,7 +78,7 @@ fallback.
 
 The gateway may use its selected published cascade. `provider_used`, `attempts`,
 and `degraded` make that routing visible. The default production cascade is the
-Ubuntu GPU worker, then OpenAI with the caller's key, then Nova's tiny CPU
+Ubuntu GPU worker, then OpenAI with the caller's key, then the gateway's tiny CPU
 fallback. OpenAI key/quota errors remain terminal and actionable.
 
 When configured, the ordered language policy is sent as the multipart
@@ -112,7 +112,20 @@ succeeds. It copies the retained text even if active-field insertion failed and
 reports the clipboard outcome. CtrlSpeak retains exactly one result in memory;
 it does not persist transcript history, and the value disappears on exit.
 
-## 5. Best-effort correction feedback
+### Tray correction submission
+
+The tray's **Submit correction…** action opens one small form. Enter the phrase
+CtrlSpeak currently produces and the replacement it should return. Submission
+uses the runtime-pinned gateway URL and bearer identity; the token is never
+shown in the form or logged. The default user-scoped rule affects only that
+identity. An administrator may opt into a global rule for all gateway users.
+The dialog validates empty and unchanged pairs, performs the network request in
+the background, and confirms whether the rule became active.
+
+Embedded/local mode explains that a remote gateway must be selected instead of
+pretending to save a server correction locally.
+
+## 6. Best-effort correction feedback
 
 1. The latest eligible injection remains pending for up to ten minutes.
 2. Shift/Alt/Ctrl-modified Enter, releases, and unrelated keys do not consume it.
@@ -131,7 +144,7 @@ The field selection/copy technique cannot guarantee support for every toolkit,
 terminal, remote surface, password field, or multiline editor. Disable edit
 feedback in the management window when the workflow is unsuitable.
 
-## 6. Management window
+## 7. Management window
 
 The tray's **Manage CtrlSpeak** action raises one Tk management window. It
 contains:

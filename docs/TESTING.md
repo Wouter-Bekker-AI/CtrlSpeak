@@ -1,6 +1,6 @@
-# CtrlSpeak v0.5 testing playbook
+# CtrlSpeak v0.6.1 testing playbook
 
-Run commands from the v0.5 repository root in a project-compatible Python
+Run commands from the v0.6 repository root in a project-compatible Python
 environment. The required fast suite is GUI-free and performs no model
 download, desktop installation, service operation, or firewall change.
 
@@ -19,6 +19,8 @@ The core marker covers:
 - explicit embedded/API selection and pinned runtime configuration.
 - configurable HTTP(S) URLs, optional bearer auth, API transcription IDs, and
   final-text feedback routing.
+- tray-accessible, authenticated known-word correction submission with
+  user/global scope and non-blocking UI dispatch.
 - ordered output-language validation, settings migration, API propagation, and
   refusal of out-of-policy API responses.
 - exact-only local correction persistence.
@@ -83,8 +85,9 @@ source environment and again against `dist/CtrlSpeak`:
 1. Sign into **Ubuntu on Xorg** and confirm `echo "$XDG_SESSION_TYPE"` reports
    `x11` and `DISPLAY` is set.
 2. Start CtrlSpeak and verify the management window and tray menu. Confirm
-   **Manage CtrlSpeak** reopens/raises the single management window and **Quit**
-   stops the listener/tray cleanly.
+   **Manage CtrlSpeak** reopens/raises the single management window,
+   **Submit correction…** creates an immediately visible gateway rule, and
+   **Quit** stops the listener/tray cleanly.
 3. Select a real microphone, hold right Ctrl, speak, release, and confirm the
    WAV is removed from the XDG temp directory after processing.
 4. In embedded CPU mode, verify the existing `small` model downloads/loads from
@@ -114,13 +117,13 @@ source environment and again against `dist/CtrlSpeak`:
 The updater cannot be proven end to end by source-mode unit tests. Against the
 exact signed artifacts on clean Windows and Ubuntu/X11 hosts:
 
-1. Install v0.5.0 as `CtrlSpeak.exe` or `CtrlSpeak` and confirm the tray/control
-   center show 0.5.0.
-2. Publish a controlled signed v0.5.1 release with both required platform
+1. Install v0.6.0 as `CtrlSpeak.exe` or `CtrlSpeak` and confirm the tray/control
+   center show 0.6.0.
+2. Publish the controlled signed v0.6.1 release with both required platform
    artifacts and the three metadata assets.
 3. Check for the update from the GUI, inspect version/size, download, and confirm
    the UI remains responsive.
-4. Restart and verify the same stable path now reports 0.5.1 while API URL/token,
+4. Restart and verify the same stable path now reports 0.6.1 while API URL/token,
    mode, input device, models, CUDA files, and corrections remain intact.
 5. Interrupt and resume a download; confirm the final artifact hash matches the
    signed manifest.
@@ -160,7 +163,7 @@ acceptance test. Do not use its host-level guidance on an Ubuntu system.
 
 ## Companion API tests
 
-The maintained v0.6.0 role-aware service is in `server/whisper_transcription`. Its
+The maintained v0.6.1 role-aware service is in `server/whisper_transcription`. Its
 headless suite uses a fake model and does not download CUDA/model assets, bind a
 network port, restart systemd, or change a firewall:
 

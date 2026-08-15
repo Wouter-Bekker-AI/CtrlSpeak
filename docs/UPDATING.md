@@ -1,4 +1,4 @@
-# CtrlSpeak v0.6.0 update and release guide
+# CtrlSpeak v0.6.1 update and release guide
 
 ## End-user update flow
 
@@ -50,10 +50,18 @@ insertion fails, and it lowers the nearly full-scale processing-chime attack to
 a transparent -6 dBFS peak ceiling. The API contract is unchanged; the
 version-matched maintained service reports v0.5.3.
 
-v0.6.0 adds the capability-aware Nova gateway, the worker-only Ubuntu GPU
+v0.6.0 adds the capability-aware gateway role, the worker-only Ubuntu GPU
 role, identity-scoped corrections, request-scoped OpenAI BYOK, and the explicit
 GPU → OpenAI → tiny provider cascade. Server roles are deployed administratively;
-the signed desktop binary continues to update through the existing GUI.
+the signed desktop binary continues to update through the existing GUI. The
+production gateway currently runs on the dedicated OpenStack `CtrlSpeak`
+instance; Nova provides only the private WireGuard transport.
+
+v0.6.1 adds **Submit correction…** directly to the tray. The authenticated form
+creates an immediately active user-scoped gateway rule, with an explicit
+administrator-only option for a global rule. Submission runs off the Tk thread,
+validates empty or unchanged mappings, and never logs the bearer token or rule
+text.
 
 ## Trust and safety model
 
@@ -105,7 +113,7 @@ For each release:
 3. Perform the physical Windows/Ubuntu checks in `docs/TESTING.md` appropriate
    to the change.
 4. Commit and push the reviewed `v0.6` branch.
-5. Create an immutable annotated tag such as `v0.6.0` at that commit and push it.
+5. Create the immutable annotated tag `v0.6.1` at that commit and push it.
 6. Observe `.github/workflows/release.yml` through all three stages:
 
    - clean Windows/Linux tests and native one-file builds;
@@ -115,7 +123,7 @@ For each release:
 7. Independently download the five release assets and run:
 
    ```text
-   python scripts/release.py verify --directory <asset-directory> --tag v0.6.0
+   python scripts/release.py verify --directory <asset-directory> --tag v0.6.1
    ```
 
 8. Test the update from the immediately previous stable version on both

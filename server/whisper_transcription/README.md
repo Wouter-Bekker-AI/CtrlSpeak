@@ -1,11 +1,13 @@
-# CtrlSpeak transcription service v0.6.0
+# CtrlSpeak transcription service v0.6.1
 
 This directory contains both CtrlSpeak server roles:
 
-- Nova runs `CTRLSPEAK_SERVICE_ROLE=gateway` and owns client authentication,
-  routing, known words/corrections, feedback, and audit records.
+- The dedicated OpenStack `CtrlSpeak` instance runs
+  `CTRLSPEAK_SERVICE_ROLE=gateway` and owns client authentication, routing,
+  known words/corrections, feedback, and audit records.
 - The local Ubuntu GPU host runs `CTRLSPEAK_SERVICE_ROLE=worker` and exposes
   raw `large-v3-turbo` CUDA/float16 inference to the gateway over WireGuard.
+- Nova remains the WireGuard hub but does not run a CtrlSpeak server role.
 - `standalone` preserves the v0.5 combined local-model/API behavior.
 
 Runtime state, virtual environments, and credentials remain outside Git.

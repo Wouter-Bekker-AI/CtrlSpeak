@@ -1275,6 +1275,14 @@ def check_for_updates_from_tray(icon, item):
     ensure_management_ui_thread()
     enqueue_management_task(_open_and_check)
 
+
+def submit_correction_from_tray(icon, item):
+    from utils.gui import ensure_management_ui_thread, _show_correction_submission_dialog
+
+    ensure_management_ui_thread()
+    enqueue_management_task(_show_correction_submission_dialog, icon)
+
+
 def run_tray():
     global _tray_icon
     from utils.gui import ensure_management_ui_thread, run_management_ui_loop, request_management_ui_shutdown
@@ -1319,6 +1327,7 @@ def run_tray():
     menu_items = [
         pystray.MenuItem(f"CtrlSpeak {APP_VERSION}", lambda _icon, _item: None, enabled=False),
         pystray.MenuItem("Manage CtrlSpeak", open_management_dialog),
+        pystray.MenuItem("Submit correction…", submit_correction_from_tray),
         pystray.MenuItem(
             "Copy last transcript",
             copy_last_transcript_from_tray,

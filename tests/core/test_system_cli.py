@@ -81,6 +81,64 @@ def test_api_backend_hotkey_does_not_require_legacy_server():
     assert system._client_hotkey_available() is True
 
 
+def test_tray_menu_exposes_correction_submission(monkeypatch):
+    labels: list[str] = []
+    gui_calls: list[str] = []
+
+    fake_gui = types.ModuleType("utils.gui")
+    fake_gui.ensure_management_ui_thread = lambda: gui_calls.append("ensure")
+    fake_gui.run_management_ui_loop = lambda: gui_calls.append("run")
+    fake_gui.request_management_ui_shutdown = lambda: gui_calls.append("shutdown")
+    monkeypatch.setitem(sys.modules, "utils.gui", fake_gui)
+
+    fake_pystray = types.ModuleType("pystray")
+
+    def menu_item(label, *_args, **_kwargs):
+        labels.append(str(label))
+        return object()
+
+    class FakeIcon:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def run(self):
+            return None
+
+        def stop(self):
+            return None
+
+    fake_pystray.MenuItem = menu_item
+    fake_pystray.Menu = lambda *_items: object()
+    fake_pystray.Icon = FakeIcon
+    monkeypatch.setitem(sys.modules, "pystray", fake_pystray)
+    monkeypatch.setattr(system, "start_client_listener", lambda: None)
+    monkeypatch.setattr(system, "create_icon_image", lambda: None)
+
+    system.run_tray()
+
+    assert "Submit correction…" in labels
+    assert "run" in gui_calls
+
+
+def test_tray_correction_action_queues_the_dialog(monkeypatch):
+    calls: list[tuple[object, tuple[object, ...]]] = []
+    icon = object()
+    dialog = lambda _icon: None
+    fake_gui = types.ModuleType("utils.gui")
+    fake_gui.ensure_management_ui_thread = lambda: calls.append(("ensure", ()))
+    fake_gui._show_correction_submission_dialog = dialog
+    monkeypatch.setitem(sys.modules, "utils.gui", fake_gui)
+    monkeypatch.setattr(
+        system,
+        "enqueue_management_task",
+        lambda callback, *args: calls.append((callback, args)),
+    )
+
+    system.submit_correction_from_tray(icon, None)
+
+    assert calls == [("ensure", ()), (dialog, (icon,))]
+
+
 def test_acquire_single_instance_lock(tmp_path, monkeypatch):
     lock_dir = tmp_path / "cfg"
     lock_dir.mkdir()

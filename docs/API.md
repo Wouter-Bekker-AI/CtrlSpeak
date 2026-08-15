@@ -1,4 +1,4 @@
-# CtrlSpeak API v0.6.0
+# CtrlSpeak API v0.6.1
 
 The maintained implementation is in `server/whisper_transcription`. v0.6 has
 three explicit deployment roles:
@@ -10,9 +10,12 @@ three explicit deployment roles:
 - `standalone`: backward-compatible local model plus gateway API for
   development or a single trusted server.
 
-The intended production topology is a Nova `gateway` using the ordered
+The intended production topology is the dedicated OpenStack `CtrlSpeak`
+instance in `gateway` mode, using the ordered
 `ubuntu-gpu-large-v3-turbo` → `openai-gpt-transcribe` →
-`nova-tiny-whisper` strategy. The Ubuntu GPU machine is a `worker`.
+`nova-tiny-whisper` strategy. The last identifier is retained for API
+compatibility, but that CPU fallback now runs on `CtrlSpeak`, not Nova. The
+Ubuntu GPU machine is a `worker`; Nova is only the WireGuard transport hub.
 
 ## Authentication and identity
 
@@ -34,12 +37,13 @@ The legacy `WHISPER_BEARER_TOKEN` remains supported as an administrator named
 transcriptions, and feedback are isolated by that identity. Tokens are never
 returned by health, capabilities, logs, or audit metadata.
 
-The worker requires a separate `CTRLSPEAK_WORKER_TOKEN`. The Nova gateway uses
-that token when calling the worker. A client token cannot call the worker, and
-the worker token is not a client identity.
+The worker requires a separate `CTRLSPEAK_WORKER_TOKEN`. The dedicated
+CtrlSpeak gateway uses that token when calling the worker. A client token
+cannot call the worker, and the worker token is not a client identity.
 
-Use HTTPS or a trusted private VPN. The production Nova-to-Ubuntu path uses
-WireGuard; bearer tokens do not encrypt HTTP by themselves.
+Use HTTPS or a trusted private VPN. The production
+CtrlSpeak-gateway-to-Ubuntu path uses WireGuard through Nova; bearer tokens do
+not encrypt HTTP by themselves.
 
 ## Health and capabilities
 
@@ -49,7 +53,7 @@ loaded model/runtime:
 ```json
 {
   "status": "ready",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "role": "worker",
   "model": "large-v3-turbo",
   "device": "cuda",
@@ -62,7 +66,7 @@ providers permitted for the caller:
 
 ```json
 {
-  "version": "0.6.0",
+  "version": "0.6.1",
   "role": "gateway",
   "accepts_client_transcriptions": true,
   "applies_corrections": true,
@@ -244,7 +248,7 @@ binds feedback to the original transcription ID, URL, and client bearer token.
   "rule_ids": [],
   "confirmed_text": "the user-confirmed final text",
   "capture_method": "active_field_on_enter",
-  "client_metadata": {"client": "CtrlSpeak", "version": "0.6.0"}
+  "client_metadata": {"client": "CtrlSpeak", "version": "0.6.1"}
 }
 ```
 

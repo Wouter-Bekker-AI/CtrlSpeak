@@ -1,2 +1,2 @@
-# Nova gateway: CPU-only tiny fallback; no NVIDIA runtime wheels.
+# Dedicated CtrlSpeak gateway: CPU-only tiny fallback; no NVIDIA runtime wheels.
 -r requirements-base.txt

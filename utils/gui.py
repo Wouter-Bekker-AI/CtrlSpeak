@@ -91,6 +91,7 @@ from utils.update_manager import (
 # Shared UI thread root + instance ref (imported by utils.system.schedule_management_refresh)
 tk_root: Optional[tk.Tk] = None
 management_window: Optional["ManagementWindow"] = None
+correction_submission_dialog: Optional["CorrectionSubmissionDialog"] = None
 _management_thread_ident: Optional[int] = None
 _management_thread_lock = threading.Lock()
 _management_thread_ready = threading.Event()
@@ -1398,6 +1399,228 @@ def _show_management_window(icon: pystray.Icon) -> None:
         management_window.refresh_status()
         return
     management_window = ManagementWindow(icon)
+
+
+def _show_correction_submission_dialog(icon: pystray.Icon) -> None:
+    """Open, or focus, the gateway correction submission dialog."""
+    global correction_submission_dialog
+
+    if correction_submission_dialog and correction_submission_dialog.is_open():
+        correction_submission_dialog.bring_to_front()
+        return
+
+    config = get_runtime_backend_config()
+    if config.backend != "api":
+        messagebox.showinfo(
+            "Remote gateway required",
+            "Known-word corrections are submitted to a CtrlSpeak gateway. "
+            "Select Remote API in Manage CtrlSpeak and restart the application first.",
+            parent=tk_root,
+        )
+        return
+    correction_submission_dialog = CorrectionSubmissionDialog(icon, config)
+
+
+class CorrectionSubmissionDialog:
+    """Small tray-launched form for creating one authenticated correction rule."""
+
+    def __init__(self, icon: pystray.Icon, config: BackendConfig) -> None:
+        self._icon = icon
+        self._config = config
+        self._submitting = False
+        parent = (
+            management_window.window
+            if management_window is not None and management_window.is_open()
+            else tk_root
+        )
+        self.window = tk.Toplevel(parent)
+        self.window.title(f"Submit CtrlSpeak correction · v{APP_VERSION}")
+        self.window.geometry("540x360")
+        self.window.minsize(500, 330)
+        self.window.resizable(True, False)
+        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self.window.bind("<Escape>", lambda _event: self.close())
+        self.window.bind("<Return>", lambda _event: self.submit())
+        if parent is not None:
+            try:
+                self.window.transient(parent)
+            except Exception:
+                logger.debug("Unable to make the correction dialog transient", exc_info=True)
+        apply_modern_theme(self.window)
+        try:
+            _set_window_icon(self.window)
+        except Exception:
+            logger.exception("Failed to set the correction dialog icon")
+
+        self.source_var = tk.StringVar(master=self.window)
+        self.replacement_var = tk.StringVar(master=self.window)
+        self.global_scope_var = tk.BooleanVar(master=self.window, value=False)
+        self.status_var = tk.StringVar(
+            master=self.window,
+            value=f"Gateway: {config.api_url}",
+        )
+
+        container = ttk.Frame(self.window, style="Modern.TFrame", padding=(24, 22))
+        container.pack(fill=tk.BOTH, expand=True)
+        card = ttk.Frame(container, style="ModernCard.TFrame", padding=(22, 20))
+        card.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(card, text="Submit known-word correction", style="Title.TLabel").pack(
+            anchor=tk.W
+        )
+        accent = ttk.Frame(card, style="AccentLine.TFrame")
+        accent.configure(height=2)
+        accent.pack(fill=tk.X, pady=(10, 14))
+
+        ttk.Label(card, text="When CtrlSpeak hears", style="Body.TLabel").pack(anchor=tk.W)
+        self.source_entry = ttk.Entry(card, textvariable=self.source_var)
+        self.source_entry.pack(fill=tk.X, pady=(4, 12))
+
+        ttk.Label(card, text="Replace it with", style="Body.TLabel").pack(anchor=tk.W)
+        self.replacement_entry = ttk.Entry(card, textvariable=self.replacement_var)
+        self.replacement_entry.pack(fill=tk.X, pady=(4, 10))
+
+        ttk.Checkbutton(
+            card,
+            text="Apply to every gateway user (administrator only)",
+            variable=self.global_scope_var,
+        ).pack(anchor=tk.W)
+        ttk.Label(
+            card,
+            text=(
+                "Unchecked rules belong to your authenticated gateway identity. "
+                "The correction becomes active immediately after submission."
+            ),
+            style="Caption.TLabel",
+            wraplength=460,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, fill=tk.X, pady=(5, 10))
+
+        ttk.Label(
+            card,
+            textvariable=self.status_var,
+            style="Caption.TLabel",
+            wraplength=460,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, fill=tk.X)
+        buttons = ttk.Frame(card, style="ModernCardInner.TFrame")
+        buttons.pack(fill=tk.X, pady=(12, 0))
+        ttk.Button(buttons, text="Cancel", style="Subtle.TButton", command=self.close).pack(
+            side=tk.RIGHT
+        )
+        self.submit_button = ttk.Button(
+            buttons,
+            text="Submit correction",
+            style="Accent.TButton",
+            command=self.submit,
+        )
+        self.submit_button.pack(side=tk.RIGHT, padx=(0, 10))
+
+        self.window.after(80, self.bring_to_front)
+        self.window.after(120, self.source_entry.focus_set)
+
+    def is_open(self) -> bool:
+        try:
+            return bool(self.window.winfo_exists())
+        except Exception:
+            return False
+
+    def bring_to_front(self) -> None:
+        if not self.is_open():
+            return
+        try:
+            self.window.deiconify()
+            self.window.lift()
+            self.window.focus_force()
+        except Exception:
+            logger.exception("Failed to focus the correction dialog")
+
+    def submit(self) -> None:
+        if self._submitting or not self.is_open():
+            return
+        source = self.source_var.get().strip()
+        replacement = self.replacement_var.get().strip()
+        if not source:
+            messagebox.showwarning(
+                "Correction required",
+                "Enter the phrase CtrlSpeak currently produces.",
+                parent=self.window,
+            )
+            self.source_entry.focus_set()
+            return
+        if not replacement:
+            messagebox.showwarning(
+                "Replacement required",
+                "Enter the phrase CtrlSpeak should return instead.",
+                parent=self.window,
+            )
+            self.replacement_entry.focus_set()
+            return
+        if source == replacement:
+            messagebox.showwarning(
+                "No change",
+                "The replacement must differ from the phrase being corrected.",
+                parent=self.window,
+            )
+            self.replacement_entry.focus_set()
+            return
+
+        scope = "global" if self.global_scope_var.get() else "user"
+        self._submitting = True
+        self.submit_button.state(["disabled"])
+        self.status_var.set("Submitting correction…")
+
+        def worker() -> None:
+            try:
+                rule = ApiTranscriptionClient(
+                    self._config,
+                    timeout_seconds=20.0,
+                ).create_correction(source, replacement, scope=scope)
+            except Exception as exc:
+                enqueue_management_task(self._finish_submission, None, str(exc))
+                return
+            enqueue_management_task(self._finish_submission, rule, None)
+
+        threading.Thread(
+            target=worker,
+            name="ctrlspeak-correction-submit",
+            daemon=True,
+        ).start()
+
+    def _finish_submission(
+        self,
+        rule: dict[str, object] | None,
+        error: str | None,
+    ) -> None:
+        if not self.is_open():
+            return
+        self._submitting = False
+        self.submit_button.state(["!disabled"])
+        if error:
+            self.status_var.set("Correction was not saved.")
+            messagebox.showerror(
+                "Correction submission failed",
+                error,
+                parent=self.window,
+            )
+            return
+
+        rule_id = str((rule or {}).get("id") or "")
+        self.status_var.set("Correction saved and active on the gateway.")
+        logger.info("Submitted CtrlSpeak correction rule id=%s", rule_id)
+        messagebox.showinfo(
+            "Correction saved",
+            "The known-word correction is active on the CtrlSpeak gateway.",
+            parent=self.window,
+        )
+        self.source_var.set("")
+        self.replacement_var.set("")
+        self.source_entry.focus_set()
+
+    def close(self) -> None:
+        global correction_submission_dialog
+        if self.is_open():
+            self.window.destroy()
+        correction_submission_dialog = None
 
 class ManagementWindow:
     def __init__(self, icon: pystray.Icon):

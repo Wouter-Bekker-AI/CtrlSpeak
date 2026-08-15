@@ -382,6 +382,67 @@ def test_capability_probe_rejects_worker_endpoint() -> None:
         client.get_capabilities()
 
 
+def test_api_client_creates_identity_scoped_correction_rule() -> None:
+    response_payload = {
+        "id": "rule-123",
+        "source_phrase": "control speak",
+        "replacement_phrase": "CtrlSpeak",
+        "enabled": True,
+        "scope": "user",
+        "owner_id": "desktop-user",
+    }
+    session = RecordingSession(FakeResponse(201, response_payload))
+    client = ApiTranscriptionClient(
+        BackendConfig("api", "https://gateway.example.test", "client-token", "disabled"),
+        session=session,
+    )
+
+    created = client.create_correction("  control speak  ", " CtrlSpeak ")
+
+    assert created == response_payload
+    assert session.calls == [
+        {
+            "url": "https://gateway.example.test/v1/corrections",
+            "audio_bytes": None,
+            "headers": {"Authorization": "Bearer client-token"},
+            "timeout": 300.0,
+            "json": {
+                "source_phrase": "control speak",
+                "replacement_phrase": "CtrlSpeak",
+                "enabled": True,
+                "scope": "user",
+            },
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("source", "replacement", "scope", "message"),
+    [
+        ("", "CtrlSpeak", "user", "phrase to replace"),
+        ("control speak", "", "user", "replacement phrase"),
+        ("CtrlSpeak", "CtrlSpeak", "user", "must differ"),
+        ("control speak", "CtrlSpeak", "everyone", "scope"),
+    ],
+)
+def test_api_client_rejects_invalid_correction_submission(
+    source: str,
+    replacement: str,
+    scope: str,
+    message: str,
+) -> None:
+    session = RecordingSession(FakeResponse(500, {"detail": "must not be called"}))
+    client = ApiTranscriptionClient(
+        BackendConfig("api", DEFAULT_API_URL, None, "disabled"),
+        session=session,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        client.create_correction(source, replacement, scope=scope)
+
+    assert session.calls == []
+
+
 def test_bundled_transcription_records_and_applies_only_local_exact_overrides(
     tmp_path: Path,
 ) -> None:

@@ -82,7 +82,7 @@ def test_health_and_openapi_report_current_language_contract(tmp_path: Path) -> 
         "device": "fake-cuda",
         "compute_type": "fake-float16",
     }
-    assert SERVICE_VERSION == "0.6.0"
+    assert SERVICE_VERSION == "0.6.1"
     rendered = str(document)
     assert "allowed_languages" in rendered
     assert "server-enforced" in rendered
