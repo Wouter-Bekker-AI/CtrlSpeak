@@ -1,4 +1,4 @@
-# CtrlSpeak v0.6.1 testing playbook
+# CtrlSpeak v0.6.2 testing playbook
 
 Run commands from the v0.6 repository root in a project-compatible Python
 environment. The required fast suite is GUI-free and performs no model
@@ -21,6 +21,10 @@ The core marker covers:
   final-text feedback routing.
 - tray-accessible, authenticated known-word correction submission with
   user/global scope and non-blocking UI dispatch.
+- secure Windows Credential Manager persistence/forget behavior without
+  writing the OpenAI key to application settings.
+- both provider-preference cascades, single-provider routes, quota fallthrough,
+  and cached/circuit-broken fast failure for an offline Ubuntu GPU worker.
 - ordered output-language validation, settings migration, API propagation, and
   refusal of out-of-policy API responses.
 - exact-only local correction persistence.
@@ -117,13 +121,13 @@ source environment and again against `dist/CtrlSpeak`:
 The updater cannot be proven end to end by source-mode unit tests. Against the
 exact signed artifacts on clean Windows and Ubuntu/X11 hosts:
 
-1. Install v0.6.0 as `CtrlSpeak.exe` or `CtrlSpeak` and confirm the tray/control
-   center show 0.6.0.
-2. Publish the controlled signed v0.6.1 release with both required platform
+1. Install v0.6.1 as `CtrlSpeak.exe` or `CtrlSpeak` and confirm the tray/control
+   center show 0.6.1.
+2. Publish the controlled signed v0.6.2 release with both required platform
    artifacts and the three metadata assets.
 3. Check for the update from the GUI, inspect version/size, download, and confirm
    the UI remains responsive.
-4. Restart and verify the same stable path now reports 0.6.1 while API URL/token,
+4. Restart and verify the same stable path now reports 0.6.2 while API URL/token,
    mode, input device, models, CUDA files, and corrections remain intact.
 5. Interrupt and resume a download; confirm the final artifact hash matches the
    signed manifest.
@@ -163,7 +167,7 @@ acceptance test. Do not use its host-level guidance on an Ubuntu system.
 
 ## Companion API tests
 
-The maintained v0.6.1 role-aware service is in `server/whisper_transcription`. Its
+The maintained v0.6.2 role-aware service is in `server/whisper_transcription`. Its
 headless suite uses a fake model and does not download CUDA/model assets, bind a
 network port, restart systemd, or change a firewall:
 

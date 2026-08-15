@@ -1,4 +1,4 @@
-# CtrlSpeak API v0.6.1
+# CtrlSpeak API v0.6.2
 
 The maintained implementation is in `server/whisper_transcription`. v0.6 has
 three explicit deployment roles:
@@ -11,11 +11,12 @@ three explicit deployment roles:
   development or a single trusted server.
 
 The intended production topology is the dedicated OpenStack `CtrlSpeak`
-instance in `gateway` mode, using the ordered
+instance in `gateway` mode. Its default `ubuntu-gpu-preferred` strategy orders
 `ubuntu-gpu-large-v3-turbo` → `openai-gpt-transcribe` →
-`nova-tiny-whisper` strategy. The last identifier is retained for API
-compatibility, but that CPU fallback now runs on `CtrlSpeak`, not Nova. The
-Ubuntu GPU machine is a `worker`; Nova is only the WireGuard transport hub.
+`nova-tiny-whisper`; `openai-preferred` reverses the first two providers. The
+last identifier is retained for API compatibility, but that CPU fallback runs
+on `CtrlSpeak`, not Nova. The Ubuntu GPU machine is a `worker`; Nova is only
+the WireGuard transport hub.
 
 ## Authentication and identity
 
@@ -53,7 +54,7 @@ loaded model/runtime:
 ```json
 {
   "status": "ready",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "role": "worker",
   "model": "large-v3-turbo",
   "device": "cuda",
@@ -66,12 +67,12 @@ providers permitted for the caller:
 
 ```json
 {
-  "version": "0.6.1",
+  "version": "0.6.2",
   "role": "gateway",
   "accepts_client_transcriptions": true,
   "applies_corrections": true,
   "openai_key_storage": "request_only",
-  "default_strategy": "resilient-quality",
+  "default_strategy": "ubuntu-gpu-preferred",
   "providers": [
     {
       "id": "ubuntu-gpu-large-v3-turbo",
@@ -80,7 +81,10 @@ providers permitted for the caller:
       "device": "cuda",
       "status": "ready",
       "requires_credential": false,
-      "paid": false
+      "paid": false,
+      "fast_failover": true,
+      "health_cache_seconds": 5.0,
+      "circuit_break_seconds": 30.0
     },
     {
       "id": "openai-gpt-transcribe",
@@ -103,12 +107,32 @@ providers permitted for the caller:
   ],
   "strategies": [
     {
-      "id": "resilient-quality",
+      "id": "ubuntu-gpu-preferred",
       "providers": [
         "ubuntu-gpu-large-v3-turbo",
         "openai-gpt-transcribe",
         "nova-tiny-whisper"
       ]
+    },
+    {
+      "id": "openai-preferred",
+      "providers": [
+        "openai-gpt-transcribe",
+        "ubuntu-gpu-large-v3-turbo",
+        "nova-tiny-whisper"
+      ]
+    },
+    {
+      "id": "ubuntu-gpu-only",
+      "providers": ["ubuntu-gpu-large-v3-turbo"]
+    },
+    {
+      "id": "openai-only",
+      "providers": ["openai-gpt-transcribe"]
+    },
+    {
+      "id": "gateway-tiny-only",
+      "providers": ["nova-tiny-whisper"]
     }
   ]
 }
@@ -143,11 +167,13 @@ To use `openai-gpt-transcribe`, send the caller's key on that request only:
 X-CtrlSpeak-OpenAI-Key: <caller's OpenAI API key>
 ```
 
-The desktop keeps this key in process memory, does not save it to
-`settings.json`, and does not send it to the Ubuntu worker. The gateway does
-not persist it or include it in logs/audit metadata. This isolates clients from
+The Windows desktop can keep this key in the current user's Windows Credential
+Manager vault and loads it into process memory on startup. It does not save the
+key to `settings.json` or send it to the Ubuntu worker. The gateway does not
+persist it or include it in logs/audit metadata. This isolates clients from
 one another's keys; as with any proxy, the gateway administrator controls the
-process handling the request and must be trusted.
+process handling the request and must be trusted. Platforms without a
+supported native credential vault remain session-only.
 
 Example:
 
@@ -156,7 +182,7 @@ curl -H "Authorization: Bearer $CTRLSPEAK_CLIENT_TOKEN" \
   -H "X-CtrlSpeak-OpenAI-Key: $OPENAI_API_KEY" \
   -F "audio=@sample.wav" \
   -F "allowed_languages=en,af" \
-  -F "strategy=resilient-quality" \
+  -F "strategy=ubuntu-gpu-preferred" \
   https://ctrlspeak.example/v1/transcribe
 ```
 
@@ -176,7 +202,7 @@ Successful response fields are additive to v0.5:
   "applied_correction_rule_ids": [],
   "exact_override_id": null,
   "provider_used": "openai-gpt-transcribe",
-  "requested_strategy": "resilient-quality",
+  "requested_strategy": "ubuntu-gpu-preferred",
   "attempts": [
     {
       "provider": "ubuntu-gpu-large-v3-turbo",
@@ -191,11 +217,29 @@ Successful response fields are additive to v0.5:
 }
 ```
 
-The gateway falls through only on retryable availability failures. Invalid
-OpenAI credentials and exhausted credit/quota are terminal and return an
-actionable `401`, `402`, or `429` error; they do not hide the billing problem
-behind the tiny fallback. A missing per-request OpenAI key may fall through to
-the tiny provider in a resilient strategy.
+The five primary strategies are:
+
+- `ubuntu-gpu-preferred`: Ubuntu GPU → OpenAI → gateway tiny;
+- `openai-preferred`: OpenAI → Ubuntu GPU → gateway tiny;
+- `ubuntu-gpu-only`: Ubuntu GPU with no fallback;
+- `openai-only`: OpenAI with no fallback; and
+- `gateway-tiny-only`: gateway CPU tiny with no upstream provider.
+
+Explicit cascading strategies continue after both retryable availability
+failures and terminal upstream conditions such as an invalid/missing OpenAI key
+or exhausted credit. Each failure remains in `attempts`. Single-provider routes
+preserve the provider's exact actionable `401`, `402`, `429`, or availability
+error. Compatibility aliases from v0.6.0/v0.6.1 remain published.
+
+Before uploading audio to the Ubuntu worker, the gateway performs a fast health
+probe. The default health deadline is 500 ms with a 350-ms connection ceiling.
+Failure opens a 30-second circuit; requests during that window record
+`worker_circuit_open` and immediately continue to the next provider. A healthy
+probe is cached for five seconds. Operators can tune these bounded values with
+`CTRLSPEAK_WORKER_HEALTH_TIMEOUT_SECONDS`,
+`CTRLSPEAK_WORKER_CONNECT_TIMEOUT_SECONDS`,
+`CTRLSPEAK_WORKER_HEALTH_CACHE_SECONDS`, and
+`CTRLSPEAK_WORKER_CIRCUIT_BREAK_SECONDS`.
 
 ## Language enforcement
 
@@ -248,7 +292,7 @@ binds feedback to the original transcription ID, URL, and client bearer token.
   "rule_ids": [],
   "confirmed_text": "the user-confirmed final text",
   "capture_method": "active_field_on_enter",
-  "client_metadata": {"client": "CtrlSpeak", "version": "0.6.1"}
+  "client_metadata": {"client": "CtrlSpeak", "version": "0.6.2"}
 }
 ```
 

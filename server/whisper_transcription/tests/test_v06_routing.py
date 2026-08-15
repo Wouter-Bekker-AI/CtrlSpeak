@@ -5,15 +5,17 @@ import sqlite3
 from typing import Any
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from app.corrections import CorrectionStore
-from app.main import create_app
+from app.main import _build_router, create_app
 from app.providers import (
     OpenAITranscriptionProvider,
     ProviderContext,
     ProviderFailure,
     ProviderRouter,
+    RemoteWorkerProvider,
 )
 
 
@@ -191,7 +193,7 @@ def test_gateway_cascades_and_applies_identity_scoped_correction_once(tmp_path: 
     assert cloud.calls[1].openai_api_key is None
 
 
-def test_terminal_openai_quota_error_does_not_fall_through_to_tiny(tmp_path: Path) -> None:
+def test_cascading_route_falls_through_openai_quota_error_to_tiny(tmp_path: Path) -> None:
     quota = FakeProvider(
         "openai-gpt-transcribe",
         ProviderFailure(
@@ -230,9 +232,113 @@ def test_terminal_openai_quota_error_does_not_fall_through_to_tiny(tmp_path: Pat
             **audio_form(allowed_languages="en"),
         )
 
+    assert response.status_code == 200
+    assert response.json()["provider_used"] == "nova-tiny-whisper"
+    assert [item["category"] for item in response.json()["attempts"][:-1]] == [
+        "openai_quota_exhausted"
+    ]
+    assert len(tiny.calls) == 1
+
+
+def test_openai_only_preserves_terminal_quota_error(tmp_path: Path) -> None:
+    quota = FakeProvider(
+        "openai-gpt-transcribe",
+        ProviderFailure(
+            "quota",
+            category="openai_quota_exhausted",
+            retryable=False,
+            status_code=402,
+            action="Top up the supplied account.",
+        ),
+    )
+    router = ProviderRouter(
+        [quota],
+        {"openai-only": (quota.id,)},
+        default_strategy="openai-only",
+    )
+    app = create_app(
+        store=CorrectionStore(tmp_path / "gateway.sqlite3"),
+        backend=FakeBackend(),
+        router=router,
+        temp_dir=tmp_path / "uploads",
+        service_role="gateway",
+        clients_json='{"alice":"alice-token"}',
+        environ={},
+    )
+    with TestClient(app, client=("10.83.233.3", 50000)) as client:
+        response = client.post(
+            "/v1/transcribe",
+            headers={
+                "Authorization": "Bearer alice-token",
+                "X-CtrlSpeak-OpenAI-Key": "alice-openai-key",
+            },
+            **audio_form(allowed_languages="en", strategy="openai-only"),
+        )
+
     assert response.status_code == 402
     assert response.json()["detail"]["category"] == "openai_quota_exhausted"
-    assert not tiny.calls
+
+
+def test_v062_provider_routes_expose_both_preference_orders_and_only_modes() -> None:
+    router = _build_router(
+        "gateway",
+        FakeBackend(),
+        {
+            "CTRLSPEAK_WORKER_URL": "http://10.83.233.2:8765",
+            "CTRLSPEAK_WORKER_TOKEN": "worker-secret",
+        },
+    )
+
+    assert router.default_strategy == "ubuntu-gpu-preferred"
+    assert router.strategies["ubuntu-gpu-preferred"] == (
+        "ubuntu-gpu-large-v3-turbo",
+        "openai-gpt-transcribe",
+        "nova-tiny-whisper",
+    )
+    assert router.strategies["openai-preferred"] == (
+        "openai-gpt-transcribe",
+        "ubuntu-gpu-large-v3-turbo",
+        "nova-tiny-whisper",
+    )
+    assert router.strategies["ubuntu-gpu-only"] == ("ubuntu-gpu-large-v3-turbo",)
+    assert router.strategies["openai-only"] == ("openai-gpt-transcribe",)
+    assert router.strategies["gateway-tiny-only"] == ("nova-tiny-whisper",)
+
+
+def test_offline_worker_opens_circuit_and_later_requests_fail_fast(tmp_path: Path) -> None:
+    clock = [100.0]
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        raise httpx.ConnectTimeout("worker offline", request=request)
+
+    provider = RemoteWorkerProvider(
+        "ubuntu-gpu-large-v3-turbo",
+        "http://10.83.233.2:8765",
+        "worker-secret",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        monotonic=lambda: clock[0],
+        circuit_break_seconds=30,
+    )
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"RIFF-fake")
+    context = ProviderContext((), None, (), False, None)
+
+    with pytest.raises(ProviderFailure) as first:
+        provider.transcribe(audio, context)
+    with pytest.raises(ProviderFailure) as second:
+        provider.transcribe(audio, context)
+
+    assert first.value.category == "worker_unavailable"
+    assert second.value.category == "worker_circuit_open"
+    assert calls == ["/health"]
+
+    clock[0] += 31
+    with pytest.raises(ProviderFailure) as after_cooldown:
+        provider.transcribe(audio, context)
+    assert after_cooldown.value.category == "worker_unavailable"
+    assert calls == ["/health", "/health"]
 
 
 def test_openai_adapter_uses_request_key_languages_and_keywords_without_logging_them(

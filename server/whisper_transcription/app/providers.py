@@ -4,10 +4,11 @@ import json
 import logging
 import mimetypes
 import threading
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 import httpx
 
@@ -130,52 +131,144 @@ class RemoteWorkerProvider:
         token: str,
         *,
         timeout_seconds: float = 90.0,
+        connect_timeout_seconds: float = 0.35,
+        health_probe_timeout_seconds: float = 0.5,
+        health_cache_seconds: float = 5.0,
+        circuit_break_seconds: float = 30.0,
         client: httpx.Client | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
+        for name, value in {
+            "timeout_seconds": timeout_seconds,
+            "connect_timeout_seconds": connect_timeout_seconds,
+            "health_probe_timeout_seconds": health_probe_timeout_seconds,
+            "health_cache_seconds": health_cache_seconds,
+            "circuit_break_seconds": circuit_break_seconds,
+        }.items():
+            if value <= 0:
+                raise ValueError(f"{name} must be positive")
         self.id = provider_id
         self.base_url = base_url.rstrip("/")
         self._token = token
         self.timeout_seconds = timeout_seconds
+        self.connect_timeout_seconds = connect_timeout_seconds
+        self.health_probe_timeout_seconds = health_probe_timeout_seconds
+        self.health_cache_seconds = health_cache_seconds
+        self.circuit_break_seconds = circuit_break_seconds
         self._client = client
+        self._monotonic = monotonic
+        self._state_lock = threading.Lock()
+        self._probe_lock = threading.Lock()
+        self._healthy_until = 0.0
+        self._circuit_open_until = 0.0
+        self._worker_metadata = {
+            "model": "large-v3-turbo",
+            "device": "cuda",
+            "compute_type": "float16",
+        }
 
     def _client_context(self):
         if self._client is not None:
             return nullcontext(self._client)
         return httpx.Client(timeout=self.timeout_seconds)
 
-    def describe(self) -> dict[str, Any]:
-        status = "configured"
-        model, device, compute_type = "large-v3-turbo", "cuda", "float16"
-        try:
-            with self._client_context() as client:
-                response = client.get(
-                    f"{self.base_url}/health",
-                    headers={"Authorization": f"Bearer {self._token}"},
-                    timeout=min(self.timeout_seconds, 3.0),
+    def _mark_ready(self, payload: dict[str, Any] | None = None) -> None:
+        now = self._monotonic()
+        with self._state_lock:
+            self._healthy_until = now + self.health_cache_seconds
+            self._circuit_open_until = 0.0
+            if payload:
+                for key in ("model", "device", "compute_type"):
+                    if payload.get(key):
+                        self._worker_metadata[key] = str(payload[key])
+
+    def _mark_unavailable(self) -> None:
+        now = self._monotonic()
+        with self._state_lock:
+            self._healthy_until = 0.0
+            self._circuit_open_until = now + self.circuit_break_seconds
+
+    @staticmethod
+    def _circuit_failure() -> ProviderFailure:
+        return ProviderFailure(
+            "GPU worker is temporarily bypassed after a recent health failure",
+            category="worker_circuit_open",
+            retryable=True,
+            action="CtrlSpeak will probe the Ubuntu GPU worker again automatically.",
+        )
+
+    def _state_is_usable(self) -> bool:
+        now = self._monotonic()
+        with self._state_lock:
+            if now < self._circuit_open_until:
+                raise self._circuit_failure()
+            return now < self._healthy_until
+
+    def _ensure_available(self) -> None:
+        if self._state_is_usable():
+            return
+        # Serialize the small probe and re-check after waiting so simultaneous
+        # requests do not all test a known-offline worker.
+        with self._probe_lock:
+            if self._state_is_usable():
+                return
+            timeout = httpx.Timeout(
+                self.health_probe_timeout_seconds,
+                connect=min(
+                    self.connect_timeout_seconds,
+                    self.health_probe_timeout_seconds,
+                ),
+            )
+            try:
+                with self._client_context() as client:
+                    response = client.get(
+                        f"{self.base_url}/health",
+                        headers={"Authorization": f"Bearer {self._token}"},
+                        timeout=timeout,
+                    )
+            except httpx.RequestError as exc:
+                self._mark_unavailable()
+                raise ProviderFailure(
+                    "GPU worker failed its fast health probe",
+                    category="worker_unavailable",
+                    retryable=True,
+                ) from exc
+            if response.status_code != 200:
+                self._mark_unavailable()
+                raise ProviderFailure(
+                    "GPU worker failed its fast health probe",
+                    category="worker_unavailable",
+                    retryable=True,
                 )
-            if response.status_code == 200:
-                payload = response.json()
-                status = str(payload.get("status") or "ready")
-                model = str(payload.get("model") or model)
-                device = str(payload.get("device") or device)
-                compute_type = str(payload.get("compute_type") or compute_type)
-            else:
-                status = "unavailable"
-        except Exception:
-            status = "unavailable"
+            try:
+                payload = dict(response.json())
+            except (ValueError, TypeError):
+                payload = {}
+            self._mark_ready(payload)
+
+    def describe(self) -> dict[str, Any]:
+        try:
+            self._ensure_available()
+            status = "ready"
+        except ProviderFailure as exc:
+            status = "circuit_open" if exc.category == "worker_circuit_open" else "unavailable"
+        with self._state_lock:
+            metadata = dict(self._worker_metadata)
         return {
             "id": self.id,
             "kind": "ctrlspeak_worker",
-            "model": model,
-            "device": device,
-            "compute_type": compute_type,
+            **metadata,
             "status": status,
             "quality": "high",
             "requires_credential": False,
             "paid": False,
+            "fast_failover": True,
+            "health_cache_seconds": self.health_cache_seconds,
+            "circuit_break_seconds": self.circuit_break_seconds,
         }
 
     def transcribe(self, audio_path: Path, context: ProviderContext) -> dict[str, Any]:
+        self._ensure_available()
         data: dict[str, str] = {
             "allowed_languages": ",".join(context.allowed_languages),
             "word_timestamps": str(context.word_timestamps).lower(),
@@ -191,15 +284,21 @@ class RemoteWorkerProvider:
                     headers={"Authorization": f"Bearer {self._token}"},
                     data=data,
                     files={"audio": (audio_path.name, handle, content_type)},
-                    timeout=self.timeout_seconds,
+                    timeout=httpx.Timeout(
+                        self.timeout_seconds,
+                        connect=self.connect_timeout_seconds,
+                    ),
                 )
         except httpx.RequestError as exc:
+            self._mark_unavailable()
             raise ProviderFailure(
                 "GPU worker is unreachable",
                 category="worker_unavailable",
                 retryable=True,
             ) from exc
         if response.status_code != 200:
+            if response.status_code == 401 or response.status_code >= 500:
+                self._mark_unavailable()
             raise ProviderFailure(
                 "GPU worker rejected the transcription request",
                 category="worker_error",
@@ -207,7 +306,7 @@ class RemoteWorkerProvider:
                 status_code=502,
             )
         try:
-            return dict(response.json())
+            result = dict(response.json())
         except (ValueError, TypeError) as exc:
             raise ProviderFailure(
                 "GPU worker returned an invalid response",
@@ -215,6 +314,8 @@ class RemoteWorkerProvider:
                 retryable=True,
                 status_code=502,
             ) from exc
+        self._mark_ready()
+        return result
 
 
 class OpenAITranscriptionProvider:
@@ -444,7 +545,11 @@ class ProviderRouter:
                 return RoutedResult(result, current_id, tuple(attempts), len(attempts) > 1)
             except ProviderFailure as exc:
                 attempts.append(exc.public_dict(current_id))
-                if not exc.retryable:
+                # A named single-provider route preserves the provider's exact
+                # terminal error.  Cascading strategies are explicit user
+                # consent to try the next provider even for credential/quota
+                # failures, while still recording the cause in ``attempts``.
+                if not exc.retryable and len(chain) == 1:
                     exc.attempts = attempts  # type: ignore[attr-defined]
                     raise
         failure = ProviderFailure(

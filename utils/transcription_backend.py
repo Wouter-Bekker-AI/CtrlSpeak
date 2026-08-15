@@ -12,6 +12,13 @@ from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from utils import config_paths
+from utils.credential_store import (
+    CredentialStorageError,
+    delete_openai_api_key,
+    load_openai_api_key,
+    save_openai_api_key,
+    secure_storage_available,
+)
 from utils.languages import language_policy_display, normalize_allowed_output_languages
 
 
@@ -71,13 +78,45 @@ _session_openai_api_key: str | None = None
 
 
 def set_session_openai_api_key(value: str | None) -> None:
-    """Keep the caller's OpenAI key in this process only; never write it to settings."""
+    """Set the caller's OpenAI key in memory without writing it to settings."""
     global _session_openai_api_key
     _session_openai_api_key = value.strip() if value and value.strip() else None
 
 
+def get_session_openai_api_key() -> str | None:
+    return _session_openai_api_key
+
+
 def has_session_openai_api_key() -> bool:
     return bool(_session_openai_api_key)
+
+
+def initialize_openai_api_key_from_secure_storage() -> bool:
+    """Load the user-scoped native credential once during application startup."""
+    value = load_openai_api_key()
+    set_session_openai_api_key(value)
+    return bool(value)
+
+
+def persist_openai_api_key(value: str | None, *, remember: bool) -> None:
+    """Apply a key to this process and update native storage as requested."""
+    normalized = value.strip() if value and value.strip() else None
+    set_session_openai_api_key(normalized)
+    if not secure_storage_available():
+        if remember and normalized:
+            raise CredentialStorageError(
+                "Secure credential storage is unavailable on this platform"
+            )
+        return
+    if remember and normalized:
+        save_openai_api_key(normalized)
+    else:
+        delete_openai_api_key()
+
+
+def forget_openai_api_key() -> None:
+    set_session_openai_api_key(None)
+    delete_openai_api_key()
 
 
 def backend_display_name(backend: str) -> str:

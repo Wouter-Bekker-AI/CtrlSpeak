@@ -128,6 +128,7 @@ def main(argv: list[str]) -> int:
         BackendPersistenceError,
         activate_runtime_backend_config,
         get_backend_config,
+        initialize_openai_api_key_from_secure_storage,
         uses_bundled_runtime,
     )
     try:
@@ -138,6 +139,16 @@ def main(argv: list[str]) -> int:
     except (ValueError, BackendPersistenceError) as exc:
         _report_invalid_backend_configuration(exc)
         return 2
+
+    try:
+        key_loaded = initialize_openai_api_key_from_secure_storage()
+        logger.info(
+            "Secure OpenAI credential status: %s",
+            "loaded" if key_loaded else "not configured",
+        )
+    except Exception:
+        # A native credential-store problem must not stop private/local routes.
+        logger.exception("Unable to load the secure OpenAI credential")
 
     bundled_runtime = uses_bundled_runtime(backend_config)
     logger.info("Selected transcription backend: %s", backend_config.backend)

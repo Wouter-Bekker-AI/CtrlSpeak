@@ -22,6 +22,7 @@
     <category>Accessibility</category>
   </categories>
   <releases>
+    <release version="0.6.2" date="2026-08-15" />
     <release version="0.6.1" date="2026-08-15" />
     <release version="0.6.0" date="2026-08-14" />
     <release version="0.5.3" date="2026-08-14" />

@@ -1,4 +1,4 @@
-# CtrlSpeak v0.6.1 user flow
+# CtrlSpeak v0.6.2 user flow
 
 ## 1. Launch and platform readiness
 
@@ -40,8 +40,11 @@ All persistent data is below `$XDG_CONFIG_HOME/CtrlSpeak` or
    directly. No LAN address is hardcoded.
 3. **Check gateway** reads authenticated capabilities, rejects a worker-only
    endpoint, and populates the gateway's published provider strategies.
-4. An optional OpenAI key stays only in the desktop process. It is sent on each
-   transcription request and is never written to settings.
+4. An optional OpenAI key may be stored for the current Windows user in Windows
+   Credential Manager and is loaded into the desktop process at startup. It is
+   sent on each relevant request but never written to `settings.json`, retained
+   by the gateway, or sent to the Ubuntu worker. Unsupported platforms remain
+   session-only.
 
 ## 3. Recording
 
@@ -77,9 +80,13 @@ authentication, network, or schema errors are shown and never trigger embedded
 fallback.
 
 The gateway may use its selected published cascade. `provider_used`, `attempts`,
-and `degraded` make that routing visible. The default production cascade is the
-Ubuntu GPU worker, then OpenAI with the caller's key, then the gateway's tiny CPU
-fallback. OpenAI key/quota errors remain terminal and actionable.
+and `degraded` make that routing visible. The default `ubuntu-gpu-preferred`
+route is Ubuntu GPU, then OpenAI with the caller's key, then gateway tiny.
+`openai-preferred` reverses the first two; Ubuntu-only, OpenAI-only, and
+gateway-tiny-only routes are also available. Cascades continue after quota/key
+failures and record them; single-provider routes return them. An offline Ubuntu
+worker is probed within 500 ms and then bypassed through a 30-second circuit
+instead of delaying every request.
 
 When configured, the ordered language policy is sent as the multipart
 `allowed_languages` field. The maintained server validates and enforces

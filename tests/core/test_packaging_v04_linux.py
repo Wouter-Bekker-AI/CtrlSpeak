@@ -28,7 +28,7 @@ def test_v05_pyinstaller_spec_uses_stable_artifact_and_platform_adapters() -> No
     assert "pynput._util.xorg" in spec
     assert "pynput.keyboard._xorg" in spec
     assert "pynput.mouse._xorg" in spec
-    assert system.APP_VERSION == "0.6.1"
+    assert system.APP_VERSION == "0.6.2"
 
 
 def test_build_helper_routes_windows_and_linux_to_v06_spec() -> None:
@@ -67,7 +67,7 @@ def test_desktop_launcher_template_and_appstream_metadata_are_consistent() -> No
     assert launchable.text == "ctrlspeak.desktop"
     release = component.find("releases/release")
     assert release is not None
-    assert release.attrib["version"] == "0.6.1"
+    assert release.attrib["version"] == "0.6.2"
 
     assert icon_path.is_file()
     assert icon_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")

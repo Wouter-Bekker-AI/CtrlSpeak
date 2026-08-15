@@ -1,4 +1,4 @@
-# CtrlSpeak transcription service v0.6.1
+# CtrlSpeak transcription service v0.6.2
 
 This directory contains both CtrlSpeak server roles:
 
@@ -69,7 +69,11 @@ Environment=WHISPER_PORT=8765
 Environment=CTRLSPEAK_CLIENTS_JSON={"wouter":{"token":"replace-client-token","admin":true,"providers":["*"]}}
 Environment=CTRLSPEAK_WORKER_URL=http://10.83.233.2:8765
 Environment=CTRLSPEAK_WORKER_TOKEN=replace-with-the-worker-secret
-Environment=CTRLSPEAK_DEFAULT_STRATEGY=resilient-quality
+Environment=CTRLSPEAK_DEFAULT_STRATEGY=ubuntu-gpu-preferred
+Environment=CTRLSPEAK_WORKER_CONNECT_TIMEOUT_SECONDS=0.35
+Environment=CTRLSPEAK_WORKER_HEALTH_TIMEOUT_SECONDS=0.5
+Environment=CTRLSPEAK_WORKER_HEALTH_CACHE_SECONDS=5
+Environment=CTRLSPEAK_WORKER_CIRCUIT_BREAK_SECONDS=30
 Environment=CTRLSPEAK_FALLBACK_MODEL=tiny
 Environment=CTRLSPEAK_FALLBACK_COMPUTE_TYPE=int8
 Environment=CTRLSPEAK_FALLBACK_CPU_THREADS=2
@@ -81,8 +85,17 @@ server-owned OpenAI key. The client supplies its own key on an individual
 request and the gateway keeps it only for that call.
 
 The default quality cascade is Ubuntu GPU → OpenAI `gpt-transcribe` with the
-caller's key → local CPU `tiny`. Invalid keys and exhausted OpenAI quota are
-terminal; retryable availability failures may fall through.
+caller's key → local CPU `tiny`. `openai-preferred` reverses the first two;
+`ubuntu-gpu-only`, `openai-only`, and `gateway-tiny-only` disable fallback.
+Cascading routes continue after unavailable providers, invalid/missing OpenAI
+keys, and exhausted quota while preserving those failures in response
+metadata. Single-provider routes return the exact provider error.
+
+The worker health probe has a 500-ms total deadline and 350-ms connection
+ceiling by default. A failed probe opens a 30-second circuit so later requests
+fail over immediately; a healthy result is cached for five seconds. The long
+provider timeout applies only after a worker connection has been established
+for actual inference.
 
 Install/reload the user unit:
 

@@ -69,13 +69,17 @@ from utils.transcription_backend import (
     ApiTranscriptionClient,
     BackendConfig,
     BackendPersistenceError,
+    CredentialStorageError,
     backend_display_name,
     backend_from_display_name,
+    forget_openai_api_key,
     get_backend_config,
     get_backend_status,
     get_runtime_backend_config,
+    get_session_openai_api_key,
+    persist_openai_api_key,
     save_backend_config,
-    set_session_openai_api_key,
+    secure_storage_available,
 )
 from utils.languages import language_choices
 from utils.update_helper import prepare_update_handoff
@@ -1719,7 +1723,11 @@ class ManagementWindow:
         self.api_token_var = tk.StringVar(value=str(saved_token) if saved_token else "")
         self.feedback_capture_var = tk.StringVar(value=active_backend.feedback_capture_method)
         self.provider_strategy_var = tk.StringVar(value=active_backend.provider_strategy)
-        self.openai_api_key_var = tk.StringVar(value="")
+        self.openai_api_key_var = tk.StringVar(value=get_session_openai_api_key() or "")
+        self._secure_key_storage_available = secure_storage_available()
+        self.remember_openai_key_var = tk.BooleanVar(
+            value=self._secure_key_storage_available
+        )
 
         backend_row = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
         backend_row.pack(fill=tk.X, pady=(8, 6))
@@ -1820,10 +1828,31 @@ class ManagementWindow:
         ttk.Entry(openai_row, textvariable=self.openai_api_key_var, show="*").pack(
             side=tk.LEFT, fill=tk.X, expand=True
         )
+        self.forget_openai_key_button = ttk.Button(
+            openai_row,
+            text="Forget key",
+            style="Subtle.TButton",
+            command=self._forget_openai_key,
+        )
+        self.forget_openai_key_button.pack(side=tk.LEFT, padx=(12, 0))
+        remember_key = ttk.Checkbutton(
+            backend_card,
+            text="Remember securely on this computer",
+            variable=self.remember_openai_key_var,
+        )
+        remember_key.pack(anchor=tk.W, pady=(0, 4))
+        if not self._secure_key_storage_available:
+            remember_key.state(["disabled"])
         ttk.Label(
             backend_card,
-            text=("The OpenAI key stays only in this CtrlSpeak process and is sent per "
-                  "transcription; it is never saved."),
+            text=(
+                "On Windows, the key is stored in your user-scoped Credential Manager "
+                "vault when remembering is enabled. It is never written to settings.json "
+                "or retained by the gateway, and is sent only for transcription requests."
+                if self._secure_key_storage_available
+                else "Secure native key storage is unavailable here; the OpenAI key "
+                     "will remain in this CtrlSpeak process only."
+            ),
             style="Caption.TLabel",
             wraplength=520,
             justify=tk.LEFT,
@@ -2604,7 +2633,14 @@ class ManagementWindow:
             messagebox.showerror("Backend settings not saved", str(exc), parent=self.window)
             return
 
-        set_session_openai_api_key(self.openai_api_key_var.get())
+        try:
+            persist_openai_api_key(
+                self.openai_api_key_var.get(),
+                remember=self.remember_openai_key_var.get(),
+            )
+        except CredentialStorageError as exc:
+            messagebox.showerror("OpenAI key not saved", str(exc), parent=self.window)
+            return
 
         active = get_runtime_backend_config()
         effective = get_backend_config()
@@ -2622,6 +2658,26 @@ class ManagementWindow:
         if effective != saved:
             message += " Environment variables currently override one or more saved values."
         messagebox.showinfo("Backend settings saved", message, parent=self.window)
+
+    def _forget_openai_key(self) -> None:
+        if not messagebox.askyesno(
+            "Forget OpenAI API key",
+            "Remove the saved OpenAI key from this computer and from the running session?",
+            parent=self.window,
+        ):
+            return
+        try:
+            forget_openai_api_key()
+        except CredentialStorageError as exc:
+            messagebox.showerror("OpenAI key not removed", str(exc), parent=self.window)
+            return
+        self.openai_api_key_var.set("")
+        self.remember_openai_key_var.set(False)
+        messagebox.showinfo(
+            "OpenAI key removed",
+            "The OpenAI key is no longer stored or active in CtrlSpeak.",
+            parent=self.window,
+        )
 
     def _refresh_gateway_capabilities(self) -> None:
         api_url = self.api_url_var.get().strip()

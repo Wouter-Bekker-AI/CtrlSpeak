@@ -1,4 +1,4 @@
-# CtrlSpeak v0.6.1 update and release guide
+# CtrlSpeak v0.6.2 update and release guide
 
 ## End-user update flow
 
@@ -63,6 +63,13 @@ administrator-only option for a global rule. Submission runs off the Tk thread,
 validates empty or unchanged mappings, and never logs the bearer token or rule
 text.
 
+v0.6.2 adds explicit Ubuntu-GPU-preferred and OpenAI-preferred cascades,
+provider-only routes, and bounded fast failover through a cached Ubuntu worker
+health check and circuit breaker. Cascading routes may continue after OpenAI
+key/quota failures while single-provider routes preserve the exact error. The
+Windows client can remember the user's OpenAI key in Windows Credential Manager
+without adding it to settings, releases, logs, or the gateway.
+
 ## Trust and safety model
 
 The standard client hard-codes:
@@ -113,7 +120,7 @@ For each release:
 3. Perform the physical Windows/Ubuntu checks in `docs/TESTING.md` appropriate
    to the change.
 4. Commit and push the reviewed `v0.6` branch.
-5. Create the immutable annotated tag `v0.6.1` at that commit and push it.
+5. Create the immutable annotated tag `v0.6.2` at that commit and push it.
 6. Observe `.github/workflows/release.yml` through all three stages:
 
    - clean Windows/Linux tests and native one-file builds;
@@ -123,7 +130,7 @@ For each release:
 7. Independently download the five release assets and run:
 
    ```text
-   python scripts/release.py verify --directory <asset-directory> --tag v0.6.1
+   python scripts/release.py verify --directory <asset-directory> --tag v0.6.2
    ```
 
 8. Test the update from the immediately previous stable version on both

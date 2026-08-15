@@ -1,4 +1,4 @@
-# CtrlSpeak v0.6.1
+# CtrlSpeak v0.6.2
 
 CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into
@@ -18,6 +18,27 @@ dedicated GPU worker role:
 The legacy **Client + Server** and **Client Only** roles remain inside the
 embedded/local backend. Remote API mode is independent of those roles and does
 not start discovery, a local server, or a model download.
+
+## v0.6.2 routing and credential patch
+
+The gateway now publishes separate `ubuntu-gpu-preferred` and
+`openai-preferred` cascades, plus `ubuntu-gpu-only`, `openai-only`, and
+`gateway-tiny-only`. Cascades continue to the next provider when an upstream
+is offline, rejects a key, or has no available credit; the failed attempt and
+reason remain visible in response metadata. Single-provider routes return that
+provider's exact error without falling through.
+
+The Ubuntu worker uses a 500-ms health probe with a 350-ms connection ceiling.
+A failed probe opens a 30-second circuit, so subsequent recordings bypass the
+offline worker immediately instead of repeating a slow connection attempt.
+Healthy results are cached briefly and a successful transcription closes the
+circuit.
+
+On Windows, **Remember securely on this computer** saves the OpenAI key in the
+current user's Windows Credential Manager vault. CtrlSpeak loads it on future
+starts and provides **Forget key** to remove it. The key is never written to
+`settings.json`, stored by the gateway, sent to the Ubuntu worker, or included
+in logs. Platforms without a supported native vault remain session-only.
 
 ## v0.6.1 correction submission patch
 
@@ -47,16 +68,19 @@ The production layout separates responsibility:
 - the existing Nova instance remains the WireGuard transport hub only. It no
   longer runs the CtrlSpeak application gateway.
 
-The default `resilient-quality` cascade is Ubuntu GPU → OpenAI → gateway tiny.
-Responses state which provider ran, which attempts failed, and whether the
-result is degraded. Invalid OpenAI credentials and exhausted credit/quota are
-returned as terminal, actionable errors instead of being hidden by fallback.
+The default `ubuntu-gpu-preferred` cascade is Ubuntu GPU → OpenAI → gateway
+tiny. `openai-preferred` reverses the first two providers. Cascading routes
+continue after unavailable GPU, invalid/missing OpenAI key, or exhausted
+OpenAI credit; responses state which provider ran, which attempts failed, and
+whether the result is degraded. The `ubuntu-gpu-only` and `openai-only` routes
+do not fall through.
 
-The OpenAI key entered in the control center exists only in the running desktop
-process. It is never written to `settings.json`, packaged into the executable,
-stored by the gateway, or sent to the Ubuntu worker. It is attached only to
-individual gateway transcription requests. The gateway must still be trusted
-because its process handles the request transiently.
+The OpenAI key entered in the control center may be stored in Windows
+Credential Manager for the current Windows user. It is never written to
+`settings.json`, packaged into the executable, stored by the gateway, or sent
+to the Ubuntu worker. It is attached only to individual gateway transcription
+requests. The gateway must still be trusted because its process handles the
+request transiently.
 
 ## v0.5.3 quality-of-life patch
 
@@ -111,8 +135,8 @@ artifact. It verifies the Ed25519 manifest signature, declared byte length, and
 SHA-256 before asking to restart. A copied external helper atomically replaces
 the executable, waits for a health receipt from the new version, and restores
 the previous verified executable automatically if startup fails. Settings,
-models, CUDA files, logs, API credentials, and local corrections stay in the
-per-user CtrlSpeak data directory and are not replaced.
+models, CUDA files, logs, native credential-vault entries, and local
+corrections are not replaced.
 
 A source checkout may check which release is published, but it cannot overwrite
 itself with a release binary. Update source checkouts through Git. v0.4 and
@@ -231,7 +255,7 @@ is hardcoded. API mode calls:
 
 When output languages are configured, the request includes an ordered
 comma-separated `allowed_languages` multipart field such as `en` or `en,af`.
-The maintained v0.6.1 gateway validates a maximum of five codes, forces one of
+The maintained v0.6.2 gateway validates a maximum of five codes, forces one of
 them, uses the first as a fallback, and refuses to return a reported language
 outside the list. Omitting the field preserves automatic detection. The legacy
 single `language` field is still accepted by the server.
@@ -256,7 +280,7 @@ export CTRLSPEAK_BACKEND=api
 export CTRLSPEAK_API_URL=https://whisper.example.test/base
 export CTRLSPEAK_API_TOKEN='...'
 export CTRLSPEAK_OUTPUT_LANGUAGES=en,af
-export CTRLSPEAK_PROVIDER_STRATEGY=resilient-quality
+export CTRLSPEAK_PROVIDER_STRATEGY=ubuntu-gpu-preferred
 python main.py
 ```
 

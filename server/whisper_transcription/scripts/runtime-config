@@ -111,6 +111,15 @@ whisper_print_runtime_config() {
   else
     printf 'worker_url=not-configured\n'
   fi
+  printf 'default_strategy=%s\n' "${CTRLSPEAK_DEFAULT_STRATEGY:-ubuntu-gpu-preferred}"
+  printf 'worker_connect_timeout_seconds=%s\n' \
+    "${CTRLSPEAK_WORKER_CONNECT_TIMEOUT_SECONDS:-0.35}"
+  printf 'worker_health_timeout_seconds=%s\n' \
+    "${CTRLSPEAK_WORKER_HEALTH_TIMEOUT_SECONDS:-0.5}"
+  printf 'worker_health_cache_seconds=%s\n' \
+    "${CTRLSPEAK_WORKER_HEALTH_CACHE_SECONDS:-5}"
+  printf 'worker_circuit_break_seconds=%s\n' \
+    "${CTRLSPEAK_WORKER_CIRCUIT_BREAK_SECONDS:-30}"
 }
 
 if [ "${0##*/}" = "runtime-config" ]; then

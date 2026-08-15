@@ -24,6 +24,11 @@ def _run_shell(command: str, **environment: str) -> subprocess.CompletedProcess[
         "CTRLSPEAK_CLIENTS_JSON",
         "CTRLSPEAK_WORKER_URL",
         "CTRLSPEAK_WORKER_TOKEN",
+        "CTRLSPEAK_DEFAULT_STRATEGY",
+        "CTRLSPEAK_WORKER_CONNECT_TIMEOUT_SECONDS",
+        "CTRLSPEAK_WORKER_HEALTH_TIMEOUT_SECONDS",
+        "CTRLSPEAK_WORKER_HEALTH_CACHE_SECONDS",
+        "CTRLSPEAK_WORKER_CIRCUIT_BREAK_SECONDS",
     ):
         env.pop(key, None)
     env.update(environment)
@@ -137,3 +142,14 @@ def test_runtime_summary_reports_secret_presence_without_values() -> None:
     assert "worker_token=configured" in result.stdout
     assert "worker_url=configured" in result.stdout
     assert "never-print" not in result.stdout
+
+
+def test_runtime_summary_reports_fast_failover_defaults() -> None:
+    result = _run_shell("whisper_print_runtime_config")
+
+    assert result.returncode == 0
+    assert "default_strategy=ubuntu-gpu-preferred" in result.stdout
+    assert "worker_connect_timeout_seconds=0.35" in result.stdout
+    assert "worker_health_timeout_seconds=0.5" in result.stdout
+    assert "worker_health_cache_seconds=5" in result.stdout
+    assert "worker_circuit_break_seconds=30" in result.stdout

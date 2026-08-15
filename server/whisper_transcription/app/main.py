@@ -28,7 +28,7 @@ from app.providers import (
 )
 
 
-SERVICE_VERSION = "0.6.1"
+SERVICE_VERSION = "0.6.2"
 LOGGER = logging.getLogger("ctrlspeak_whisper_transcription")
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = Path(os.environ.get("WHISPER_DATA_DIR", ROOT / "data"))
@@ -277,7 +277,7 @@ def _build_router(role: str, backend: Backend, environ: Mapping[str, str]) -> Pr
         raise ValueError("a provider router is only valid for gateway or standalone roles")
 
     providers: list[Any] = []
-    quality_chain: list[str] = []
+    worker: RemoteWorkerProvider | None = None
     worker_url = (environ.get("CTRLSPEAK_WORKER_URL") or "").strip()
     worker_token = (environ.get("CTRLSPEAK_WORKER_TOKEN") or "").strip()
     if bool(worker_url) != bool(worker_token):
@@ -288,9 +288,20 @@ def _build_router(role: str, backend: Backend, environ: Mapping[str, str]) -> Pr
             worker_url,
             worker_token,
             timeout_seconds=float(environ.get("CTRLSPEAK_PROVIDER_TIMEOUT_SECONDS", "90")),
+            connect_timeout_seconds=float(
+                environ.get("CTRLSPEAK_WORKER_CONNECT_TIMEOUT_SECONDS", "0.35")
+            ),
+            health_probe_timeout_seconds=float(
+                environ.get("CTRLSPEAK_WORKER_HEALTH_TIMEOUT_SECONDS", "0.5")
+            ),
+            health_cache_seconds=float(
+                environ.get("CTRLSPEAK_WORKER_HEALTH_CACHE_SECONDS", "5")
+            ),
+            circuit_break_seconds=float(
+                environ.get("CTRLSPEAK_WORKER_CIRCUIT_BREAK_SECONDS", "30")
+            ),
         )
         providers.append(worker)
-        quality_chain.append(worker.id)
 
     openai = OpenAITranscriptionProvider(
         model=(environ.get("CTRLSPEAK_OPENAI_TRANSCRIBE_MODEL") or "gpt-transcribe").strip(),
@@ -298,17 +309,28 @@ def _build_router(role: str, backend: Backend, environ: Mapping[str, str]) -> Pr
     )
     fallback = LocalWhisperProvider("nova-tiny-whisper", backend, lazy=True)
     providers.extend([openai, fallback])
-    quality_chain.extend([openai.id, fallback.id])
+    worker_ids = [worker.id] if worker is not None else []
+    ubuntu_first = tuple([*worker_ids, openai.id, fallback.id])
+    openai_first = tuple([openai.id, *worker_ids, fallback.id])
+    private_first = tuple([*worker_ids, fallback.id])
+    strategies: dict[str, tuple[str, ...]] = {
+        "ubuntu-gpu-preferred": ubuntu_first,
+        "openai-preferred": openai_first,
+        "openai-only": (openai.id,),
+        "gateway-tiny-only": (fallback.id,),
+        # Compatibility aliases retained for existing v0.6.0/v0.6.1 clients.
+        "resilient-quality": ubuntu_first,
+        "private-first": private_first,
+        "openai-then-local": (openai.id, fallback.id),
+        "local-fallback-only": (fallback.id,),
+    }
+    if worker is not None:
+        strategies["ubuntu-gpu-only"] = (worker.id,)
     return ProviderRouter(
         providers,
-        {
-            "resilient-quality": tuple(quality_chain),
-            "private-first": tuple(item for item in quality_chain if item != openai.id),
-            "openai-then-local": (openai.id, fallback.id),
-            "local-fallback-only": (fallback.id,),
-        },
+        strategies,
         default_strategy=(
-            environ.get("CTRLSPEAK_DEFAULT_STRATEGY") or "resilient-quality"
+            environ.get("CTRLSPEAK_DEFAULT_STRATEGY") or "ubuntu-gpu-preferred"
         ).strip(),
     )
 
