@@ -1,4 +1,4 @@
-# CtrlSpeak transcription service v0.7.1
+# CtrlSpeak transcription service v0.7.2
 
 This directory contains both CtrlSpeak server roles:
 
@@ -11,6 +11,10 @@ This directory contains both CtrlSpeak server roles:
 - `standalone` preserves the v0.5 combined local-model/API behavior.
 
 Runtime state, virtual environments, and credentials remain outside Git.
+
+v0.7.2 synchronizes the service identity with the desktop quick-panel
+dismissal hotfix. The server roles, API schema, provider cascade, authentication,
+correction store, language policy, and deployment configuration are unchanged.
 
 ## Install profiles
 

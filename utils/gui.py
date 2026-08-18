@@ -1540,7 +1540,7 @@ def _show_correction_submission_dialog(icon: pystray.Icon) -> None:
         messagebox.showinfo(
             "Remote gateway required",
             "Known-word corrections are submitted to a CtrlSpeak gateway. "
-            "Select Remote API in Manage CtrlSpeak and restart the application first.",
+            "Select Remote API in Open control centre and restart the application first.",
             parent=tk_root,
         )
         return

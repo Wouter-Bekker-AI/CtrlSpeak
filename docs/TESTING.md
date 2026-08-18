@@ -1,4 +1,4 @@
-# CtrlSpeak v0.7.1 Midnight Signal testing playbook
+# CtrlSpeak v0.7.2 Midnight Signal testing playbook
 
 Run commands from the v0.7 repository root in a project-compatible Python
 environment. The required fast suite is GUI-free and performs no model
@@ -58,6 +58,8 @@ python -m pytest -q tests/core/test_config_paths.py
 python -m pytest -q tests/core/test_transcription_backend.py
 python -m pytest -q tests/core/test_ui_state.py
 python -m pytest -q tests/core/test_audio_cues.py
+python -m pytest -q tests/core/test_midnight_visual_contract.py
+python -m pytest -q tests/core/test_system_cli.py
 python -m pytest -q tests/core/test_languages.py
 python -m pytest -q tests/core/test_feedback_capture.py
 python -m pytest -q tests/core/test_local_corrections.py
@@ -69,6 +71,29 @@ python -m pytest -q tests/core/test_release_tools.py
 The tests stub optional GUI/audio packages during headless collection. Passing
 them does not prove that the host has X11, PortAudio, a tray backend, or working
 Whisper native libraries.
+
+## v0.7.2 panel-dismissal regression gates
+
+Before v0.7.2 is tagged:
+
+1. Run the deterministic tray and Midnight Signal visual-contract tests. They
+   must verify the visible quick-panel and control-center hide actions, Escape,
+   idempotent close, and the native tray's static Show/Hide toggle label.
+2. Open the quick panel from the packaged tray. Confirm **Hide panel**, Escape,
+   and **Show / hide quick panel** in the native menu each dismiss only the
+   panel and leave the tray/hotkey process alive.
+3. Move focus through every quick-panel control with keyboard and pointer.
+   After dismissal, reopen it repeatedly and confirm exactly one responsive
+   panel exists.
+4. Open the full control center. Confirm **Hide to tray** remains visible in its
+   persistent header on every page and is also present on System. Hide and
+   reopen it without changing backend, route, microphone, or update state.
+5. Record and transcribe before and after hiding both surfaces. Confirm that
+   hide never invokes Quit, interrupts capture, or changes the v0.7.1 native
+   audio-safety guarantees.
+6. Repeat against the exact one-file Windows candidate and on Ubuntu/X11 where
+   its tray backend is supported. Inspect logs for Tk cross-thread access,
+   duplicate-window, or native tray errors.
 
 ## v0.7.1 native-audio regression gates
 
@@ -123,12 +148,12 @@ Run these checks against both source and the exact packaged
 available:
 
 1. Open CtrlSpeak from the stable filename. Confirm the tray and control center
-   show 0.7.1, render the graphite Midnight Signal hierarchy cleanly, remain
+   show 0.7.2, render the graphite Midnight Signal hierarchy cleanly, remain
    readable at the supported scales, and expose visible keyboard focus.
 2. Left-click the tray icon and verify the branded quick surface; right-click
-   and verify the dependable native fallback menu. Exercise Manage, Copy last
-   transcript, Submit correction, gateway refresh, Check for updates,
-   mute/volume, and Quit. Disabled actions must look and behave disabled.
+   and verify the dependable native fallback menu. Exercise Open control
+   centre, Copy last transcript, Submit correction, gateway refresh, Check for
+   updates, mute/volume, and Quit. Disabled actions must look and behave disabled.
 3. Hold right Ctrl on each connected monitor. Confirm the slim recording capsule
    appears on the active monitor without taking focus, its timer advances, the
    waveform/dBFS meter reacts to the microphone, and silence settles at the
@@ -191,7 +216,7 @@ source environment and again against `dist/CtrlSpeak`:
    `x11` and `DISPLAY` is set.
 2. Start CtrlSpeak and verify the Midnight Signal management window and tray
    surfaces. Confirm
-   **Manage CtrlSpeak** reopens/raises the single management window,
+   **Open control centre** reopens/raises the single management window,
    **Submit correction…** creates an immediately visible gateway rule, and
    **Quit** stops the listener/tray cleanly.
 3. Select a real microphone, hold right Ctrl, speak, release, and confirm the
@@ -224,14 +249,13 @@ source environment and again against `dist/CtrlSpeak`:
 The updater cannot be proven end to end by source-mode unit tests. Against the
 exact signed artifacts on clean Windows and Ubuntu/X11 hosts:
 
-1. Install v0.7.0 as `CtrlSpeak.exe` or `CtrlSpeak` and confirm the tray/control
-   center show 0.7.0. Do not exercise its known Windows recording-start path;
-   use it only to validate signed update discovery and handoff.
-2. Publish the controlled signed v0.7.1 release with both required platform
+1. Install v0.7.1 as `CtrlSpeak.exe` or `CtrlSpeak` and confirm the tray/control
+   center show 0.7.1.
+2. Publish the controlled signed v0.7.2 release with both required platform
    artifacts and the three metadata assets.
 3. Check for the update from the GUI, inspect version/size, download, and confirm
    the UI remains responsive.
-4. Restart and verify the same stable path now reports 0.7.1 while API URL/token,
+4. Restart and verify the same stable path now reports 0.7.2 while API URL/token,
    mode, input device, models, CUDA files, and corrections remain intact.
 5. Interrupt and resume a download; confirm the final artifact hash matches the
    signed manifest.
@@ -271,7 +295,7 @@ acceptance test. Do not use its host-level guidance on an Ubuntu system.
 
 ## Companion API tests
 
-The maintained v0.7.1 role-aware service is in `server/whisper_transcription`. Its
+The maintained v0.7.2 role-aware service is in `server/whisper_transcription`. Its
 headless suite uses a fake model and does not download CUDA/model assets, bind a
 network port, restart systemd, or change a firewall:
 
@@ -301,9 +325,9 @@ missing measurements.
 After taking timestamped source/configuration/database rollback copies and
 deploying one role at a time:
 
-1. Confirm the dedicated `CtrlSpeak` gateway and Ubuntu worker each report
-   version 0.7.1 and their intended `gateway`/`worker` roles. Nova must not gain
-   a CtrlSpeak listener.
+1. Confirm the dedicated `CtrlSpeak` gateway reports version 0.7.2 and role
+   `gateway`. Record the unchanged Ubuntu worker version, confirm role `worker`,
+   and verify protocol compatibility. Nova must not gain a CtrlSpeak listener.
 2. Confirm the gateway retains all correction/audit rows, uses the existing
    authenticated identities, stores no OpenAI key, and listens only on its
    intended private WireGuard address.

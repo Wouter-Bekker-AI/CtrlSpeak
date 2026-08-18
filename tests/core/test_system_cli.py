@@ -82,7 +82,7 @@ def test_api_backend_hotkey_does_not_require_legacy_server():
 
 
 def test_tray_menu_exposes_correction_submission(monkeypatch):
-    labels: list[str] = []
+    labels: list[object] = []
     gui_calls: list[str] = []
 
     fake_gui = types.ModuleType("utils.gui")
@@ -94,7 +94,7 @@ def test_tray_menu_exposes_correction_submission(monkeypatch):
     fake_pystray = types.ModuleType("pystray")
 
     def menu_item(label, *_args, **_kwargs):
-        labels.append(str(label))
+        labels.append(label)
         return object()
 
     class FakeIcon:
@@ -113,10 +113,13 @@ def test_tray_menu_exposes_correction_submission(monkeypatch):
     monkeypatch.setitem(sys.modules, "pystray", fake_pystray)
     monkeypatch.setattr(system, "start_client_listener", lambda: None)
     monkeypatch.setattr(system, "create_icon_image", lambda: None)
+    monkeypatch.setattr(system, "_tray_icon", None)
 
     system.run_tray()
 
-    assert "Submit correction…" in labels
+    resolved = [label(None) if callable(label) else str(label) for label in labels]
+    assert "Show / hide quick panel" in resolved
+    assert "Submit correction…" in resolved
     assert "run" in gui_calls
 
 
@@ -125,7 +128,6 @@ def test_tray_correction_action_queues_the_dialog(monkeypatch):
     icon = object()
     dialog = lambda _icon: None
     fake_gui = types.ModuleType("utils.gui")
-    fake_gui.ensure_management_ui_thread = lambda: calls.append(("ensure", ()))
     fake_gui._show_correction_submission_dialog = dialog
     monkeypatch.setitem(sys.modules, "utils.gui", fake_gui)
     monkeypatch.setattr(
@@ -136,7 +138,28 @@ def test_tray_correction_action_queues_the_dialog(monkeypatch):
 
     system.submit_correction_from_tray(icon, None)
 
-    assert calls == [("ensure", ()), (dialog, (icon,))]
+    assert calls == [(dialog, (icon,))]
+
+
+def test_native_tray_actions_only_enqueue_tk_work(monkeypatch):
+    calls: list[tuple[object, tuple[object, ...]]] = []
+    icon = object()
+    fake_gui = types.ModuleType("utils.gui")
+    flyout = lambda _icon: None
+    management = lambda _icon: None
+    fake_gui._show_tray_flyout = flyout
+    fake_gui._show_management_window = management
+    monkeypatch.setitem(sys.modules, "utils.gui", fake_gui)
+    monkeypatch.setattr(
+        system,
+        "enqueue_management_task",
+        lambda callback, *args: calls.append((callback, args)),
+    )
+
+    system.open_tray_flyout(icon, None)
+    system.open_management_dialog(icon, None)
+
+    assert calls == [(flyout, (icon,)), (management, (icon,))]
 
 
 def test_acquire_single_instance_lock(tmp_path, monkeypatch):

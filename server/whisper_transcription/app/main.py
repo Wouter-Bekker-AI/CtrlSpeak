@@ -29,7 +29,7 @@ from app.providers import (
 )
 
 
-SERVICE_VERSION = "0.7.1"
+SERVICE_VERSION = "0.7.2"
 LOGGER = logging.getLogger("ctrlspeak_whisper_transcription")
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = Path(os.environ.get("WHISPER_DATA_DIR", ROOT / "data"))

@@ -1,4 +1,4 @@
-# CtrlSpeak v0.7.1
+# CtrlSpeak v0.7.2
 
 CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into
@@ -53,8 +53,24 @@ an em dash or an explanatory unavailable state; client wall-clock time is not
 labelled as server inference, and illustrative concept values never appear as
 live data. UI snapshots retain no transcript text, audio, bearer credentials,
 or OpenAI key. See `docs/V0.7_MIDNIGHT_SIGNAL_RELEASE.md` for the approved
-experience baseline and `docs/V0.7.1_HOTFIX_RELEASE.md` for the current hotfix
-contract.
+experience baseline, `docs/V0.7.1_HOTFIX_RELEASE.md` for the recording-safety
+hotfix, and `docs/V0.7.2_HOTFIX_RELEASE.md` for the current dismissal and tray
+visibility hotfix contract.
+
+## v0.7.2 quick-panel dismissal hotfix
+
+v0.7.2 makes every persistent Midnight Signal surface visibly dismissible
+without quitting CtrlSpeak. The compact quick panel now includes **Hide panel**,
+closes with Escape, and remains available from the truthful native tray action
+**Show / hide quick panel**. The full control center exposes **Hide to tray** in
+both its persistent header and System page. Hiding either surface leaves the hotkey, transcription,
+gateway connection, and tray process running; **Quit CtrlSpeak** remains the
+only application-exit action.
+
+The tray label is deliberately static: neither the Tk thread nor the native
+tray thread reads or refreshes the other UI surface's state. Repeated hide calls
+are idempotent, and reopening creates one usable panel without orphaned polling
+jobs or duplicate controllers.
 
 ## v0.7.1 recording and visual-fidelity hotfix
 
@@ -308,7 +324,7 @@ is hardcoded. API mode calls:
 
 When output languages are configured, the request includes an ordered
 comma-separated `allowed_languages` multipart field such as `en` or `en,af`.
-The maintained v0.7.1 gateway validates a maximum of five codes, forces one of
+The maintained v0.7.2 gateway validates a maximum of five codes, forces one of
 them, uses the first as a fallback, and refuses to return a reported language
 outside the list. Omitting the field preserves automatic detection. The legacy
 single `language` field is still accepted by the server.

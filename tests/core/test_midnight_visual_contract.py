@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import inspect
 import sys
 import types
 from types import SimpleNamespace
@@ -520,6 +521,56 @@ def test_correction_mutations_are_fifo_and_refresh_only_after_all_settle(
     assert committed == ["first", "second"]
     assert refreshed == [("first", "second")]
 
+
+class FakeFlyoutWindow:
+    def __init__(self) -> None:
+        self.exists = True
+        self.cancelled_jobs: list[str] = []
+        self.destroyed = False
+
+    def winfo_exists(self) -> bool:
+        return self.exists
+
+    def after_cancel(self, job: str) -> None:
+        self.cancelled_jobs.append(job)
+
+    def destroy(self) -> None:
+        self.destroyed = True
+        self.exists = False
+
+
+def test_flyout_has_visible_and_keyboard_dismissal_contract() -> None:
+    show_source = inspect.getsource(MidnightTrayFlyout.show)
+    shell_source = inspect.getsource(MidnightSignalManagementMixin._build_shell)
+    system_source = inspect.getsource(MidnightSignalManagementMixin._build_system_page)
+
+    assert 'text="Hide panel"' in show_source
+    assert "command=self.close" in show_source
+    assert 'win.protocol("WM_DELETE_WINDOW", self.close)' in show_source
+    assert 'win.bind("<Escape>"' in show_source
+    assert 'win.bind("<FocusOut>"' not in show_source
+    assert 'text="Hide to tray"' in shell_source
+    assert 'text="Hide to tray"' in system_source
+
+
+def test_flyout_close_is_idempotent_and_never_quits() -> None:
+    quit_calls: list[bool] = []
+    flyout = object.__new__(MidnightTrayFlyout)
+    window = FakeFlyoutWindow()
+    flyout.window = window
+    flyout._poll_job = "poll-job"
+    flyout._capability_generation = 4
+    flyout.quit_app = lambda: quit_calls.append(True)
+
+    flyout.close()
+    flyout.close()
+
+    assert window.destroyed is True
+    assert window.cancelled_jobs == ["poll-job"]
+    assert flyout.window is None
+    assert flyout._poll_job is None
+    assert flyout._capability_generation == 5
+    assert quit_calls == []
 
 @pytest.mark.parametrize(
     ("capability_status", "has_key", "expected"),

@@ -1998,7 +1998,7 @@ def _ensure_model_files(interactive: bool = True) -> bool:
             notify(
                 (
                     f"The Whisper model '{name}' is not installed. "
-                    "Right-click the CtrlSpeak tray icon and choose 'Manage CtrlSpeak' "
+                    "Right-click the CtrlSpeak tray icon and choose 'Open control centre' "
                     "to download it."
                 )
             )

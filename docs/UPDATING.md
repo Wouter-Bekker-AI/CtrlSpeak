@@ -1,4 +1,4 @@
-# CtrlSpeak v0.7.1 update and release guide
+# CtrlSpeak v0.7.2 update and release guide
 
 ## End-user update flow
 
@@ -89,6 +89,14 @@ and overlay fidelity against the approved Midnight Signal visual direction.
 The API contract remains backward-compatible. See
 `docs/V0.7.1_HOTFIX_RELEASE.md` for the incident evidence and acceptance gates.
 
+v0.7.2 is the Midnight Signal dismissal hotfix. It gives the quick panel a
+visible **Hide panel** action and Escape dismissal, adds **Hide to tray** to the
+full control center, and labels the native tray toggle **Show / hide quick
+panel**. Hiding a surface does not
+quit CtrlSpeak or interrupt transcription. The service and API schema remain
+backward-compatible; their versions are synchronized with the desktop release.
+See `docs/V0.7.2_HOTFIX_RELEASE.md` for its acceptance gates.
+
 ## Trust and safety model
 
 The standard client hard-codes:
@@ -141,11 +149,12 @@ For each release:
 
 3. Perform the physical Windows/Ubuntu checks in `docs/TESTING.md` appropriate
    to the change.
-4. Back up and deploy the version-matched gateway/worker service source using
-   the administrative acceptance procedure below. The desktop updater does not
-   deploy servers.
+4. Back up and deploy service source only to roles affected by the release,
+   using the administrative acceptance procedure below. For desktop-only
+   v0.7.2, synchronize the gateway's release identity and verify the unchanged
+   worker protocol. The desktop updater does not deploy servers.
 5. Commit and push the reviewed `v0.7` branch.
-6. Create the immutable annotated tag `v0.7.1` at that commit and push it.
+6. Create the immutable annotated tag `v0.7.2` at that commit and push it.
 7. Observe `.github/workflows/release.yml` through all three stages:
 
    - clean Windows/Linux tests and native one-file builds;
@@ -155,7 +164,7 @@ For each release:
 8. Independently download the five release assets and run:
 
    ```text
-   python scripts/release.py verify --directory <asset-directory> --tag v0.7.1
+   python scripts/release.py verify --directory <asset-directory> --tag v0.7.2
    ```
 
 9. Test the update from the immediately previous stable version on both
@@ -191,18 +200,18 @@ stable tag is published:
 1. Confirm the exact dedicated gateway and Ubuntu worker targets and their
    service roles. Do not deploy the gateway role onto Nova; Nova remains the
    private WireGuard transport/Hermes host.
-2. Create timestamped rollback copies of each service source tree and a
-   consistent SQLite backup before replacing source. Preserve protected
-   environment files, client/worker tokens, model caches, virtual environments,
-   and runtime data outside Git.
-3. Stage the `server/whisper_transcription` subtree, install the role-specific
-   dependency profile if it changed, run the server tests, and verify the
-   redacted runtime configuration before restart.
-4. Restart one role at a time. Verify systemd state, the private listener,
-   authenticated health/capabilities, version `0.7.1`, correction inventory,
-   telemetry flags, and a real language-restricted transcription. The gateway
-   must still report the provider actually used and retain correction/audit
-   data.
+2. Create a timestamped rollback copy and consistent SQLite backup for every
+   service whose source will be replaced. Preserve protected environment files,
+   client/worker tokens, model caches, virtual environments, and runtime data
+   outside Git.
+3. Stage the `server/whisper_transcription` subtree for affected roles, install
+   the role-specific dependency profile only if it changed, run the server
+   tests, and verify the redacted runtime configuration before restart.
+4. For v0.7.2, deploy the mechanically version-synchronized gateway and verify
+   authenticated health/capabilities report `0.7.2`, with unchanged correction
+   inventory, telemetry flags, private listener, and a real restricted-language
+   route. The Ubuntu GPU worker requires no source/configuration change; record
+   its existing version and verify its worker role and API compatibility.
 5. Verify GPU-worker-offline fast failover without weakening the 350 ms connect,
    500 ms probe, cache, or circuit-break limits. Roll back source and database
    together if schema or startup acceptance fails.

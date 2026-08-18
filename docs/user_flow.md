@@ -1,4 +1,4 @@
-# CtrlSpeak v0.7.1 Midnight Signal user flow
+# CtrlSpeak v0.7.2 Midnight Signal user flow
 
 ## 1. Launch and platform readiness
 
@@ -132,10 +132,16 @@ cleanup, and the next single-instance startup removes any crash-stale
 The left-click tray surface is the compact daily interface. It shows current
 capture state, active microphone, selected route, provider readiness, the last
 safe timing measurements, and fallback status with restrained hierarchy. It
-offers direct actions for **Manage CtrlSpeak**, **Copy last transcript**,
+offers direct actions for **Open CtrlSpeak**, **Copy last transcript**,
 **Submit correction…**, gateway refresh, update check, cue-status access to the
 control center's mute/volume settings, and Quit. The native right-click menu
 remains the dependable platform fallback.
+
+The quick panel always exposes **Hide panel**. Escape also dismisses it. The
+native tray action uses the truthful static label **Show / hide quick panel**,
+avoiding cross-thread native-menu and Tk state. Hiding is idempotent and never
+quits CtrlSpeak, so recording and transcription remain available and the panel
+can be reopened from the same tray icon.
 
 Status data is operational only: version, route/provider identifiers, bounded
 health states, dBFS, and durations. It never displays or retains transcript
@@ -183,9 +189,13 @@ feedback in the management window when the workflow is unsuitable.
 
 ## 7. Midnight Signal control center
 
-The tray's **Manage CtrlSpeak** action raises one Midnight Signal management
-window. A calm graphite tabbed workspace separates daily controls from advanced
+The quick panel's **Open CtrlSpeak** button and native tray's **Open control
+centre** action raise one Midnight Signal management window. A calm graphite
+tabbed workspace separates daily controls from advanced
 configuration; detail is available without presenting every setting at once.
+The persistent header and System page each expose **Hide to tray**. Window-close
+and hide actions dismiss only this surface; **Quit CtrlSpeak** remains a
+separate, explicit application-exit action.
 It contains:
 
 - current version, stable update channel, last-check time, signed update status,

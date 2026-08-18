@@ -383,6 +383,12 @@ class MidnightSignalManagementMixin:
         left.pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Label(left, text="CTRLSPEAK", style="MS.Hero.TLabel").pack(side=tk.LEFT)
         ttk.Label(left, text=f"  {sysmod.APP_VERSION}  ·  MIDNIGHT SIGNAL", style="MS.TLabel", foreground=MUTED).pack(side=tk.LEFT, pady=(7, 0))
+        ttk.Button(
+            header,
+            text="Hide to tray",
+            style="MS.Compact.TButton",
+            command=self.close,
+        ).pack(side=tk.RIGHT, padx=(10, 0))
         self.ms_ready_var = tk.StringVar(value="● READY")
         ttk.Label(header, textvariable=self.ms_ready_var, style="MS.Ready.TLabel").pack(side=tk.RIGHT, pady=(8, 0))
 
@@ -868,7 +874,7 @@ class MidnightSignalManagementMixin:
         ttk.Button(runtime, text="Refresh servers", style="MS.TButton", command=self.refresh_servers).pack(side=tk.LEFT, padx=(8, 0))
         footer = ttk.Frame(right, style="MS.Card.TFrame")
         footer.pack(fill=tk.X, side=tk.BOTTOM)
-        ttk.Button(footer, text="Close", style="MS.TButton", command=self.close).pack(side=tk.RIGHT)
+        ttk.Button(footer, text="Hide to tray", style="MS.TButton", command=self.close).pack(side=tk.RIGHT)
         ttk.Button(footer, text="Quit CtrlSpeak", style="MS.Danger.TButton", command=self.stop_everything).pack(side=tk.RIGHT, padx=(0, 8))
 
     def _save_experience_preferences(self) -> None:
@@ -1452,6 +1458,7 @@ class MidnightTrayFlyout:
         self._provider_rows: dict[str, tuple[tk.StringVar, tk.StringVar]] = {}
         self._provider_cards: dict[str, ttk.Frame] = {}
         self._provider_badges: dict[str, tk.Canvas] = {}
+        self._closing = False
 
     def is_open(self) -> bool:
         try:
@@ -1476,6 +1483,7 @@ class MidnightTrayFlyout:
         win.title("CtrlSpeak quick panel")
         win.overrideredirect(True)
         win.attributes("-topmost", True)
+        win.protocol("WM_DELETE_WINDOW", self.close)
         apply_midnight_signal_theme(win)
         bounds = active_monitor_bounds(self.root)
         scale = display_scale(self.root)
@@ -1521,8 +1529,14 @@ class MidnightTrayFlyout:
         header = ttk.Frame(frame, style="MS.Root.TFrame")
         header.pack(fill=tk.X)
         ttk.Label(header, text=f"CTRLSPEAK  {sysmod.APP_VERSION}", style="MS.Title.TLabel").pack(side=tk.LEFT)
+        ttk.Button(
+            header,
+            text="Hide panel",
+            style="MS.Compact.TButton",
+            command=self.close,
+        ).pack(side=tk.RIGHT)
         self.status_var = tk.StringVar(value="● READY")
-        ttk.Label(header, textvariable=self.status_var, style="MS.Ready.TLabel").pack(side=tk.RIGHT)
+        ttk.Label(header, textvariable=self.status_var, style="MS.Ready.TLabel").pack(side=tk.RIGHT, padx=(0, 9))
         self.route_var = tk.StringVar(value="Hold Right Ctrl to speak")
         ttk.Label(frame, textvariable=self.route_var, style="MS.TLabel", foreground=MUTED).pack(anchor=tk.W, pady=(4, 10))
 
@@ -1774,16 +1788,28 @@ class MidnightTrayFlyout:
         self._apply_route_strategy_visuals()
 
     def close(self) -> None:
-        if not self.is_open():
+        if getattr(self, "_closing", False):
             return
-        self._capability_generation += 1
-        if self._poll_job:
+        if not self.is_open():
+            self.window = None
+            self._poll_job = None
+            return
+        self._closing = True
+        try:
+            self._capability_generation += 1
+            if self._poll_job:
+                try:
+                    self.window.after_cancel(self._poll_job)
+                except tk.TclError:
+                    pass
             try:
-                self.window.after_cancel(self._poll_job)
+                self.window.destroy()
             except tk.TclError:
                 pass
-        self.window.destroy()
-        self.window = None
+        finally:
+            self._poll_job = None
+            self.window = None
+            self._closing = False
 
 
 __all__ = [

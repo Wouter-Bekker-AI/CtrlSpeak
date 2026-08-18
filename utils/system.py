@@ -517,7 +517,7 @@ def _refresh_tray_menu() -> None:
     try:
         icon.update_menu()
     except Exception:
-        logger.exception("Failed to refresh the tray after retaining a transcript")
+        logger.exception("Failed to refresh the CtrlSpeak tray menu")
 
 
 def copy_last_transcript_from_tray(_icon=None, _item=None) -> bool:
@@ -2018,20 +2018,19 @@ def on_exit(icon, item):
     icon.stop()
 
 def open_management_dialog(icon, item):
-    from utils.gui import ensure_management_ui_thread, _show_management_window
-    ensure_management_ui_thread()
+    from utils.gui import _show_management_window
+
     enqueue_management_task(_show_management_window, icon)
 
 
 def open_tray_flyout(icon, item):
-    from utils.gui import ensure_management_ui_thread, _show_tray_flyout
+    from utils.gui import _show_tray_flyout
 
-    ensure_management_ui_thread()
     enqueue_management_task(_show_tray_flyout, icon)
 
 
 def check_for_updates_from_tray(icon, item):
-    from utils.gui import ensure_management_ui_thread, _show_management_window
+    from utils.gui import _show_management_window
 
     def _open_and_check() -> None:
         _show_management_window(icon)
@@ -2043,14 +2042,12 @@ def check_for_updates_from_tray(icon, item):
         except Exception:
             logger.exception("Failed to start update check from tray")
 
-    ensure_management_ui_thread()
     enqueue_management_task(_open_and_check)
 
 
 def submit_correction_from_tray(icon, item):
-    from utils.gui import ensure_management_ui_thread, _show_correction_submission_dialog
+    from utils.gui import _show_correction_submission_dialog
 
-    ensure_management_ui_thread()
     enqueue_management_task(_show_correction_submission_dialog, icon)
 
 
@@ -2102,7 +2099,7 @@ def run_tray():
 
     menu_items = [
         pystray.MenuItem(tray_status_label, lambda _icon, _item: None, enabled=False),
-        pystray.MenuItem("Show CtrlSpeak", open_tray_flyout, default=True),
+        pystray.MenuItem("Show / hide quick panel", open_tray_flyout, default=True),
         pystray.MenuItem("Open control centre", open_management_dialog),
         pystray.MenuItem("Submit correction…", submit_correction_from_tray),
         pystray.MenuItem(

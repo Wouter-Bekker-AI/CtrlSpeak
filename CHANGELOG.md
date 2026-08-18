@@ -4,6 +4,27 @@ CtrlSpeak follows semantic versioning. Published binaries are immutable; a
 consumed release is corrected by a newer patch rather than by moving its tag or
 replacing its assets.
 
+## 0.7.2 — 2026-08-18
+
+### Fixed
+
+- Add an always-visible **Hide panel** action to the Midnight Signal quick
+  panel, plus Escape and window-close dismissal.
+- Add **Hide to tray** to the persistent control-center header and System page
+  so the management window never traps the user in an always-visible surface.
+- Rename the native tray action to the truthful static label **Show / hide
+  quick panel**, avoiding unsafe cross-thread Tk or native-menu state reads.
+- Keep hide/close idempotent and separate from **Quit CtrlSpeak**, preserving
+  recording, transcription, configuration, and tray availability while UI
+  surfaces are hidden.
+
+### Release engineering
+
+- Synchronize desktop, service, Windows PE, AppStream, API documentation, and
+  signed-release version gates at 0.7.2.
+- Add deterministic visibility, repeated-close, and static tray-toggle
+  regression coverage for the dismissal hotfix.
+
 ## 0.7.1 — 2026-08-18
 
 ### Fixed
@@ -35,4 +56,5 @@ replacing its assets.
 
 Detailed release contracts are in
 `docs/V0.7_MIDNIGHT_SIGNAL_RELEASE.md` and
-`docs/V0.7.1_HOTFIX_RELEASE.md`.
+`docs/V0.7.1_HOTFIX_RELEASE.md`, with the current dismissal hotfix in
+`docs/V0.7.2_HOTFIX_RELEASE.md`.

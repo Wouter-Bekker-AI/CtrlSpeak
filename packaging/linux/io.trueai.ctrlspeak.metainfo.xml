@@ -22,6 +22,11 @@
     <category>Accessibility</category>
   </categories>
   <releases>
+    <release version="0.7.2" date="2026-08-18">
+      <description>
+        <p>Adds explicit, keyboard-accessible dismissal for the quick panel and control center, plus a truthful Show / hide quick-panel tray action.</p>
+      </description>
+    </release>
     <release version="0.7.1" date="2026-08-18">
       <description>
         <p>Prevents competing PortAudio lifecycles during recording feedback, fixes the resulting Windows recording-start crash, and restores the approved Midnight Signal visual fidelity.</p>
