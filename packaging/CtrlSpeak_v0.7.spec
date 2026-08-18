@@ -96,6 +96,7 @@ if IS_WINDOWS:
         'pynput.keyboard._win32',
         'pynput.mouse._win32',
         'utils.windows_input',
+        'winsound',
     ]
     excludes = ['astroid', 'bs4', 'utils.linux_input']
 else:

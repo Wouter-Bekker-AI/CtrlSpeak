@@ -1,4 +1,4 @@
-# CtrlSpeak v0.7.0 update and release guide
+# CtrlSpeak v0.7.1 update and release guide
 
 ## End-user update flow
 
@@ -80,6 +80,15 @@ unavailable, and a fallback path appears only after the gateway reports it.
 The API remains backward-compatible while adding optional probe, attempt,
 inference, and total-routing millisecond fields.
 
+v0.7.1 is the first Midnight Signal hotfix. It prevents the microphone recorder
+and asynchronous UI cues from entering competing PortAudio initialization or
+termination lifecycles on Windows. That race caused an unrecoverable native
+`_portaudio` access violation immediately after right Ctrl was pressed; it did
+not produce a Python traceback. The patch also corrects control-center, tray,
+and overlay fidelity against the approved Midnight Signal visual direction.
+The API contract remains backward-compatible. See
+`docs/V0.7.1_HOTFIX_RELEASE.md` for the incident evidence and acceptance gates.
+
 ## Trust and safety model
 
 The standard client hard-codes:
@@ -136,7 +145,7 @@ For each release:
    the administrative acceptance procedure below. The desktop updater does not
    deploy servers.
 5. Commit and push the reviewed `v0.7` branch.
-6. Create the immutable annotated tag `v0.7.0` at that commit and push it.
+6. Create the immutable annotated tag `v0.7.1` at that commit and push it.
 7. Observe `.github/workflows/release.yml` through all three stages:
 
    - clean Windows/Linux tests and native one-file builds;
@@ -146,7 +155,7 @@ For each release:
 8. Independently download the five release assets and run:
 
    ```text
-   python scripts/release.py verify --directory <asset-directory> --tag v0.7.0
+   python scripts/release.py verify --directory <asset-directory> --tag v0.7.1
    ```
 
 9. Test the update from the immediately previous stable version on both
@@ -190,7 +199,7 @@ stable tag is published:
    dependency profile if it changed, run the server tests, and verify the
    redacted runtime configuration before restart.
 4. Restart one role at a time. Verify systemd state, the private listener,
-   authenticated health/capabilities, version `0.7.0`, correction inventory,
+   authenticated health/capabilities, version `0.7.1`, correction inventory,
    telemetry flags, and a real language-restricted transcription. The gateway
    must still report the provider actually used and retain correction/audit
    data.

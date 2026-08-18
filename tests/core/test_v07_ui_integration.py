@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 import sys
 import threading
 import time
 import types
+import wave
 
 import pytest
 
-from utils.audio_cues import CueKind
+from utils.audio_cues import CueKind, synthesize_cue
 from utils.transcription_backend import TranscriptionResult
 from utils.ui_state import TranscriptionUiSession, UiPhase
 
@@ -87,6 +89,20 @@ def _usable_recording(path: Path) -> Path:
     return path
 
 
+def _seed_waveform(system) -> None:
+    """Populate the PCM ring without relying on the headless NumPy stub."""
+
+    with system._waveform_lock:
+        system._waveform_buffers.clear()
+        system._waveform_buffers.append(object())
+        system._waveform_samples = 1
+
+
+def _waveform_is_empty(system) -> bool:
+    with system._waveform_lock:
+        return not system._waveform_buffers and system._waveform_samples == 0
+
+
 def test_processing_feedback_is_one_finite_cue_and_never_starts_loop_thread(
     monkeypatch,
 ) -> None:
@@ -108,6 +124,859 @@ def test_processing_feedback_is_one_finite_cue_and_never_starts_loop_thread(
     system.stop_processing_feedback()
     assert system.processing_sound_stop_event.is_set()
     assert system.processing_sound_thread is None
+
+
+def test_windows_cue_sink_uses_valid_memory_wav_without_pyaudio(monkeypatch) -> None:
+    from utils import system
+
+    played: list[tuple[bytes, int]] = []
+    fake_winsound = types.SimpleNamespace(
+        SND_MEMORY=0x0004,
+        SND_NODEFAULT=0x0002,
+        PlaySound=lambda payload, flags: played.append((payload, flags)),
+    )
+    monkeypatch.setitem(sys.modules, "winsound", fake_winsound)
+    monkeypatch.setattr(system.sys, "platform", "win32")
+    monkeypatch.setattr(
+        system.pyaudio,
+        "PyAudio",
+        lambda: pytest.fail("Windows UI cues must never initialize PortAudio"),
+    )
+    cue = synthesize_cue(CueKind.RECORDING_STARTED)
+
+    system._play_pcm_cue(cue)
+
+    assert len(played) == 1
+    payload, flags = played[0]
+    assert flags == fake_winsound.SND_MEMORY | fake_winsound.SND_NODEFAULT
+    with wave.open(io.BytesIO(payload), "rb") as handle:
+        assert handle.getnchannels() == cue.channels
+        assert handle.getsampwidth() == 2
+        assert handle.getframerate() == cue.sample_rate
+        assert handle.readframes(handle.getnframes()) == cue.frames
+
+
+def test_hotkey_capture_and_windows_cue_overlap_without_second_portaudio_session(
+    monkeypatch, tmp_path
+) -> None:
+    from utils import system
+
+    recorder_entered = threading.Event()
+    cue_played = threading.Event()
+    overlaps: list[bool] = []
+    pyaudio_initializations: list[bool] = []
+    recording_path = tmp_path / "hotkey-cue.wav"
+
+    def fake_record_audio(_path: Path, stop_event: threading.Event) -> None:
+        recorder_entered.set()
+        assert stop_event.wait(2.0)
+
+    def fake_play_sound(_payload: bytes, _flags: int) -> None:
+        assert recorder_entered.wait(1.0)
+        recorder = system.recording_thread
+        overlaps.append(bool(recorder is not None and recorder.is_alive()))
+        cue_played.set()
+
+    def forbidden_pyaudio():
+        pyaudio_initializations.append(True)
+        raise AssertionError("the Windows cue path reached PortAudio")
+
+    fake_winsound = types.SimpleNamespace(
+        SND_MEMORY=0x0004,
+        SND_NODEFAULT=0x0002,
+        PlaySound=fake_play_sound,
+    )
+    monkeypatch.setitem(sys.modules, "winsound", fake_winsound)
+    monkeypatch.setattr(system.sys, "platform", "win32")
+    monkeypatch.setattr(system.pyaudio, "PyAudio", forbidden_pyaudio)
+    monkeypatch.setattr(system, "record_audio", fake_record_audio)
+    monkeypatch.setattr(system, "create_recording_file_path", lambda: recording_path)
+    monkeypatch.setattr(system, "is_right_control", lambda _key: True)
+    monkeypatch.setattr(system, "_observe_pynput_press", lambda _key: None)
+    monkeypatch.setattr(system, "_client_hotkey_available", lambda: True)
+    monkeypatch.setattr(system, "_show_recording_overlay", lambda: None)
+    monkeypatch.setattr(system, "_set_terminal_overlay_hide", lambda _delay: None)
+    monkeypatch.setattr(system, "_refresh_tray_menu", lambda: None)
+    monkeypatch.setattr(system, "schedule_management_refresh", lambda: None)
+    monkeypatch.setitem(system.settings, "audio_cues_enabled", True)
+    monkeypatch.setitem(system.settings, "audio_cue_volume", 30)
+    monkeypatch.setattr(system, "client_enabled", True)
+    monkeypatch.setattr(system, "recording", False)
+    monkeypatch.setattr(system, "recording_thread", None)
+    monkeypatch.setattr(system, "transcription_thread", None)
+    monkeypatch.setattr(system, "recording_file_path", None)
+    monkeypatch.setattr(system, "_active_transcription_generation", None)
+    monkeypatch.setattr(system, "transcription_ui_session", TranscriptionUiSession())
+
+    system.on_press(object())
+
+    assert cue_played.wait(1.0)
+    assert overlaps == [True]
+    assert pyaudio_initializations == []
+    assert system.cancel_active_transcription() is True
+    reaper = system.transcription_thread
+    if isinstance(reaper, threading.Thread):
+        reaper.join(2.0)
+        assert not reaper.is_alive()
+    deadline = time.monotonic() + 2.0
+    while system.is_transcription_busy() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert system.is_transcription_busy() is False
+
+
+def test_guarded_capture_stays_exclusive_while_async_start_and_cancel_cues_play(
+    monkeypatch, tmp_path
+) -> None:
+    from utils import system
+
+    capture_read_entered = threading.Event()
+    release_capture_read = threading.Event()
+    start_cue_delivered = threading.Event()
+    cancel_cue_delivered = threading.Event()
+    lifecycle_guard = threading.Lock()
+    lifecycle: list[str] = []
+    cue_kinds: list[CueKind | None] = []
+    background_errors: list[BaseException] = []
+    active_instances = 0
+    maximum_active_instances = 0
+    initializations = 0
+    terminations = 0
+
+    class GuardedStream:
+        closed = False
+
+        def read(self, frame_count: int) -> bytes:
+            with lifecycle_guard:
+                lifecycle.append("capture-read")
+            capture_read_entered.set()
+            if not release_capture_read.wait(2.0):
+                raise AssertionError("test did not release the guarded capture")
+            return b"\0" * (frame_count * 2)
+
+        def stop_stream(self) -> None:
+            with lifecycle_guard:
+                lifecycle.append("stream-stop")
+
+        def close(self) -> None:
+            self.closed = True
+            with lifecycle_guard:
+                lifecycle.append("stream-close")
+
+    class GuardedPyAudio:
+        def __init__(self) -> None:
+            nonlocal active_instances, maximum_active_instances, initializations
+            self.stream: GuardedStream | None = None
+            with lifecycle_guard:
+                initializations += 1
+                active_instances += 1
+                maximum_active_instances = max(maximum_active_instances, active_instances)
+                lifecycle.append("pyaudio-initialize")
+                if active_instances != 1:
+                    background_errors.append(
+                        AssertionError("overlapping PyAudio initialization")
+                    )
+
+        def open(self, **_kwargs) -> GuardedStream:
+            self.stream = GuardedStream()
+            with lifecycle_guard:
+                lifecycle.append("stream-open")
+            return self.stream
+
+        @staticmethod
+        def get_sample_size(_audio_format: int) -> int:
+            return 2
+
+        def terminate(self) -> None:
+            nonlocal active_instances, terminations
+            with lifecycle_guard:
+                if self.stream is not None and not self.stream.closed:
+                    background_errors.append(
+                        AssertionError("PyAudio terminated before its stream closed")
+                    )
+                if active_instances != 1:
+                    background_errors.append(
+                        AssertionError("overlapping or duplicate PyAudio termination")
+                    )
+                active_instances -= 1
+                terminations += 1
+                lifecycle.append("pyaudio-terminate")
+
+    fake_winsound = types.SimpleNamespace(
+        SND_MEMORY=0x0004,
+        SND_NODEFAULT=0x0002,
+        PlaySound=lambda _payload, _flags: None,
+    )
+    original_cue_sink = system._play_pcm_cue
+
+    def observing_cue_sink(cue) -> None:
+        try:
+            original_cue_sink(cue)
+            with lifecycle_guard:
+                cue_kinds.append(cue.kind)
+                lifecycle.append(f"cue-{cue.kind.value}")
+            if cue.kind is CueKind.RECORDING_STARTED:
+                start_cue_delivered.set()
+            elif cue.kind is CueKind.CANCELLED:
+                cancel_cue_delivered.set()
+        except BaseException as exc:
+            background_errors.append(exc)
+            raise
+
+    recording_path = tmp_path / "guarded-overlap.wav"
+    monkeypatch.setitem(sys.modules, "winsound", fake_winsound)
+    monkeypatch.setattr(system.sys, "platform", "win32")
+    monkeypatch.setattr(system.pyaudio, "PyAudio", GuardedPyAudio)
+    monkeypatch.setattr(system, "_pyaudio_session_lock", threading.Lock())
+    monkeypatch.setattr(system, "_pyaudio_priority_lock", threading.Lock())
+    monkeypatch.setattr(system, "_pyaudio_capture_pending", threading.Event())
+    monkeypatch.setattr(system, "_play_pcm_cue", observing_cue_sink)
+    monkeypatch.setattr(system, "create_recording_file_path", lambda: recording_path)
+    monkeypatch.setattr(system, "is_right_control", lambda _key: True)
+    monkeypatch.setattr(system, "_observe_pynput_press", lambda _key: None)
+    monkeypatch.setattr(system, "_client_hotkey_available", lambda: True)
+    monkeypatch.setattr(system, "_show_recording_overlay", lambda: None)
+    monkeypatch.setattr(system, "_set_terminal_overlay_hide", lambda _delay: None)
+    monkeypatch.setattr(system, "_refresh_tray_menu", lambda: None)
+    monkeypatch.setattr(system, "schedule_management_refresh", lambda: None)
+    monkeypatch.setitem(system.settings, "input_device", None)
+    monkeypatch.setitem(system.settings, "audio_cues_enabled", True)
+    monkeypatch.setitem(system.settings, "audio_cue_volume", 30)
+    monkeypatch.setattr(system, "client_enabled", True)
+    monkeypatch.setattr(system, "recording", False)
+    monkeypatch.setattr(system, "recording_thread", None)
+    monkeypatch.setattr(system, "transcription_thread", None)
+    monkeypatch.setattr(system, "recording_file_path", None)
+    monkeypatch.setattr(system, "_active_transcription_generation", None)
+    monkeypatch.setattr(system, "transcription_ui_session", TranscriptionUiSession())
+
+    system.on_press(object())
+
+    assert capture_read_entered.wait(1.0)
+    assert start_cue_delivered.wait(1.0)
+    assert system.cancel_active_transcription() is True
+    assert cancel_cue_delivered.wait(1.0)
+    with lifecycle_guard:
+        assert active_instances == 1
+        assert initializations == 1
+        assert terminations == 0
+        assert cue_kinds == [CueKind.RECORDING_STARTED, CueKind.CANCELLED]
+        assert background_errors == []
+
+    release_capture_read.set()
+    coordinator = system.transcription_thread
+    if isinstance(coordinator, threading.Thread):
+        coordinator.join(2.0)
+        assert not coordinator.is_alive()
+
+    assert system.is_transcription_busy() is False
+    assert initializations == 1
+    assert terminations == 1
+    assert active_instances == 0
+    assert maximum_active_instances == 1
+    assert background_errors == []
+    assert lifecycle.index("stream-close") < lifecycle.index("pyaudio-terminate")
+
+
+def test_cancel_lifecycle_completes_when_background_cue_thread_cannot_start(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    from utils import audio_cues, system
+
+    class RefusedThread:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("thread creation refused")
+
+    # Replace only audio_cues' module reference; the cancellation reaper still
+    # uses the real threading module from utils.system.
+    monkeypatch.setattr(
+        audio_cues,
+        "threading",
+        types.SimpleNamespace(Thread=RefusedThread),
+    )
+    monkeypatch.setattr(system.sys, "platform", "win32")
+    monkeypatch.setitem(system.settings, "audio_cues_enabled", True)
+    monkeypatch.setitem(system.settings, "audio_cue_volume", 30)
+    session = TranscriptionUiSession()
+    session.begin_recording()
+    monkeypatch.setattr(system, "transcription_ui_session", session)
+    monkeypatch.setattr(system, "transcription_cancel_event", threading.Event())
+    monkeypatch.setattr(system, "_recording_stop_event", threading.Event())
+    monkeypatch.setattr(system, "recording", True)
+    monkeypatch.setattr(system, "recording_thread", None)
+    monkeypatch.setattr(system, "transcription_thread", None)
+    monkeypatch.setattr(system, "recording_file_path", tmp_path / "never-created.wav")
+    monkeypatch.setattr(system, "_active_transcription_generation", 499)
+    monkeypatch.setattr(system, "_set_terminal_overlay_hide", lambda _delay: None)
+    monkeypatch.setattr(system, "_refresh_tray_menu", lambda: None)
+    monkeypatch.setattr(system, "schedule_management_refresh", lambda: None)
+
+    assert system.cancel_active_transcription() is True
+    deadline = time.monotonic() + 1.0
+    while system.is_transcription_busy() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert system.transcription_thread is None
+    assert system._active_transcription_generation is None
+    assert system.is_transcription_busy() is False
+    assert session.phase is UiPhase.CANCELLED
+    assert "cue worker failed to start" in caplog.text.casefold()
+
+
+def test_cancel_reaper_start_failure_rolls_back_unstarted_worker(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    from utils import system
+
+    class RefusedReaper:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("cleanup worker creation refused")
+
+    recording_path = tmp_path / "cancelled-before-capture.wav"
+    cleanups: list[Path | None] = []
+    session = TranscriptionUiSession()
+    session.begin_recording()
+    monkeypatch.setattr(
+        system,
+        "threading",
+        types.SimpleNamespace(Thread=RefusedReaper),
+    )
+    monkeypatch.setattr(system, "transcription_ui_session", session)
+    monkeypatch.setattr(system, "transcription_cancel_event", threading.Event())
+    monkeypatch.setattr(system, "_recording_stop_event", threading.Event())
+    monkeypatch.setattr(system, "recording", True)
+    monkeypatch.setattr(system, "recording_thread", None)
+    monkeypatch.setattr(system, "transcription_thread", None)
+    monkeypatch.setattr(system, "recording_file_path", recording_path)
+    monkeypatch.setattr(system, "_active_transcription_generation", 4991)
+    monkeypatch.setattr(system, "cleanup_recording_file", cleanups.append)
+    monkeypatch.setattr(system, "play_ui_cue", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(system, "_set_terminal_overlay_hide", lambda _delay: None)
+    monkeypatch.setattr(system, "_refresh_tray_menu", lambda: None)
+    monkeypatch.setattr(system, "schedule_management_refresh", lambda: None)
+    _seed_waveform(system)
+
+    assert system.cancel_active_transcription() is True
+
+    assert system.recording is False
+    assert system.recording_thread is None
+    assert system.transcription_thread is None
+    assert system.recording_file_path is None
+    assert system._active_transcription_generation is None
+    assert system.is_transcription_busy() is False
+    assert session.phase is UiPhase.CANCELLED
+    assert system.transcription_cancel_event.is_set()
+    assert system._recording_stop_event.is_set()
+    assert cleanups == [recording_path]
+    assert _waveform_is_empty(system)
+    assert "failed to start the cancelled-recording cleanup worker" in caplog.text.casefold()
+
+
+def test_cancel_reaper_start_failure_leaves_only_live_recorder_until_it_exits(
+    monkeypatch, tmp_path
+) -> None:
+    from utils import system
+
+    class RefusedReaper:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("cleanup worker creation refused")
+
+    entered_capture = threading.Event()
+    release_capture = threading.Event()
+    recording_path = tmp_path / "live-cancelled-capture.wav"
+    cleanups: list[Path | None] = []
+    stop_event = threading.Event()
+    failure_event = threading.Event()
+    cancel_event = threading.Event()
+    generation = 4992
+
+    def fake_record_audio(_path: Path, worker_stop: threading.Event) -> None:
+        entered_capture.set()
+        assert worker_stop.wait(1.0)
+        assert release_capture.wait(1.0)
+
+    session = TranscriptionUiSession()
+    session.begin_recording()
+    monkeypatch.setattr(system, "record_audio", fake_record_audio)
+    monkeypatch.setattr(system, "transcription_ui_session", session)
+    monkeypatch.setattr(system, "transcription_cancel_event", cancel_event)
+    monkeypatch.setattr(system, "_recording_stop_event", stop_event)
+    monkeypatch.setattr(system, "_recording_failed_event", failure_event)
+    monkeypatch.setattr(system, "recording", True)
+    monkeypatch.setattr(system, "transcription_thread", None)
+    monkeypatch.setattr(system, "recording_file_path", recording_path)
+    monkeypatch.setattr(system, "_active_transcription_generation", generation)
+    monkeypatch.setattr(system, "cleanup_recording_file", cleanups.append)
+    monkeypatch.setattr(system, "play_ui_cue", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(system, "_set_terminal_overlay_hide", lambda _delay: None)
+    monkeypatch.setattr(system, "_refresh_tray_menu", lambda: None)
+    monkeypatch.setattr(system, "schedule_management_refresh", lambda: None)
+
+    recorder = threading.Thread(
+        target=system._record_audio_worker,
+        args=(recording_path, generation, stop_event, failure_event, cancel_event),
+        daemon=True,
+    )
+    monkeypatch.setattr(system, "recording_thread", recorder)
+    recorder.start()
+    assert entered_capture.wait(1.0)
+    monkeypatch.setattr(
+        system,
+        "threading",
+        types.SimpleNamespace(
+            Thread=RefusedReaper,
+            current_thread=threading.current_thread,
+        ),
+    )
+
+    assert system.cancel_active_transcription() is True
+    assert system.transcription_thread is None
+    assert system.recording_thread is recorder
+    assert system._active_transcription_generation == generation
+    assert system.is_transcription_busy() is True
+
+    release_capture.set()
+    recorder.join(1.0)
+
+    assert not recorder.is_alive()
+    assert system.recording_thread is None
+    assert system.transcription_thread is None
+    assert system.recording_file_path is None
+    assert system._active_transcription_generation is None
+    assert system.is_transcription_busy() is False
+    assert cleanups == [recording_path]
+
+
+def test_recorder_thread_start_failure_rolls_back_atomically(monkeypatch, tmp_path) -> None:
+    from utils import system
+
+    recording_path = tmp_path / "recorder-never-started.wav"
+    cleanups: list[Path | None] = []
+    notifications: list[tuple[str, str]] = []
+    cues: list[CueKind] = []
+
+    class RefusedWorker:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("recorder start refused")
+
+        def is_alive(self) -> bool:
+            return False
+
+    fake_threading = types.SimpleNamespace(
+        Event=threading.Event,
+        Thread=RefusedWorker,
+        current_thread=threading.current_thread,
+    )
+    monkeypatch.setattr(system, "threading", fake_threading)
+    monkeypatch.setattr(system, "client_enabled", True)
+    monkeypatch.setattr(system, "recording", False)
+    monkeypatch.setattr(system, "recording_thread", None)
+    monkeypatch.setattr(system, "transcription_thread", None)
+    monkeypatch.setattr(system, "recording_file_path", None)
+    monkeypatch.setattr(system, "_active_transcription_generation", None)
+    monkeypatch.setattr(system, "transcription_cancel_event", threading.Event())
+    monkeypatch.setattr(system, "_recording_stop_event", threading.Event())
+    monkeypatch.setattr(system, "_recording_failed_event", threading.Event())
+    monkeypatch.setattr(system, "_pyaudio_capture_pending", threading.Event())
+    monkeypatch.setattr(system, "transcription_ui_session", TranscriptionUiSession())
+    monkeypatch.setattr(system, "is_right_control", lambda _key: True)
+    monkeypatch.setattr(system, "_observe_pynput_press", lambda _key: None)
+    monkeypatch.setattr(system, "_client_hotkey_available", lambda: True)
+    monkeypatch.setattr(system, "create_recording_file_path", lambda: recording_path)
+    monkeypatch.setattr(system, "cleanup_recording_file", cleanups.append)
+    monkeypatch.setattr(
+        system,
+        "notify_error",
+        lambda context, detail: notifications.append((context, detail)),
+    )
+    monkeypatch.setattr(system, "play_ui_cue", lambda kind, **_kwargs: cues.append(kind) or True)
+    monkeypatch.setattr(
+        system,
+        "_show_recording_overlay",
+        lambda: pytest.fail("failed recorder must not show a recording overlay"),
+    )
+    monkeypatch.setattr(system, "_set_terminal_overlay_hide", lambda _delay: None)
+    monkeypatch.setattr(system, "_refresh_tray_menu", lambda: None)
+    monkeypatch.setattr(system, "schedule_management_refresh", lambda: None)
+    _seed_waveform(system)
+
+    system.on_press(object())
+
+    assert system.recording is False
+    assert system.recording_thread is None
+    assert system.transcription_thread is None
+    assert system.recording_file_path is None
+    assert system._active_transcription_generation is None
+    assert system.is_transcription_busy() is False
+    assert system.transcription_ui_session.phase is UiPhase.ERROR
+    assert system.transcription_cancel_event.is_set()
+    assert system._recording_stop_event.is_set()
+    assert system._recording_failed_event.is_set()
+    assert not system._pyaudio_capture_pending.is_set()
+    assert cleanups == [recording_path]
+    assert notifications and notifications[0][0] == "Microphone recording failed to start"
+    assert cues == [CueKind.ERROR]
+    assert _waveform_is_empty(system)
+
+
+def test_transcriber_thread_start_failure_rolls_back_atomically(
+    monkeypatch, tmp_path
+) -> None:
+    from utils import system
+
+    recording_path = _usable_recording(tmp_path / "coordinator-never-started.wav")
+    recorder = FakeThread(alive=False)
+    cleanups: list[Path | None] = []
+    notifications: list[tuple[str, str]] = []
+    cues: list[CueKind] = []
+
+    class RefusedWorker:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("coordinator start refused")
+
+    fake_threading = types.SimpleNamespace(
+        Thread=RefusedWorker,
+        current_thread=threading.current_thread,
+    )
+    session = TranscriptionUiSession()
+    session.begin_recording()
+    monkeypatch.setattr(system, "threading", fake_threading)
+    monkeypatch.setattr(system, "transcription_ui_session", session)
+    monkeypatch.setattr(system, "transcription_cancel_event", threading.Event())
+    monkeypatch.setattr(system, "_recording_stop_event", threading.Event())
+    monkeypatch.setattr(system, "_recording_failed_event", threading.Event())
+    monkeypatch.setattr(system, "recording", True)
+    monkeypatch.setattr(system, "recording_thread", recorder)
+    monkeypatch.setattr(system, "transcription_thread", None)
+    monkeypatch.setattr(system, "recording_file_path", recording_path)
+    monkeypatch.setattr(system, "_active_transcription_generation", 500)
+    monkeypatch.setattr(system, "is_right_control", lambda _key: True)
+    monkeypatch.setattr(system, "_observe_pynput_release", lambda _key: None)
+    monkeypatch.setattr(system, "_show_processing_overlay", lambda: None)
+    monkeypatch.setattr(system, "start_processing_feedback", lambda: None)
+    monkeypatch.setattr(system, "cleanup_recording_file", cleanups.append)
+    monkeypatch.setattr(
+        system,
+        "notify_error",
+        lambda context, detail: notifications.append((context, detail)),
+    )
+    monkeypatch.setattr(system, "play_ui_cue", lambda kind, **_kwargs: cues.append(kind) or True)
+    monkeypatch.setattr(system, "_set_terminal_overlay_hide", lambda _delay: None)
+    monkeypatch.setattr(system, "_refresh_tray_menu", lambda: None)
+    monkeypatch.setattr(system, "schedule_management_refresh", lambda: None)
+    _seed_waveform(system)
+
+    system.on_release(object())
+
+    assert recorder.join_calls == [2.5]
+    assert system.recording is False
+    assert system.recording_thread is None
+    assert system.transcription_thread is None
+    assert system.recording_file_path is None
+    assert system._active_transcription_generation is None
+    assert system.is_transcription_busy() is False
+    assert session.phase is UiPhase.ERROR
+    assert system.transcription_cancel_event.is_set()
+    assert system._recording_stop_event.is_set()
+    assert system._recording_failed_event.is_set()
+    assert cleanups == [recording_path]
+    assert notifications and notifications[0][0] == "Transcription worker failed to start"
+    assert cues == [CueKind.ERROR]
+    assert _waveform_is_empty(system)
+
+
+def test_optional_pyaudio_declines_on_capture_marker_even_with_free_lock(
+    monkeypatch,
+) -> None:
+    from utils import system
+
+    created: list[object] = []
+    terminated: list[object] = []
+
+    class FakePyAudio:
+        def terminate(self) -> None:
+            terminated.append(self)
+
+    def factory() -> FakePyAudio:
+        instance = FakePyAudio()
+        created.append(instance)
+        return instance
+
+    monkeypatch.setattr(system, "_pyaudio_session_lock", threading.Lock())
+    capture_pending = threading.Event()
+    capture_pending.set()
+    monkeypatch.setattr(system, "_pyaudio_capture_pending", capture_pending)
+    monkeypatch.setattr(system.pyaudio, "PyAudio", factory)
+
+    with system._managed_pyaudio(blocking=False) as optional_runtime:
+        assert optional_runtime is None
+    assert created == []
+
+    # The marker reserves priority for capture; capture itself remains allowed
+    # to initialize and owns the guarded runtime through termination.
+    with system._managed_pyaudio(blocking=True) as capture_runtime:
+        assert capture_runtime is created[0]
+    assert terminated == created
+
+
+def test_capture_publication_wins_optional_pyaudio_interleaving(monkeypatch) -> None:
+    from utils import system
+
+    priority = threading.Lock()
+    marker = threading.Event()
+    optional_attempting = threading.Event()
+    optional_result: list[object | None] = []
+    created: list[object] = []
+
+    class FakePyAudio:
+        def __init__(self) -> None:
+            created.append(self)
+
+        def terminate(self) -> None:
+            pass
+
+    monkeypatch.setattr(system, "_pyaudio_priority_lock", priority)
+    monkeypatch.setattr(system, "_pyaudio_session_lock", threading.Lock())
+    monkeypatch.setattr(system, "_pyaudio_capture_pending", marker)
+    monkeypatch.setattr(system.pyaudio, "PyAudio", FakePyAudio)
+
+    def optional_work() -> None:
+        optional_attempting.set()
+        with system._managed_pyaudio(blocking=False) as runtime:
+            optional_result.append(runtime)
+
+    # Model on_press already owning arbitration while it publishes capture.
+    priority.acquire()
+    worker = threading.Thread(target=optional_work, daemon=True)
+    worker.start()
+    assert optional_attempting.wait(1.0)
+    marker.set()
+    priority.release()
+    worker.join(1.0)
+
+    assert not worker.is_alive()
+    assert optional_result == [None]
+    assert created == []
+
+
+def test_idle_non_windows_cue_uses_native_helper_without_pyaudio(monkeypatch) -> None:
+    from utils import system
+
+    calls: list[tuple[list[str], bytes]] = []
+
+    def fake_which(name: str) -> str | None:
+        return "/usr/bin/aplay" if name == "aplay" else None
+
+    def fake_run(command, *, input, **_kwargs):
+        calls.append((command, input))
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(system.sys, "platform", "linux")
+    monkeypatch.setattr(system.shutil, "which", fake_which)
+    monkeypatch.setattr(system.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        system.pyaudio,
+        "PyAudio",
+        lambda: pytest.fail("idle native cue must not initialize PortAudio"),
+    )
+    monkeypatch.setattr(system, "_pyaudio_capture_pending", threading.Event())
+    monkeypatch.setattr(system, "recording", False)
+    monkeypatch.setattr(system, "recording_thread", None)
+    monkeypatch.setattr(system, "transcription_thread", None)
+    monkeypatch.setattr(system, "_active_transcription_generation", None)
+    monkeypatch.setattr(system, "transcription_ui_session", TranscriptionUiSession())
+    cue = synthesize_cue(CueKind.SUCCESS)
+
+    system._play_pcm_cue(cue)
+
+    assert len(calls) == 1
+    command, payload = calls[0]
+    assert command == ["/usr/bin/aplay", "--quiet"]
+    assert payload[:4] == b"RIFF"
+    assert payload[8:12] == b"WAVE"
+
+
+def test_non_windows_lifecycle_cues_supersede_stale_pending_feedback(
+    monkeypatch,
+) -> None:
+    from utils import system
+
+    entered_first = threading.Event()
+    release_first = threading.Event()
+    latest_delivered = threading.Event()
+    calls: list[tuple[str, CueKind | None]] = []
+
+    def native_helper(cue) -> bool:
+        calls.append(("start", cue.kind))
+        if cue.kind is CueKind.RECORDING_STARTED:
+            if not entered_first.is_set():
+                entered_first.set()
+                assert release_first.wait(2.0)
+        calls.append(("done", cue.kind))
+        if len(calls) == 4:
+            latest_delivered.set()
+        return True
+
+    monkeypatch.setattr(system.sys, "platform", "linux")
+    monkeypatch.setattr(system, "_play_native_non_windows_cue", native_helper)
+    monkeypatch.setattr(
+        system.pyaudio,
+        "PyAudio",
+        lambda: pytest.fail("non-Windows cues must never initialize PyAudio"),
+    )
+    monkeypatch.setitem(system.settings, "audio_cues_enabled", True)
+    monkeypatch.setitem(system.settings, "audio_cue_volume", 30)
+
+    assert system.play_ui_cue(CueKind.RECORDING_STARTED) is True
+    assert entered_first.wait(1.0)
+    # These lifecycle transitions happen while the first helper is blocked.
+    # Only the newest pending state (the next generation's start) may survive.
+    assert system.play_ui_cue(CueKind.PROCESSING_STARTED) is True
+    assert system.play_ui_cue(CueKind.CANCELLED) is True
+    assert system.play_ui_cue(CueKind.RECORDING_STARTED) is True
+    assert calls == [("start", CueKind.RECORDING_STARTED)]
+
+    release_first.set()
+    assert latest_delivered.wait(2.0)
+    assert calls == [
+        ("start", CueKind.RECORDING_STARTED),
+        ("done", CueKind.RECORDING_STARTED),
+        ("start", CueKind.RECORDING_STARTED),
+        ("done", CueKind.RECORDING_STARTED),
+    ]
+
+    # Once the worker catches up, a later cue is delivered normally rather
+    # than replaying either superseded state.
+    delivered_next = threading.Event()
+
+    def next_helper(cue) -> bool:
+        calls.append(("next", cue.kind))
+        delivered_next.set()
+        return True
+
+    monkeypatch.setattr(system, "_play_native_non_windows_cue", next_helper)
+    assert system.play_ui_cue(CueKind.SUCCESS) is True
+    assert delivered_next.wait(1.0)
+    assert calls[-1] == ("next", CueKind.SUCCESS)
+    assert not any(kind is CueKind.PROCESSING_STARTED for _phase, kind in calls)
+    assert not any(kind is CueKind.CANCELLED for _phase, kind in calls)
+
+
+def test_non_windows_native_helper_timeout_never_blocks_caller(
+    monkeypatch, caplog
+) -> None:
+    from utils import system
+
+    helper_entered = threading.Event()
+    allow_timeout = threading.Event()
+    helper_finished = threading.Event()
+    timeouts: list[float] = []
+
+    monkeypatch.setattr(
+        system.shutil,
+        "which",
+        lambda name: "/usr/bin/aplay" if name == "aplay" else None,
+    )
+
+    def timed_out_run(_command, *, timeout: float, **_kwargs):
+        timeouts.append(timeout)
+        helper_entered.set()
+        assert allow_timeout.wait(2.0)
+        helper_finished.set()
+        raise system.subprocess.TimeoutExpired("aplay", timeout)
+
+    monkeypatch.setattr(system.subprocess, "run", timed_out_run)
+    monkeypatch.setattr(system.sys, "platform", "linux")
+    monkeypatch.setattr(
+        system.pyaudio,
+        "PyAudio",
+        lambda: pytest.fail("native cue timeout must never touch PyAudio"),
+    )
+    monkeypatch.setitem(system.settings, "audio_cues_enabled", True)
+    monkeypatch.setitem(system.settings, "audio_cue_volume", 30)
+
+    started = time.monotonic()
+    assert system.play_ui_cue(CueKind.ERROR) is True
+    assert time.monotonic() - started < 0.1
+    assert helper_entered.wait(1.0)
+    allow_timeout.set()
+    assert helper_finished.wait(1.0)
+    deadline = time.monotonic() + 1.0
+    while "native ui cue helper" not in caplog.text.casefold() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert timeouts == [3.0]
+    assert "native ui cue helper aplay timed out" in caplog.text.casefold()
+
+
+def test_busy_audio_device_refresh_uses_cache_and_preserves_saved_preference(
+    monkeypatch,
+) -> None:
+    from utils import system
+
+    created: list[object] = []
+
+    class DevicePyAudio:
+        def __init__(self) -> None:
+            created.append(self)
+
+        @staticmethod
+        def get_host_api_count() -> int:
+            return 1
+
+        @staticmethod
+        def get_host_api_info_by_index(_index: int) -> dict[str, object]:
+            return {"name": "PipeWire"}
+
+        @staticmethod
+        def get_device_count() -> int:
+            return 1
+
+        @staticmethod
+        def get_device_info_by_index(_index: int) -> dict[str, object]:
+            return {"name": "Studio Mic", "maxInputChannels": 2, "hostApi": 0}
+
+        @staticmethod
+        def terminate() -> None:
+            pass
+
+    monkeypatch.setattr(system.pyaudio, "PyAudio", DevicePyAudio)
+    monkeypatch.setattr(system, "_pyaudio_session_lock", threading.Lock())
+    monkeypatch.setattr(system, "_input_device_cache_lock", threading.Lock())
+    monkeypatch.setattr(system, "_input_device_cache", ())
+    monkeypatch.setitem(system.settings, "input_device", "Studio Mic")
+
+    expected = [("Studio Mic", "Studio Mic · PipeWire")]
+    assert system.list_input_audio_devices() == expected
+    assert len(created) == 1
+
+    with system._managed_pyaudio(blocking=True):
+        assert system.list_input_audio_devices() == expected
+        assert system.get_input_device_preference() == "Studio Mic"
+        assert len(created) == 2
+
+        # Even before any successful scan, a busy refresh represents the saved
+        # selection provisionally instead of resetting the combo to default.
+        system._input_device_cache = ()
+        provisional = system.list_input_audio_devices()
+        assert provisional == [
+            ("Studio Mic", "Studio Mic · saved preference (scan deferred)")
+        ]
+        assert system.get_input_device_preference() == "Studio Mic"
 
 
 def test_notification_error_logs_and_notifies_without_touching_clipboard(
@@ -203,6 +1072,7 @@ def test_background_transcription_success_inserts_once_and_cleans_temp_file(
     recording = _usable_recording(tmp_path / "success.wav")
     system.recording_file_path = recording
     system.transcription_thread = FakeThread()
+    _seed_waveform(system)
 
     system._transcribe_recording_worker(recording, system.time.monotonic() - 0.25)
 
@@ -220,6 +1090,7 @@ def test_background_transcription_success_inserts_once_and_cleans_temp_file(
     assert system.transcription_thread is None
     assert observed["tray_refreshes"] == [True]
     assert observed["management_refreshes"] == [True]
+    assert _waveform_is_empty(system)
 
 
 def test_background_transcription_error_is_terminal_and_cleans_temp_file(
@@ -324,6 +1195,7 @@ def test_cancelled_live_recorder_stays_busy_and_blocks_a_new_generation(
     monkeypatch.setattr(system, "client_enabled", True)
     monkeypatch.setattr(system, "is_right_control", lambda _key: True)
     monkeypatch.setattr(system, "_observe_pynput_press", lambda _key: None)
+    _seed_waveform(system)
 
     assert system.cancel_active_transcription() is True
     reaper = system.transcription_thread
@@ -331,6 +1203,7 @@ def test_cancelled_live_recorder_stays_busy_and_blocks_a_new_generation(
     assert recorder.is_alive()
     assert system.recording_thread is recorder
     assert system.is_transcription_busy() is True
+    assert _waveform_is_empty(system)
 
     # A repeated hotkey cannot clear/reuse this generation's cancellation Event.
     system.on_press(object())
@@ -455,6 +1328,7 @@ def test_release_never_detaches_recorder_before_wav_flush(monkeypatch, tmp_path)
     monkeypatch.setattr(system, "recording_file_path", recording)
     monkeypatch.setattr(system, "is_right_control", lambda _key: True)
     monkeypatch.setattr(system, "_observe_pynput_release", lambda _key: None)
+    _seed_waveform(system)
 
     system.on_release(object())
     coordinator = system.transcription_thread
@@ -463,6 +1337,7 @@ def test_release_never_detaches_recorder_before_wav_flush(monkeypatch, tmp_path)
     assert system.recording_thread is recorder
     assert system.is_transcription_busy() is True
     assert session.phase is UiPhase.PROCESSING
+    assert _waveform_is_empty(system)
 
     allow_flush.set()
     recorder.join(1.0)
@@ -551,6 +1426,8 @@ def test_stale_generation_finalizer_cannot_clear_newer_session(monkeypatch, tmp_
     monkeypatch.setattr(system, "recording_file_path", new_path)
     monkeypatch.setattr(system, "recording_thread", current_recorder)
     monkeypatch.setattr(system, "transcription_thread", current_transcriber)
+    system._clear_waveform_buffers()
+    _seed_waveform(system)
 
     system._finalize_transcription_session(
         51,
@@ -566,6 +1443,8 @@ def test_stale_generation_finalizer_cannot_clear_newer_session(monkeypatch, tmp_
     assert system.recording_file_path == new_path
     assert system.recording_thread is current_recorder
     assert system.transcription_thread is current_transcriber
+    assert not _waveform_is_empty(system)
+    system._clear_waveform_buffers()
 
 
 def test_shutdown_wait_is_bounded_and_reconciles_only_stopped_workers(
@@ -598,6 +1477,7 @@ def test_shutdown_wait_is_bounded_and_reconciles_only_stopped_workers(
     monkeypatch.setattr(system, "transcription_thread", worker)
     monkeypatch.setattr(system, "recording_file_path", recording)
     _isolate_worker_side_effects(monkeypatch, system)
+    _seed_waveform(system)
 
     started = time.monotonic()
     assert system.cancel_and_wait_for_active_transcription(0.05) is False
@@ -605,6 +1485,7 @@ def test_shutdown_wait_is_bounded_and_reconciles_only_stopped_workers(
     assert worker.is_alive()
     assert system.transcription_thread is worker
     assert not recording.exists()
+    assert _waveform_is_empty(system)
 
     allow_exit.set()
     worker.join(1.0)
@@ -712,6 +1593,51 @@ def test_overlay_geometry_helpers_are_headless_and_monitor_safe(monkeypatch) -> 
     assert min(points[1::2]) >= 0
     assert max(points[1::2]) <= 6
     assert options == {"smooth": True, "splinesteps": 24, "fill": "#123456"}
+
+
+def test_overlay_monitor_follows_foreground_window_before_cursor(monkeypatch) -> None:
+    import ctypes
+    from types import SimpleNamespace
+
+    from utils import midnight_overlay
+
+    class FakeRoot:
+        def winfo_screenwidth(self) -> int:
+            return 800
+
+        def winfo_screenheight(self) -> int:
+            return 600
+
+    class FakeUser32:
+        def GetForegroundWindow(self) -> int:
+            return 101
+
+        def MonitorFromWindow(self, window: int, flags: int) -> int:
+            assert (window, flags) == (101, 2)
+            return 202
+
+        def GetCursorPos(self, _point) -> int:
+            raise AssertionError("cursor fallback must not run for a foreground window")
+
+        def MonitorFromPoint(self, _point, _flags: int) -> int:
+            raise AssertionError("cursor monitor must not replace foreground monitor")
+
+        def GetMonitorInfoW(self, monitor: int, info_pointer) -> int:
+            assert monitor == 202
+            work = info_pointer._obj.rcWork
+            work.left, work.top, work.right, work.bottom = (-1920, 24, 0, 1080)
+            return 1
+
+    monkeypatch.setattr(midnight_overlay.sys, "platform", "win32")
+    monkeypatch.setattr(
+        ctypes,
+        "windll",
+        SimpleNamespace(user32=FakeUser32()),
+    )
+
+    assert midnight_overlay.active_monitor_bounds(FakeRoot()) == (
+        midnight_overlay.MonitorBounds(-1920, 24, 0, 1080)
+    )
 
 
 def test_overlay_reuse_revokes_pending_terminal_dismissal() -> None:

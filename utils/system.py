@@ -6,9 +6,11 @@ from datetime import datetime
 import atexit
 import argparse
 from array import array
+from contextlib import contextmanager
 import http.client
 import json
 import os
+import shutil
 import socket
 import sys
 import tempfile
@@ -42,7 +44,7 @@ from utils.hotkeys import (
     key_name as hotkey_key_name,
 )
 from utils.version import APP_VERSION
-from utils.audio_cues import CueKind, CuePlayer, Pcm16Cue
+from utils.audio_cues import CueKind, CuePlayer, Pcm16Cue, cue_to_wav_bytes
 from utils.ui_state import TranscriptionUiSession, UiPhase
 
 
@@ -171,6 +173,23 @@ processing_sound_data: Optional[bytes] = None
 processing_sound_settings: Optional[Dict[str, int]] = None
 _ready_sound_lock = threading.Lock()
 _ready_sound_played = False
+# PyAudio calls PortAudio's process-global initialize/terminate functions for
+# every ``PyAudio`` instance.  Those lifecycle calls are not safe to overlap:
+# the Windows extension can access-violate when microphone capture and a cue or
+# device scan initialize concurrently.  Hold this lock for the complete life
+# of every remaining PyAudio instance, not merely around its constructor.
+_pyaudio_session_lock = threading.Lock()
+# Optional PortAudio work and capture publication share this small arbitration
+# lock.  Once capture publishes its marker, no later optional operation can
+# cross the marker check and construct PyAudio first.  Non-Windows cues never
+# use this path; they run through an out-of-process native audio helper.
+_pyaudio_priority_lock = threading.Lock()
+_pyaudio_capture_pending = threading.Event()
+# Device enumeration is optional UI work.  A refresh attempted during capture
+# returns this last successful snapshot (or the saved preference) rather than
+# claiming that the machine suddenly has no microphones.
+_input_device_cache_lock = threading.Lock()
+_input_device_cache: tuple[tuple[str, str], ...] = ()
 transcription_ui_session = TranscriptionUiSession()
 transcription_thread: Optional[threading.Thread] = None
 transcription_cancel_event = threading.Event()
@@ -702,91 +721,211 @@ def load_processing_sound():
     processing_sound_settings = settings_audio
     return processing_sound_data, processing_sound_settings
 
+
+def _set_pyaudio_capture_pending(pending: bool) -> None:
+    with _pyaudio_priority_lock:
+        if pending:
+            _pyaudio_capture_pending.set()
+        else:
+            _pyaudio_capture_pending.clear()
+
+
+@contextmanager
+def _managed_pyaudio(*, blocking: bool):
+    """Yield one exclusively owned PyAudio instance, or ``None`` if busy.
+
+    Capture is the primary operation and waits for ownership.  Optional legacy
+    feedback and device enumeration request non-blocking ownership so they
+    cannot freeze the UI or delay dictation.
+    """
+
+    pa_instance = None
+    if blocking:
+        acquired = _pyaudio_session_lock.acquire(blocking=True)
+    else:
+        # Hold arbitration from the marker check through construction.  The
+        # hotkey publishes capture under the same lock, closing the last
+        # check-then-initialize race without waiting for optional stream work.
+        with _pyaudio_priority_lock:
+            if _pyaudio_capture_pending.is_set():
+                acquired = False
+            else:
+                acquired = _pyaudio_session_lock.acquire(blocking=False)
+                if acquired:
+                    try:
+                        pa_instance = pyaudio.PyAudio()
+                    except Exception:
+                        _pyaudio_session_lock.release()
+                        raise
+    if not acquired:
+        yield None
+        return
+    try:
+        if pa_instance is None:
+            pa_instance = pyaudio.PyAudio()
+        yield pa_instance
+    finally:
+        if pa_instance is not None:
+            try:
+                pa_instance.terminate()
+            except Exception:
+                logger.debug("Failed to terminate the exclusive PyAudio session", exc_info=True)
+        _pyaudio_session_lock.release()
+
 def _processing_sound_loop():
     data, settings_audio = load_processing_sound()
-    pa_instance = pyaudio.PyAudio()
-    stream = None
-    try:
-        stream = pa_instance.open(
-            format=pyaudio.get_format_from_width(settings_audio["width"]),
-            channels=settings_audio["channels"],
-            rate=settings_audio["rate"],
-            output=True,
-        )
-
-        # choose a short hop for snappy visuals (~10 ms)
-        bytes_per_sample = settings_audio["width"]
-        channels = settings_audio["channels"]
-        hop_samples = int(settings_audio["rate"] * 0.010)  # 10 ms
-        chunk_bytes = hop_samples * bytes_per_sample * channels
-
-        offset = 0
-        nbytes = len(data)
-
-        alpha = 0.35  # smoothing (higher = more responsive)
-
-        while not processing_sound_stop_event.is_set():
-            if offset + chunk_bytes > nbytes:
-                offset = 0  # loop the sound
-
-            chunk = data[offset:offset + chunk_bytes]
-            offset += chunk_bytes
-
-            stream.write(chunk)
-
-            try:
-                if bytes_per_sample == 2:
-                    arr = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
-                    if channels > 1:
-                        arr = arr.reshape(-1, channels).mean(axis=1)
-                    rms = float(np.sqrt(np.mean(arr * arr)))
-                    # update smoothed level
-                    global _processing_level, _proc_vis_samples
-                    with _processing_level_lock:
-                        _processing_level = (1.0 - alpha) * _processing_level + alpha * rms
-                    # keep recent mono samples for GUI wiggle
-                    with _proc_vis_lock:
-                        _proc_vis_buffers.append(arr.copy())
-                        _proc_vis_samples += arr.size
-                        while _proc_vis_samples > _PROC_VIS_MAX_SAMPLES and _proc_vis_buffers:
-                            popped = _proc_vis_buffers.popleft()
-                            _proc_vis_samples -= popped.size
-            except Exception:
-                logger.exception("Failed to update processing waveform metrics")
-
-    except Exception:
-        logger.exception("Processing feedback loop crashed")
-    finally:
+    with _managed_pyaudio(blocking=False) as pa_instance:
+        if pa_instance is None:
+            logger.debug("Skipping legacy processing audio while PortAudio is busy")
+            return
+        stream = None
         try:
-            if stream is not None:
-                stream.stop_stream(); stream.close()
+            stream = pa_instance.open(
+                format=pyaudio.get_format_from_width(settings_audio["width"]),
+                channels=settings_audio["channels"],
+                rate=settings_audio["rate"],
+                output=True,
+            )
+
+            # choose a short hop for snappy visuals (~10 ms)
+            bytes_per_sample = settings_audio["width"]
+            channels = settings_audio["channels"]
+            hop_samples = int(settings_audio["rate"] * 0.010)  # 10 ms
+            chunk_bytes = hop_samples * bytes_per_sample * channels
+
+            offset = 0
+            nbytes = len(data)
+
+            alpha = 0.35  # smoothing (higher = more responsive)
+
+            while not processing_sound_stop_event.is_set():
+                if offset + chunk_bytes > nbytes:
+                    offset = 0  # loop the sound
+
+                chunk = data[offset:offset + chunk_bytes]
+                offset += chunk_bytes
+
+                stream.write(chunk)
+
+                try:
+                    if bytes_per_sample == 2:
+                        arr = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+                        if channels > 1:
+                            arr = arr.reshape(-1, channels).mean(axis=1)
+                        rms = float(np.sqrt(np.mean(arr * arr)))
+                        # update smoothed level
+                        global _processing_level, _proc_vis_samples
+                        with _processing_level_lock:
+                            _processing_level = (1.0 - alpha) * _processing_level + alpha * rms
+                        # keep recent mono samples for GUI wiggle
+                        with _proc_vis_lock:
+                            _proc_vis_buffers.append(arr.copy())
+                            _proc_vis_samples += arr.size
+                            while _proc_vis_samples > _PROC_VIS_MAX_SAMPLES and _proc_vis_buffers:
+                                popped = _proc_vis_buffers.popleft()
+                                _proc_vis_samples -= popped.size
+                except Exception:
+                    logger.exception("Failed to update processing waveform metrics")
+
         except Exception:
-            logger.exception("Failed to close processing audio stream cleanly")
-        pa_instance.terminate()
+            logger.exception("Processing feedback loop crashed")
+        finally:
+            try:
+                if stream is not None:
+                    stream.stop_stream(); stream.close()
+            except Exception:
+                logger.exception("Failed to close processing audio stream cleanly")
+
+
+def _play_native_non_windows_cue(cue: Pcm16Cue) -> bool:
+    """Use an OS audio helper for every non-Windows cue without PortAudio.
+
+    Linux desktop images normally provide PipeWire's ``pw-play`` or ALSA's
+    ``aplay``.  Running that helper out of process prevents its audio lifecycle
+    from racing the PyAudio extension in CtrlSpeak.  macOS ``afplay`` needs a
+    short-lived file rather than standard input.
+    """
+
+    payload = cue_to_wav_bytes(cue)
+    if sys.platform == "darwin":
+        player = shutil.which("afplay")
+        if not player:
+            logger.warning("Unable to preview UI cue: afplay is unavailable")
+            return False
+        temp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
+                handle.write(payload)
+                temp_path = handle.name
+            subprocess.run(
+                [player, temp_path],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=3.0,
+            )
+            return True
+        except Exception:
+            logger.warning("Native macOS UI cue playback failed", exc_info=True)
+            return False
+        finally:
+            if temp_path:
+                try:
+                    Path(temp_path).unlink(missing_ok=True)
+                except OSError:
+                    logger.debug("Failed to remove temporary UI cue", exc_info=True)
+
+    candidates = (
+        ("pw-play", ["-"]),
+        ("aplay", ["--quiet"]),
+    )
+    attempted = False
+    for executable, arguments in candidates:
+        player = shutil.which(executable)
+        if not player:
+            continue
+        attempted = True
+        try:
+            subprocess.run(
+                [player, *arguments],
+                input=payload,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=3.0,
+            )
+            return True
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "Native UI cue helper %s timed out after %.1f seconds",
+                executable,
+                3.0,
+            )
+            return False
+        except Exception:
+            logger.debug("Native UI cue helper %s failed", executable, exc_info=True)
+    if attempted:
+        logger.warning("Unable to preview UI cue with the available native audio helpers")
+    else:
+        logger.warning("Unable to preview UI cue: no native audio helper is available")
+    return False
 
 
 def _play_pcm_cue(cue: Pcm16Cue) -> None:
     """Play one prepared cue; output-device failures never affect transcription."""
 
-    pa_instance = pyaudio.PyAudio()
-    stream = None
-    try:
-        stream = pa_instance.open(
-            format=pyaudio.paInt16,
-            channels=cue.channels,
-            rate=cue.sample_rate,
-            output=True,
-            frames_per_buffer=1024,
+    if sys.platform.startswith("win"):
+        # PlaySound owns no PortAudio state.  SND_MEMORY is synchronous, while
+        # CuePlayer already invokes this sink on its short-lived daemon thread.
+        import winsound
+
+        winsound.PlaySound(
+            cue_to_wav_bytes(cue),
+            winsound.SND_MEMORY | winsound.SND_NODEFAULT,
         )
-        stream.write(cue.frames)
-    finally:
-        if stream is not None:
-            try:
-                stream.stop_stream()
-                stream.close()
-            except Exception:
-                logger.debug("Failed to close the UI cue stream", exc_info=True)
-        pa_instance.terminate()
+        return
+
+    _play_native_non_windows_cue(cue)
 
 
 def play_ui_cue(kind: CueKind, *, background: bool = True) -> bool:
@@ -829,43 +968,61 @@ def play_model_ready_sound_once() -> None:
     play_ui_cue(CueKind.SUCCESS)
 
 
-def list_input_audio_devices() -> List[Tuple[str, str]]:
-    """Return a list of (device_name, display_label) for input-capable devices."""
-    devices: List[Tuple[str, str]] = []
-    pa_instance: Optional[pyaudio.PyAudio] = None
-    try:
-        pa_instance = pyaudio.PyAudio()
-        host_names: Dict[int, str] = {}
-        try:
-            for host_index in range(pa_instance.get_host_api_count()):
-                host_info = pa_instance.get_host_api_info_by_index(host_index)
-                host_names[host_index] = str(host_info.get("name", ""))
-        except Exception:
-            logger.exception("Failed to enumerate audio host APIs")
+def _cached_input_audio_devices() -> List[Tuple[str, str]]:
+    with _input_device_cache_lock:
+        cached = list(_input_device_cache)
+    if cached:
+        return cached
+    preferred = get_input_device_preference()
+    if preferred:
+        return [(preferred, f"{preferred} · saved preference (scan deferred)")]
+    return []
 
-        for index in range(pa_instance.get_device_count()):
+
+def list_input_audio_devices() -> List[Tuple[str, str]]:
+    """Return input devices without falsifying a busy refresh as device loss.
+
+    Enumeration must never initialize PortAudio alongside capture.  When the
+    runtime is busy, callers receive the last successful snapshot.  Before the
+    first successful scan, an existing saved preference is retained as a
+    provisional entry so the management UI cannot replace it with the system
+    default merely because the microphone is currently in use.
+    """
+
+    global _input_device_cache
+    devices: List[Tuple[str, str]] = []
+    with _managed_pyaudio(blocking=False) as pa_instance:
+        if pa_instance is None:
+            logger.debug("Returning cached input devices while PortAudio is busy")
+            return _cached_input_audio_devices()
+        try:
+            host_names: Dict[int, str] = {}
             try:
-                info = pa_instance.get_device_info_by_index(index)
+                for host_index in range(pa_instance.get_host_api_count()):
+                    host_info = pa_instance.get_host_api_info_by_index(host_index)
+                    host_names[host_index] = str(host_info.get("name", ""))
             except Exception:
-                logger.exception("Failed to read audio device info for index %s", index)
-                continue
-            if int(info.get("maxInputChannels", 0)) <= 0:
-                continue
-            name = str(info.get("name", f"Device {index}"))
-            host_name = host_names.get(info.get("hostApi"), "")
-            label = name
-            if host_name:
-                label = f"{label} · {host_name}"
-            devices.append((name, label))
-    except Exception:
-        logger.exception("Failed to enumerate input audio devices")
-        return []
-    finally:
-        if pa_instance is not None:
-            try:
-                pa_instance.terminate()
-            except Exception:
-                logger.exception("Failed to terminate PyAudio after device enumeration")
+                logger.exception("Failed to enumerate audio host APIs")
+
+            for index in range(pa_instance.get_device_count()):
+                try:
+                    info = pa_instance.get_device_info_by_index(index)
+                except Exception:
+                    logger.exception("Failed to read audio device info for index %s", index)
+                    continue
+                if int(info.get("maxInputChannels", 0)) <= 0:
+                    continue
+                name = str(info.get("name", f"Device {index}"))
+                host_name = host_names.get(info.get("hostApi"), "")
+                label = name
+                if host_name:
+                    label = f"{label} · {host_name}"
+                devices.append((name, label))
+        except Exception:
+            logger.exception("Failed to enumerate input audio devices")
+            return _cached_input_audio_devices()
+    with _input_device_cache_lock:
+        _input_device_cache = tuple(devices)
     return devices
 
 
@@ -914,47 +1071,47 @@ def record_audio(
     hotkey lifecycle never reuses that mutable flag to control a worker.
     """
 
-    pyaudio_instance = pyaudio.PyAudio()
-    stream = None
-    sample_width: Optional[int] = None
-    stream_kwargs = dict(
-        format=FORMAT,
-        channels=CHANNELS,
-        rate=RATE,
-        input=True,
-        frames_per_buffer=CHUNKSIZE,
-    )
-    preferred_index = _resolve_input_device_index(pyaudio_instance)
-    if preferred_index is not None:
-        stream_kwargs["input_device_index"] = preferred_index
-    frames = []
-    try:
+    with _managed_pyaudio(blocking=True) as pyaudio_instance:
+        assert pyaudio_instance is not None
+        stream = None
+        sample_width: Optional[int] = None
+        stream_kwargs = dict(
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=RATE,
+            input=True,
+            frames_per_buffer=CHUNKSIZE,
+        )
+        preferred_index = _resolve_input_device_index(pyaudio_instance)
+        if preferred_index is not None:
+            stream_kwargs["input_device_index"] = preferred_index
+        frames = []
         try:
-            stream = pyaudio_instance.open(**stream_kwargs)
-        except Exception:
-            if "input_device_index" in stream_kwargs:
-                logger.exception("Failed to open preferred input device; falling back to system default")
-                stream_kwargs.pop("input_device_index", None)
-                stream = pyaudio_instance.open(**stream_kwargs)
-            else:
-                raise
-        sample_width = pyaudio_instance.get_sample_size(FORMAT)
-        def should_continue() -> bool:
-            return not stop_event.is_set() if stop_event is not None else recording
-
-        while should_continue():
-            _chunk = stream.read(CHUNKSIZE)
-            frames.append(_chunk)
-            _push_waveform_bytes(_chunk)
-            transcription_ui_session.update_level_pcm16(_chunk)
-    finally:
-        if stream is not None:
             try:
-                stream.stop_stream()
-                stream.close()
+                stream = pyaudio_instance.open(**stream_kwargs)
             except Exception:
-                logger.debug("Failed to close microphone stream cleanly", exc_info=True)
-        pyaudio_instance.terminate()
+                if "input_device_index" in stream_kwargs:
+                    logger.exception("Failed to open preferred input device; falling back to system default")
+                    stream_kwargs.pop("input_device_index", None)
+                    stream = pyaudio_instance.open(**stream_kwargs)
+                else:
+                    raise
+            sample_width = pyaudio_instance.get_sample_size(FORMAT)
+            def should_continue() -> bool:
+                return not stop_event.is_set() if stop_event is not None else recording
+
+            while should_continue():
+                _chunk = stream.read(CHUNKSIZE)
+                frames.append(_chunk)
+                _push_waveform_bytes(_chunk)
+                transcription_ui_session.update_level_pcm16(_chunk)
+        finally:
+            if stream is not None:
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except Exception:
+                    logger.debug("Failed to close microphone stream cleanly", exc_info=True)
     if sample_width is None:
         raise RuntimeError("The microphone stream did not provide a sample width")
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -974,8 +1131,10 @@ def _record_audio_worker(
 ) -> None:
     """Keep microphone/backend failures inside CtrlSpeak's reporting path."""
 
+    global recording_file_path, recording_thread, _active_transcription_generation
     failure = failure_event or _recording_failed_event
     cancel = cancel_event or transcription_cancel_event
+    _set_pyaudio_capture_pending(True)
     try:
         if stop_event is None:
             record_audio(target_path)
@@ -992,6 +1151,33 @@ def _record_audio_worker(
         logger.exception("Microphone recording failed")
         if is_current and not cancel.is_set():
             notify_error("Microphone recording failed", format_exception_details(exc))
+    finally:
+        # ``record_audio`` returns only after the input stream is closed and
+        # _managed_pyaudio has terminated its instance.
+        _set_pyaudio_capture_pending(False)
+        orphaned = False
+        with _transcription_state_lock:
+            # If key release could not start its coordinator, the recorder is
+            # the only remaining worker capable of closing this generation.
+            # It is safe to clear its own reference here: capture and WAV flush
+            # are already complete and this function is about to return.
+            if (
+                _session_is_current_locked(generation)
+                and not recording
+                and transcription_thread is None
+                and recording_thread is threading.current_thread()
+                and (failure.is_set() or cancel.is_set())
+            ):
+                recording_thread = None
+                if recording_file_path == target_path:
+                    recording_file_path = None
+                _active_transcription_generation = None
+                orphaned = True
+        if orphaned:
+            cleanup_recording_file(target_path)
+            _clear_waveform_buffers()
+            _refresh_tray_menu()
+            schedule_management_refresh()
 
 # ---------------- Client keyboard listener ----------------
 def _client_hotkey_available() -> bool:
@@ -1105,6 +1291,7 @@ def _finish_cancelled_session() -> None:
     if phase not in {UiPhase.RECORDING, UiPhase.PROCESSING}:
         return
     transcription_ui_session.cancel()
+    _clear_waveform_buffers()
     play_ui_cue(CueKind.CANCELLED)
     _set_terminal_overlay_hide(1200)
     _refresh_tray_menu()
@@ -1116,6 +1303,7 @@ def cancel_active_transcription(_icon=None, _item=None) -> bool:
 
     global recording, transcription_thread
     reaper: Optional[threading.Thread] = None
+    reaper_start_failed = False
     with _transcription_state_lock:
         phase = transcription_ui_session.phase
         if phase not in {UiPhase.RECORDING, UiPhase.PROCESSING} and not recording:
@@ -1146,6 +1334,22 @@ def cancel_active_transcription(_icon=None, _item=None) -> bool:
             reaper.start()
         except Exception:
             logger.exception("Failed to start the cancelled-recording cleanup worker")
+            # Never retain an unstarted coordinator: is_transcription_busy()
+            # treats every non-None worker reference as pending.  The recorder
+            # remains registered when it is still alive and its existing
+            # orphan finalizer will close the generation after capture stops.
+            with _transcription_state_lock:
+                if transcription_thread is reaper:
+                    transcription_thread = None
+            reaper_start_failed = True
+    if reaper_start_failed:
+        _finalize_transcription_session(
+            generation,
+            path,
+            recorder=recorder,
+        )
+        _refresh_tray_menu()
+        schedule_management_refresh()
     return True
 
 
@@ -1162,10 +1366,12 @@ def _finalize_transcription_session(
     global _active_transcription_generation
 
     should_cleanup = True
+    clear_waveform = False
     with _transcription_state_lock:
         if not _session_is_current_locked(generation):
             should_cleanup = True
         else:
+            clear_waveform = True
             candidate_recorder = recorder or recording_thread
             recorder_stopped = candidate_recorder is None or not candidate_recorder.is_alive()
             should_cleanup = recorder_stopped
@@ -1184,6 +1390,8 @@ def _finalize_transcription_session(
                 _active_transcription_generation = None
     if should_cleanup:
         cleanup_recording_file(path)
+    if clear_waveform:
+        _clear_waveform_buffers()
 
 
 def _cancelled_recording_reaper(
@@ -1350,6 +1558,7 @@ def _transcribe_recording_worker(
 def on_press(key):
     global recording, recording_thread, recording_file_path
     global transcription_cancel_event, _recording_failed_event, _recording_stop_event
+    global _active_transcription_generation
     _observe_pynput_press(key)
     with _client_state_lock:
         if not client_enabled:
@@ -1369,6 +1578,8 @@ def on_press(key):
         with _client_state_lock:
             if not client_enabled:
                 return
+            start_error: Exception | None = None
+            failed_path: Path | None = None
             with _transcription_state_lock:
                 if is_transcription_busy():
                     return
@@ -1395,17 +1606,48 @@ def on_press(key):
                     name="CtrlSpeakRecorder",
                     daemon=True,
                 )
-                recording_thread.start()
-            _show_recording_overlay()
-            play_ui_cue(CueKind.RECORDING_STARTED)
+                # Publish capture priority before the worker is scheduled so
+                # a non-Windows cue thread cannot win the PortAudio race in
+                # the interval between Thread.start() and record_audio().
+                _set_pyaudio_capture_pending(True)
+                try:
+                    recording_thread.start()
+                except Exception as exc:
+                    logger.exception("Failed to start the microphone recording worker")
+                    start_error = exc
+                    failed_path = recording_file_path
+                    _set_pyaudio_capture_pending(False)
+                    _recording_stop_event.set()
+                    _recording_failed_event.set()
+                    transcription_cancel_event.set()
+                    recording = False
+                    recording_thread = None
+                    recording_file_path = None
+                    _active_transcription_generation = None
+                    if transcription_ui_session.phase is UiPhase.RECORDING:
+                        transcription_ui_session.fail("microphone_failed")
+                    _clear_waveform_buffers()
+            if start_error is None:
+                _show_recording_overlay()
+                play_ui_cue(CueKind.RECORDING_STARTED)
+            else:
+                cleanup_recording_file(failed_path)
+                notify_error(
+                    "Microphone recording failed to start",
+                    format_exception_details(start_error),
+                )
+                play_ui_cue(CueKind.ERROR)
+                _set_terminal_overlay_hide(3800)
             _refresh_tray_menu()
             schedule_management_refresh()
 
 
 def on_release(key):
-    global recording, transcription_thread
+    global recording, recording_file_path, recording_thread, transcription_thread
+    global _active_transcription_generation
     _observe_pynput_release(key)
     if is_right_control(key):
+        start_error: Exception | None = None
         with _transcription_state_lock:
             if not recording:
                 return
@@ -1417,9 +1659,11 @@ def on_release(key):
             recording = False
             _recording_stop_event.set()
             if cancel_event.is_set() or transcription_ui_session.phase is not UiPhase.RECORDING:
+                _clear_waveform_buffers()
                 return
             transcription_ui_session.begin_processing()
             _show_processing_overlay()
+            _clear_waveform_buffers()
             start_processing_feedback()
             started_at = time.monotonic()
             transcription_thread = threading.Thread(
@@ -1435,7 +1679,45 @@ def on_release(key):
                 name="CtrlSpeakTranscriber",
                 daemon=True,
             )
-            transcription_thread.start()
+            try:
+                transcription_thread.start()
+            except Exception as exc:
+                logger.exception("Failed to start the transcription coordinator")
+                start_error = exc
+                transcription_thread = None
+                failure_event.set()
+                cancel_event.set()
+                _recording_stop_event.set()
+                if transcription_ui_session.phase is UiPhase.PROCESSING:
+                    transcription_ui_session.fail("unexpected_error")
+                _clear_waveform_buffers()
+        if start_error is not None:
+            if recorder is not None and recorder is not threading.current_thread():
+                try:
+                    recorder.join(timeout=2.5)
+                except RuntimeError:
+                    logger.debug("Recorder had not started during coordinator rollback")
+            recorder_stopped = recorder is None or not recorder.is_alive()
+            with _transcription_state_lock:
+                if _session_is_current_locked(generation):
+                    if recording_thread is recorder and recorder_stopped:
+                        recording_thread = None
+                    transcription_thread = None
+                    if recording_file_path == path and recorder_stopped:
+                        recording_file_path = None
+                    if recording_thread is None:
+                        _active_transcription_generation = None
+            cleanup_recording_file(path)
+            _clear_waveform_buffers()
+            notify_error(
+                "Transcription worker failed to start",
+                format_exception_details(start_error),
+            )
+            play_ui_cue(CueKind.ERROR)
+            _set_terminal_overlay_hide(3800)
+            _refresh_tray_menu()
+            schedule_management_refresh()
+            return
         _refresh_tray_menu()
         schedule_management_refresh()
 
@@ -1560,6 +1842,7 @@ def cancel_and_wait_for_active_transcription(timeout_seconds: float = 2.5) -> bo
         logger.warning(
             "CtrlSpeak shutdown timed out waiting for active transcription workers"
         )
+    _clear_waveform_buffers()
     return stopped
 
 

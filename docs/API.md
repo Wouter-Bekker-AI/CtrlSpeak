@@ -1,4 +1,4 @@
-# CtrlSpeak API v0.7.0
+# CtrlSpeak API v0.7.1
 
 The maintained implementation is in `server/whisper_transcription`. The v0.7
 contract preserves the three deployment roles introduced in v0.6 and adds safe,
@@ -55,7 +55,7 @@ loaded model/runtime:
 ```json
 {
   "status": "ready",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "role": "worker",
   "model": "large-v3-turbo",
   "device": "cuda",
@@ -68,7 +68,7 @@ providers permitted for the caller:
 
 ```json
 {
-  "version": "0.7.0",
+  "version": "0.7.1",
   "role": "gateway",
   "accepts_client_transcriptions": true,
   "applies_corrections": true,
@@ -340,7 +340,7 @@ binds feedback to the original transcription ID, URL, and client bearer token.
   "rule_ids": [],
   "confirmed_text": "the user-confirmed final text",
   "capture_method": "active_field_on_enter",
-  "client_metadata": {"client": "CtrlSpeak", "version": "0.7.0"}
+  "client_metadata": {"client": "CtrlSpeak", "version": "0.7.1"}
 }
 ```
 

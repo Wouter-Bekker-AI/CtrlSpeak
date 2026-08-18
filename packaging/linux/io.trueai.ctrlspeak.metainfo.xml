@@ -22,6 +22,11 @@
     <category>Accessibility</category>
   </categories>
   <releases>
+    <release version="0.7.1" date="2026-08-18">
+      <description>
+        <p>Prevents competing PortAudio lifecycles during recording feedback, fixes the resulting Windows recording-start crash, and restores the approved Midnight Signal visual fidelity.</p>
+      </description>
+    </release>
     <release version="0.7.0" date="2026-08-18">
       <description>
         <p>Introduces the Midnight Signal interface, truthful provider telemetry, accessible recording and processing overlays, and safer configurable audio cues.</p>

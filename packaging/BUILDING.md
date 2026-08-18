@@ -148,10 +148,16 @@ actionable message if the system runtime is not usable.
 
 On Windows the same v0.7 specification produces `CtrlSpeak.exe` with
 `console=False`; the executable does not have a console window. Windows version
-resources identify product/file version 0.7.0. The historical v0.2-v0.6 specs
+resources identify product/file version 0.7.1. The historical v0.2-v0.6 specs
 remain in the repository for reproducibility but are no longer selected by the
 standard build helper. The Watcher option remains Windows-only and does not use
 the standard CtrlSpeak updater identity.
+
+v0.7.1 keeps Windows UI feedback independent from the PortAudio microphone
+lifecycle. A successful build or metadata health receipt does not prove that
+native path: perform the real-microphone, cues-enabled right-Ctrl stress pass
+and Windows event-log check in `docs/TESTING.md` against the exact one-file
+candidate before publishing it.
 
 Release assets use platform-qualified names, but an installed standard copy is
 always `CtrlSpeak.exe` on Windows or `CtrlSpeak` on Linux. The signed updater

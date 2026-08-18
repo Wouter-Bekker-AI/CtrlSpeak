@@ -1,4 +1,4 @@
-# CtrlSpeak transcription service v0.7.0
+# CtrlSpeak transcription service v0.7.1
 
 This directory contains both CtrlSpeak server roles:
 

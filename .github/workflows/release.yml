@@ -61,6 +61,8 @@ jobs:
           $health = Get-Content -Raw "$env:RUNNER_TEMP\ctrlspeak-health.json" | ConvertFrom-Json
           $expectedVersion = ('${{ github.ref_name }}').Substring(1)
           if ($health.product -ne 'ctrlspeak' -or $health.version -ne $expectedVersion -or -not $health.frozen) { throw "Invalid packaged health metadata" }
+          $versionInfo = (Get-Item -LiteralPath .\dist\CtrlSpeak.exe).VersionInfo
+          if ($versionInfo.FileVersion -ne $expectedVersion -or $versionInfo.ProductVersion -ne $expectedVersion) { throw "Invalid packaged Windows version resource" }
           Copy-Item -LiteralPath .\dist\CtrlSpeak.exe -Destination .\release\CtrlSpeak-windows-x86_64.exe
 
       - name: Smoke-test Linux packaged metadata

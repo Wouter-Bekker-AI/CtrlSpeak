@@ -1,4 +1,4 @@
-# CtrlSpeak v0.7.0
+# CtrlSpeak v0.7.1
 
 CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into
@@ -53,7 +53,24 @@ an em dash or an explanatory unavailable state; client wall-clock time is not
 labelled as server inference, and illustrative concept values never appear as
 live data. UI snapshots retain no transcript text, audio, bearer credentials,
 or OpenAI key. See `docs/V0.7_MIDNIGHT_SIGNAL_RELEASE.md` for the approved
-experience and release acceptance contract.
+experience baseline and `docs/V0.7.1_HOTFIX_RELEASE.md` for the current hotfix
+contract.
+
+## v0.7.1 recording and visual-fidelity hotfix
+
+v0.7.1 removes a native Windows crash discovered after v0.7.0 was packaged.
+The recording-start and cancellation feedback paths can no longer create a
+second competing PortAudio lifecycle while microphone capture is starting or
+stopping. A cue-backend failure remains non-fatal to recording, and CtrlSpeak
+continues to bound shutdown and attempt cleanup of only that session's exact
+temporary recording. If Windows still holds the file, the next locked startup
+also performs bounded stale-recording cleanup.
+
+This patch also corrects the visual fidelity of the control center, tray
+flyout, and recording/processing surfaces against the approved Midnight Signal
+direction. The corrections retain readable state text, restrained animation,
+truthful provider telemetry, reduced-motion behaviour, keyboard access, and
+on-screen placement at supported Windows scaling factors.
 
 ## v0.6.2 routing and credential patch
 
@@ -291,7 +308,7 @@ is hardcoded. API mode calls:
 
 When output languages are configured, the request includes an ordered
 comma-separated `allowed_languages` multipart field such as `en` or `en,af`.
-The maintained v0.7.0 gateway validates a maximum of five codes, forces one of
+The maintained v0.7.1 gateway validates a maximum of five codes, forces one of
 them, uses the first as a fallback, and refuses to return a reported language
 outside the list. Omitting the field preserves automatic detection. The legacy
 single `language` field is still accepted by the server.

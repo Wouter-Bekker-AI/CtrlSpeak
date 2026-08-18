@@ -1,4 +1,4 @@
-# CtrlSpeak v0.7.0 Midnight Signal user flow
+# CtrlSpeak v0.7.1 Midnight Signal user flow
 
 ## 1. Launch and platform readiness
 

@@ -20,7 +20,7 @@ def test_historical_v03_spec_is_preserved_but_standard_build_uses_v07() -> None:
     build_helper = (ROOT / "utils" / "build_exe.py").read_text("utf-8")
     assert '"CtrlSpeak_v0.7.spec"' in build_helper
     assert "standard_spec_path" in build_helper
-    assert system.APP_VERSION == "0.7.0"
+    assert system.APP_VERSION == "0.7.1"
 
 
 def test_build_documentation_names_stable_v07_artifact_and_command() -> None:

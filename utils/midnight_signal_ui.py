@@ -1,9 +1,12 @@
 """Midnight Signal control centre and custom tray flyout for CtrlSpeak 0.7."""
 from __future__ import annotations
 
+import hashlib
+import math
+import queue
 import threading
 import time
-from typing import Callable, Mapping, Optional
+from typing import Callable, Mapping, Optional, Sequence
 
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -43,6 +46,28 @@ MINT = "#71E6BA"
 AMBER = "#F5C56B"
 CORAL = "#FF7A79"
 
+ROUTING_COLUMN_WEIGHTS = (3, 2)
+PROVIDER_CARD_SPECS: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "ubuntu-gpu-large-v3-turbo",
+        "Ubuntu GPU",
+        "Whisper large-v3-turbo",
+        "Local · GPU accelerated",
+    ),
+    (
+        "openai-gpt-transcribe",
+        "OpenAI",
+        "GPT Transcribe",
+        "Cloud · caller-supplied key",
+    ),
+    (
+        "gateway-tiny",
+        "Gateway Tiny",
+        "Whisper tiny",
+        "Gateway · emergency fallback",
+    ),
+)
+
 
 STRATEGY_LABELS: dict[str, str] = {
     "server-default": "Gateway default",
@@ -53,6 +78,188 @@ STRATEGY_LABELS: dict[str, str] = {
     "gateway-tiny-only": "Emergency tiny only",
 }
 STRATEGY_IDS = {label: value for value, label in STRATEGY_LABELS.items()}
+
+_STATIC_STRATEGY_ORDER: dict[str, tuple[str, ...]] = {
+    "ubuntu-gpu-preferred": (
+        "ubuntu-gpu-large-v3-turbo",
+        "openai-gpt-transcribe",
+        "gateway-tiny",
+    ),
+    "openai-preferred": (
+        "openai-gpt-transcribe",
+        "ubuntu-gpu-large-v3-turbo",
+        "gateway-tiny",
+    ),
+    "ubuntu-gpu-only": ("ubuntu-gpu-large-v3-turbo",),
+    "openai-only": ("openai-gpt-transcribe",),
+    "gateway-tiny-only": ("gateway-tiny",),
+}
+_KNOWN_PROVIDER_IDS = frozenset(spec[0] for spec in PROVIDER_CARD_SPECS)
+
+
+def _canonical_card_provider_id(value: object) -> str:
+    provider_id = str(value or "").strip()
+    return "gateway-tiny" if provider_id == "nova-tiny-whisper" else provider_id
+
+
+def provider_order_for_strategy(
+    strategy_id: str,
+    capabilities: Mapping[str, object] | None = None,
+) -> tuple[str, ...] | None:
+    """Return a truthful displayed chain, or ``None`` for unresolved default.
+
+    ``server-default`` is a client pseudo-choice.  It is deliberately left
+    unnumbered until the authenticated gateway identifies its default strategy
+    and provider chain.
+    """
+
+    payload = capabilities or {}
+    selected = str(strategy_id or "server-default").strip() or "server-default"
+    advertised_id = selected
+    if selected == "server-default":
+        advertised_id = str(payload.get("default_strategy") or "").strip()
+        if not advertised_id:
+            return None
+    raw_strategies = payload.get("strategies")
+    if isinstance(raw_strategies, Sequence) and not isinstance(raw_strategies, (str, bytes)):
+        for raw in raw_strategies:
+            if not isinstance(raw, Mapping) or str(raw.get("id") or "") != advertised_id:
+                continue
+            raw_chain = raw.get("providers")
+            if isinstance(raw_chain, Sequence) and not isinstance(raw_chain, (str, bytes)):
+                ordered: list[str] = []
+                for item in raw_chain:
+                    provider_id = _canonical_card_provider_id(item)
+                    if provider_id in _KNOWN_PROVIDER_IDS and provider_id not in ordered:
+                        ordered.append(provider_id)
+                if ordered:
+                    return tuple(ordered)
+            break
+    if selected == "server-default":
+        return None
+    return _STATIC_STRATEGY_ORDER.get(selected)
+
+
+def strategy_choices_from_capabilities(
+    capabilities: Mapping[str, object],
+) -> tuple[tuple[str, str], ...]:
+    """Preserve the client-side Gateway default choice before advertised routes."""
+
+    choices: list[tuple[str, str]] = [("server-default", STRATEGY_LABELS["server-default"])]
+    raw_strategies = capabilities.get("strategies")
+    if isinstance(raw_strategies, Sequence) and not isinstance(raw_strategies, (str, bytes)):
+        for raw in raw_strategies:
+            if not isinstance(raw, Mapping) or not raw.get("id"):
+                continue
+            strategy_id = str(raw["id"])
+            label = STRATEGY_LABELS.get(
+                strategy_id,
+                strategy_id.replace("-", " ").title(),
+            )
+            if strategy_id not in {item[0] for item in choices}:
+                choices.append((strategy_id, label))
+    return tuple(choices)
+
+
+def capability_config_identity(config: object) -> tuple[object, ...]:
+    """Return a secret-safe identity for rejecting stale capability results."""
+
+    token = getattr(config, "api_token", None)
+    token_digest = hashlib.sha256(str(token).encode("utf-8")).digest() if token else None
+    return (
+        getattr(config, "backend", None),
+        getattr(config, "api_url", None),
+        token_digest,
+        getattr(config, "provider_strategy", None),
+        tuple(getattr(config, "allowed_output_languages", ()) or ()),
+    )
+
+
+def management_scroll_units(delta: object) -> int:
+    """Normalize platform wheel deltas to a bounded canvas scroll step."""
+
+    try:
+        value = int(delta)
+    except (TypeError, ValueError):
+        return 0
+    return -3 if value > 0 else 3 if value < 0 else 0
+
+
+def management_viewport_requires_scroll(content_height: int, viewport_height: int) -> bool:
+    return max(0, int(content_height)) > max(0, int(viewport_height))
+
+
+def management_content_width(requested_width: int, viewport_width: int) -> int:
+    """Keep narrow pages fluid while making wide controls horizontally reachable."""
+
+    return max(1, int(requested_width), int(viewport_width))
+
+
+def _paint_route_badge(canvas: tk.Canvas, number: int | None, *, size: int) -> None:
+    canvas.delete("route-badge")
+    inset = 2
+    canvas.create_oval(
+        inset,
+        inset,
+        size - inset,
+        size - inset,
+        outline=CYAN if number is not None else OUTLINE,
+        width=1,
+        tags=("route-badge",),
+    )
+    canvas.create_text(
+        size / 2,
+        size / 2,
+        text=str(number) if number is not None else "—",
+        fill=TEXT if number is not None else MUTED,
+        font=("Segoe UI Semibold", 9 if size >= 28 else 8),
+        tags=("route-badge",),
+    )
+
+
+def provider_signal_levels(seed: int, count: int = 17) -> tuple[float, ...]:
+    """Return a deterministic instrument-like signal used by provider cards."""
+
+    count = max(3, int(count))
+    return tuple(
+        0.16
+        + 0.64
+        * abs(
+            math.sin((index + 1) * (0.68 + (seed % 5) * 0.07))
+            * math.cos((index + seed + 2) * 0.31)
+        )
+        for index in range(count)
+    )
+
+
+def language_summary(codes: tuple[str, ...]) -> str:
+    """Compact, non-secret label for the configured output-language policy."""
+
+    normalized = tuple(code.strip().upper() for code in codes if code.strip())
+    return "Automatic" if not normalized else " · ".join(normalized)
+
+
+def _paint_provider_signal(
+    canvas: tk.Canvas,
+    *,
+    seed: int,
+    colour: str = OUTLINE,
+) -> None:
+    """Paint a tiny deterministic status trace; it never represents live audio."""
+
+    canvas.delete("signal")
+    levels = provider_signal_levels(seed)
+    width = max(90, int(float(canvas.cget("width"))))
+    height = max(20, int(float(canvas.cget("height"))))
+    step = (width - 8) / max(1, len(levels) - 1)
+    centre = height / 2
+    for index, level in enumerate(levels):
+        x = 4 + index * step
+        half = 2 + level * (height * 0.34)
+        canvas.create_line(
+            x, centre - half, x, centre + half,
+            fill=colour, width=1, tags=("signal",),
+        )
 
 
 def apply_midnight_signal_theme(window: tk.Misc) -> None:
@@ -65,7 +272,24 @@ def apply_midnight_signal_theme(window: tk.Misc) -> None:
     style.configure("MS.Root.TFrame", background=INK)
     style.configure("MS.Surface.TFrame", background=SURFACE)
     style.configure("MS.Card.TFrame", background=CARD, relief="flat")
-    style.configure("MS.CardAlt.TFrame", background=CARD_ALT, relief="flat")
+    style.configure(
+        "MS.OutlinedCard.TFrame",
+        background=CARD,
+        relief="solid",
+        borderwidth=1,
+        bordercolor=OUTLINE,
+        lightcolor=OUTLINE,
+        darkcolor=OUTLINE,
+    )
+    style.configure(
+        "MS.CardAlt.TFrame",
+        background=CARD_ALT,
+        relief="solid",
+        borderwidth=1,
+        bordercolor="#263946",
+        lightcolor="#263946",
+        darkcolor="#263946",
+    )
     style.configure("MS.TLabel", background=INK, foreground=TEXT, font=("Segoe UI", 10))
     style.configure("MS.Surface.TLabel", background=SURFACE, foreground=TEXT, font=("Segoe UI", 10))
     style.configure("MS.Card.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI", 10))
@@ -74,6 +298,8 @@ def apply_midnight_signal_theme(window: tk.Misc) -> None:
     style.configure("MS.Title.TLabel", background=INK, foreground=TEXT, font=("Segoe UI Semibold", 15))
     style.configure("MS.Section.TLabel", background=CARD, foreground=TEXT, font=("Segoe UI Semibold", 12))
     style.configure("MS.Metric.TLabel", background=CARD, foreground=CYAN, font=("Segoe UI Semibold", 16))
+    style.configure("MS.CompactMetric.TLabel", background=CARD, foreground=CYAN, font=("Segoe UI Semibold", 10))
+    style.configure("MS.Number.TLabel", background=CARD, foreground=CYAN, font=("Segoe UI Semibold", 12))
     style.configure("MS.Ready.TLabel", background=INK, foreground=MINT, font=("Segoe UI Semibold", 9))
     style.configure("MS.Warn.TLabel", background=CARD, foreground=AMBER, font=("Segoe UI Semibold", 9))
     style.configure("MS.Error.TLabel", background=CARD, foreground=CORAL, font=("Segoe UI Semibold", 9))
@@ -82,6 +308,8 @@ def apply_midnight_signal_theme(window: tk.Misc) -> None:
     style.configure("MS.Primary.TButton", background=CYAN, foreground=INK, bordercolor=CYAN, lightcolor=CYAN, darkcolor=CYAN, focuscolor=CYAN, padding=(16, 9), font=("Segoe UI Semibold", 9))
     style.map("MS.Primary.TButton", background=[("active", "#78E5F0"), ("pressed", "#34C1D2")])
     style.configure("MS.Danger.TButton", background=CARD_ALT, foreground=CORAL, bordercolor=OUTLINE, padding=(14, 9), font=("Segoe UI Semibold", 9))
+    style.configure("MS.Compact.TButton", background=CARD_ALT, foreground=TEXT, bordercolor=OUTLINE, lightcolor=OUTLINE, darkcolor=OUTLINE, focuscolor=OUTLINE, padding=(10, 6), font=("Segoe UI Semibold", 8))
+    style.map("MS.Compact.TButton", background=[("active", "#263744"), ("pressed", "#20303B")])
     style.configure("MS.TCheckbutton", background=CARD, foreground=TEXT, font=("Segoe UI", 9))
     style.map("MS.TCheckbutton", background=[("active", CARD)], foreground=[("disabled", MUTED)])
     style.configure("MS.TRadiobutton", background=CARD, foreground=TEXT, font=("Segoe UI", 9))
@@ -97,7 +325,7 @@ def apply_midnight_signal_theme(window: tk.Misc) -> None:
 
 
 def _card(parent: tk.Misc, *, padding=(20, 18)) -> ttk.Frame:
-    return ttk.Frame(parent, style="MS.Card.TFrame", padding=padding)
+    return ttk.Frame(parent, style="MS.OutlinedCard.TFrame", padding=padding)
 
 
 def _label(parent: tk.Misc, text: str, *, muted: bool = False, **kwargs) -> ttk.Label:
@@ -129,6 +357,16 @@ class MidnightSignalManagementMixin:
         self._capabilities: dict[str, object] = {}
         self._correction_rules: list[dict[str, object]] = []
         self._corrections_loading = False
+        self._capability_generation = 0
+        self._corrections_generation = 0
+        self._correction_mutation_generation = 0
+        self._correction_mutation_queue: queue.Queue[
+            tuple[int, str, Callable[[ApiTranscriptionClient], object]]
+        ] = queue.Queue()
+        self._correction_mutation_worker_active = False
+        self._correction_mutations_pending = 0
+        self._correction_mutation_errors: list[str] = []
+        self._correction_refresh_notice: str | None = None
         self._shell_poll_job: str | None = None
         self._build_shell()
         self.window.after(100, self._poll_midnight_state)
@@ -144,23 +382,113 @@ class MidnightSignalManagementMixin:
         left = ttk.Frame(header, style="MS.Root.TFrame")
         left.pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Label(left, text="CTRLSPEAK", style="MS.Hero.TLabel").pack(side=tk.LEFT)
-        ttk.Label(left, text=f"  0.7.0  ·  MIDNIGHT SIGNAL", style="MS.TLabel", foreground=MUTED).pack(side=tk.LEFT, pady=(7, 0))
+        ttk.Label(left, text=f"  {sysmod.APP_VERSION}  ·  MIDNIGHT SIGNAL", style="MS.TLabel", foreground=MUTED).pack(side=tk.LEFT, pady=(7, 0))
         self.ms_ready_var = tk.StringVar(value="● READY")
         ttk.Label(header, textvariable=self.ms_ready_var, style="MS.Ready.TLabel").pack(side=tk.RIGHT, pady=(8, 0))
 
         self.ms_notebook = ttk.Notebook(root, style="MS.TNotebook")
         self.ms_notebook.pack(fill=tk.BOTH, expand=True)
         self.ms_pages: dict[str, ttk.Frame] = {}
+        self.ms_page_tabs: dict[str, ttk.Frame] = {}
+        self.ms_page_canvases: dict[str, tk.Canvas] = {}
+        self.ms_page_horizontal_scrollbars: dict[str, ttk.Scrollbar] = {}
         for name in ("Capture", "Transcription", "Routing", "Corrections", "Updates", "System"):
-            page = ttk.Frame(self.ms_notebook, style="MS.Surface.TFrame", padding=(22, 20))
+            tab = ttk.Frame(self.ms_notebook, style="MS.Surface.TFrame")
+            tab.rowconfigure(0, weight=1)
+            tab.columnconfigure(0, weight=1)
+            canvas = tk.Canvas(
+                tab,
+                background=SURFACE,
+                highlightthickness=0,
+                borderwidth=0,
+            )
+            scrollbar = ttk.Scrollbar(tab, orient=tk.VERTICAL, command=canvas.yview)
+            horizontal = ttk.Scrollbar(tab, orient=tk.HORIZONTAL, command=canvas.xview)
+            canvas.configure(
+                yscrollcommand=scrollbar.set,
+                xscrollcommand=horizontal.set,
+            )
+            canvas.grid(row=0, column=0, sticky="nsew")
+            scrollbar.grid(row=0, column=1, sticky="ns")
+            horizontal.grid(row=1, column=0, sticky="ew")
+            page = ttk.Frame(canvas, style="MS.Surface.TFrame", padding=(22, 20))
+            content_id = canvas.create_window((0, 0), window=page, anchor="nw")
+
+            def sync_scroll_region(_event=None, *, target=canvas) -> None:
+                target.configure(scrollregion=target.bbox("all"))
+
+            def sync_content_width(
+                event,
+                *,
+                target=canvas,
+                item=content_id,
+                content=page,
+            ) -> None:
+                target.itemconfigure(
+                    item,
+                    width=management_content_width(
+                        content.winfo_reqwidth(), int(event.width)
+                    ),
+                )
+
+            page.bind("<Configure>", sync_scroll_region)
+            canvas.bind("<Configure>", sync_content_width)
             self.ms_pages[name] = page
-            self.ms_notebook.add(page, text=name.upper())
+            self.ms_page_tabs[name] = tab
+            self.ms_page_canvases[name] = canvas
+            self.ms_page_horizontal_scrollbars[name] = horizontal
+            self.ms_notebook.add(tab, text=name.upper())
         self._build_capture_page(self.ms_pages["Capture"])
         self._build_transcription_page(self.ms_pages["Transcription"])
         self._build_routing_page(self.ms_pages["Routing"])
         self._build_corrections_page(self.ms_pages["Corrections"])
         self._build_updates_page(self.ms_pages["Updates"])
         self._build_system_page(self.ms_pages["System"])
+        self.window.bind("<MouseWheel>", self._scroll_management_wheel, add="+")
+        self.window.bind("<Shift-MouseWheel>", self._scroll_management_horizontal, add="+")
+        self.window.bind("<Button-4>", lambda _event: self._scroll_active_management_page(-3), add="+")
+        self.window.bind("<Button-5>", lambda _event: self._scroll_active_management_page(3), add="+")
+        self.window.bind("<Prior>", lambda _event: self._scroll_active_management_page(-1, pages=True), add="+")
+        self.window.bind("<Next>", lambda _event: self._scroll_active_management_page(1, pages=True), add="+")
+        self.window.bind("<Home>", lambda _event: self._move_active_management_page(0.0), add="+")
+        self.window.bind("<End>", lambda _event: self._move_active_management_page(1.0), add="+")
+
+    def _active_management_canvas(self) -> tk.Canvas | None:
+        selected = self.ms_notebook.select()
+        for name, tab in self.ms_page_tabs.items():
+            if str(tab) == selected:
+                return self.ms_page_canvases[name]
+        return None
+
+    def _scroll_active_management_page(self, amount: int, *, pages: bool = False) -> str | None:
+        canvas = self._active_management_canvas()
+        if canvas is None or amount == 0:
+            return None
+        canvas.yview_scroll(int(amount), "pages" if pages else "units")
+        return "break"
+
+    def _move_active_management_page(self, fraction: float) -> str | None:
+        canvas = self._active_management_canvas()
+        if canvas is None:
+            return None
+        canvas.yview_moveto(max(0.0, min(1.0, float(fraction))))
+        return "break"
+
+    def _scroll_management_wheel(self, event) -> str | None:
+        interactive_types = (tk.Listbox, ttk.Combobox, ttk.Treeview, ttk.Scale)
+        if isinstance(getattr(event, "widget", None), interactive_types):
+            return None
+        return self._scroll_active_management_page(
+            management_scroll_units(getattr(event, "delta", 0))
+        )
+
+    def _scroll_management_horizontal(self, event) -> str | None:
+        canvas = self._active_management_canvas()
+        amount = management_scroll_units(getattr(event, "delta", 0))
+        if canvas is None or amount == 0:
+            return None
+        canvas.xview_scroll(amount, "units")
+        return "break"
 
     def _build_capture_page(self, page: ttk.Frame) -> None:
         hero = _card(page, padding=(26, 22))
@@ -263,42 +591,174 @@ class MidnightSignalManagementMixin:
         ttk.Label(behaviour, textvariable=self.ms_backend_status_var, style="MS.CardMuted.TLabel", wraplength=410, justify=tk.LEFT).pack(anchor=tk.W, pady=(18, 0))
 
     def _build_routing_page(self, page: ttk.Frame) -> None:
-        header = _card(page)
-        header.pack(fill=tk.X)
-        left = ttk.Frame(header, style="MS.Card.TFrame")
-        left.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Label(left, text="Provider routing", style="MS.Section.TLabel").pack(anchor=tk.W)
+        header = ttk.Frame(page, style="MS.Surface.TFrame")
+        header.pack(fill=tk.X, pady=(0, 12))
+        title = ttk.Frame(header, style="MS.Surface.TFrame")
+        title.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(title, text="Provider routing", style="MS.Surface.TLabel", font=("Segoe UI Semibold", 13)).pack(anchor=tk.W)
         self.ms_route_summary_var = tk.StringVar(value="Checking the configured gateway…")
-        ttk.Label(left, textvariable=self.ms_route_summary_var, style="MS.CardMuted.TLabel").pack(anchor=tk.W, pady=(6, 0))
-        ttk.Button(header, text="Refresh gateway", style="MS.Primary.TButton", command=self._refresh_gateway_capabilities).pack(side=tk.RIGHT)
+        ttk.Label(title, textvariable=self.ms_route_summary_var, style="MS.Surface.TLabel", foreground=MUTED).pack(anchor=tk.W, pady=(4, 0))
+        self.ms_route_order_var = tk.StringVar(value="Gateway default · server decides provider order")
+        ttk.Label(title, textvariable=self.ms_route_order_var, style="MS.Surface.TLabel", foreground=CYAN).pack(anchor=tk.W, pady=(2, 0))
+        controls = ttk.Frame(header, style="MS.Surface.TFrame")
+        controls.pack(side=tk.RIGHT)
+        ttk.Label(controls, text="Preset", style="MS.Surface.TLabel", foreground=MUTED).pack(side=tk.LEFT, padx=(0, 7))
+        self.ms_route_strategy_combo = ttk.Combobox(
+            controls,
+            textvariable=self.ms_strategy_display_var,
+            values=tuple(STRATEGY_IDS),
+            state="readonly",
+            style="MS.TCombobox",
+            width=18,
+        )
+        self.ms_route_strategy_combo.pack(side=tk.LEFT)
+        self.ms_route_strategy_combo.bind("<<ComboboxSelected>>", lambda _event: self._save_backend_midnight())
+        ttk.Button(controls, text="Refresh", style="MS.Primary.TButton", command=self._refresh_gateway_capabilities).pack(side=tk.LEFT, padx=(8, 0))
 
-        providers = ttk.Frame(page, style="MS.Surface.TFrame")
-        providers.pack(fill=tk.X, pady=(16, 0))
-        self.ms_provider_vars: dict[str, tuple[tk.StringVar, tk.StringVar, tk.StringVar]] = {}
-        for index, (provider_id, title, subtitle) in enumerate((
-            ("ubuntu-gpu-large-v3-turbo", "Ubuntu GPU", "Whisper large-v3-turbo · CUDA"),
-            ("openai-gpt-transcribe", "OpenAI", "GPT Transcribe · caller key"),
-            ("gateway-tiny", "Gateway Tiny", "Whisper tiny · emergency fallback"),
-        )):
-            card = _card(providers, padding=(18, 16))
-            card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0 if index == 0 else 7, 0 if index == 2 else 7))
-            ttk.Label(card, text=title, style="MS.Section.TLabel").pack(anchor=tk.W)
-            _label(card, subtitle, muted=True).pack(anchor=tk.W, pady=(3, 12))
+        dashboard = ttk.Frame(page, style="MS.Surface.TFrame")
+        dashboard.pack(fill=tk.BOTH, expand=True)
+        dashboard.columnconfigure(0, weight=ROUTING_COLUMN_WEIGHTS[0], uniform="routing")
+        dashboard.columnconfigure(1, weight=ROUTING_COLUMN_WEIGHTS[1], uniform="routing")
+        dashboard.rowconfigure(0, weight=1)
+        providers = ttk.Frame(dashboard, style="MS.Surface.TFrame")
+        providers.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
+        sidebar = ttk.Frame(dashboard, style="MS.Surface.TFrame")
+        sidebar.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
+
+        self.ms_provider_vars: dict[
+            str, tuple[tk.StringVar, tk.StringVar, tk.StringVar, tk.StringVar]
+        ] = {}
+        self.ms_provider_signals: dict[str, tk.Canvas] = {}
+        self.ms_provider_cards: dict[str, ttk.Frame] = {}
+        self.ms_provider_badges: dict[str, tk.Canvas] = {}
+        for index, (provider_id, provider_title, model, location) in enumerate(PROVIDER_CARD_SPECS, start=1):
+            card = _card(providers, padding=(14, 11))
+            card.pack(fill=tk.X, pady=(0, 8))
+            top = ttk.Frame(card, style="MS.Card.TFrame")
+            top.pack(fill=tk.X)
+            number = tk.Canvas(top, width=28, height=28, background=CARD, highlightthickness=0, borderwidth=0)
+            number.pack(side=tk.LEFT, padx=(0, 10))
+            _paint_route_badge(number, None, size=28)
+            identity = ttk.Frame(top, style="MS.Card.TFrame")
+            identity.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            ttk.Label(identity, text=provider_title, style="MS.Section.TLabel").pack(anchor=tk.W)
+            _label(identity, f"{model}  ·  {location}", muted=True).pack(anchor=tk.W, pady=(2, 0))
             state_var = tk.StringVar(value="UNKNOWN")
-            timing_var = tk.StringVar(value="Gateway telemetry —")
-            detail_var = tk.StringVar(value="Not checked")
-            ttk.Label(card, textvariable=state_var, style="MS.Metric.TLabel").pack(anchor=tk.W)
-            ttk.Label(card, textvariable=timing_var, style="MS.Card.TLabel").pack(anchor=tk.W, pady=(8, 0))
-            ttk.Label(card, textvariable=detail_var, style="MS.CardMuted.TLabel", wraplength=260, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
-            self.ms_provider_vars[provider_id] = (state_var, timing_var, detail_var)
+            ttk.Label(top, textvariable=state_var, style="MS.CompactMetric.TLabel").pack(side=tk.RIGHT, anchor=tk.N, padx=(10, 0))
+            detail_row = ttk.Frame(card, style="MS.Card.TFrame")
+            detail_row.pack(fill=tk.X, pady=(8, 0))
+            metrics = ttk.Frame(detail_row, style="MS.Card.TFrame")
+            metrics.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            timing_var = tk.StringVar(value="Worker probe —")
+            detail_var = tk.StringVar(value="Health not checked")
+            last_var = tk.StringVar(value="Last request —")
+            ttk.Label(metrics, textvariable=timing_var, style="MS.Card.TLabel").pack(anchor=tk.W)
+            ttk.Label(metrics, textvariable=detail_var, style="MS.CardMuted.TLabel").pack(anchor=tk.W, pady=(2, 0))
+            ttk.Label(metrics, textvariable=last_var, style="MS.CardMuted.TLabel").pack(anchor=tk.W, pady=(2, 0))
+            signal = tk.Canvas(detail_row, width=118, height=30, background=CARD, highlightthickness=0, borderwidth=0)
+            signal.pack(side=tk.RIGHT, padx=(10, 0))
+            _paint_provider_signal(signal, seed=index, colour=OUTLINE)
+            self.ms_provider_signals[provider_id] = signal
+            self.ms_provider_vars[provider_id] = (state_var, timing_var, detail_var, last_var)
+            self.ms_provider_cards[provider_id] = card
+            self.ms_provider_badges[provider_id] = number
 
-        telemetry = _card(page)
-        telemetry.pack(fill=tk.BOTH, expand=True, pady=(16, 0))
-        ttk.Label(telemetry, text="Last routing result", style="MS.Section.TLabel").pack(anchor=tk.W)
+        telemetry = _card(providers, padding=(14, 10))
+        telemetry.pack(fill=tk.BOTH, expand=True)
+        self.ms_route_telemetry_card = telemetry
+        ttk.Label(telemetry, text="Route attempts", style="MS.Section.TLabel").pack(anchor=tk.W)
+        self.ms_attempts_var = tk.StringVar(value="Attempt timings appear only after a completed request.")
+        ttk.Label(telemetry, textvariable=self.ms_attempts_var, style="MS.CardMuted.TLabel", wraplength=560, justify=tk.LEFT).pack(anchor=tk.W, pady=(5, 0))
+
+        corrections = _card(sidebar, padding=(13, 10))
+        corrections.pack(fill=tk.X, pady=(0, 8))
+        correction_header = ttk.Frame(corrections, style="MS.Card.TFrame")
+        correction_header.pack(fill=tk.X)
+        ttk.Label(correction_header, text="Corrections", style="MS.Section.TLabel").pack(side=tk.LEFT)
+        ttk.Button(correction_header, text="＋ Add", style="MS.Compact.TButton", command=lambda: self.ms_notebook.select(self.ms_pages["Corrections"])).pack(side=tk.RIGHT)
+        self.ms_route_correction_preview_var = tk.StringVar(value="Loading known-word rules…")
+        ttk.Label(corrections, textvariable=self.ms_route_correction_preview_var, style="MS.CardMuted.TLabel", wraplength=330, justify=tk.LEFT).pack(anchor=tk.W, pady=(7, 0))
+
+        microphone = _card(sidebar, padding=(13, 10))
+        microphone.pack(fill=tk.X, pady=(0, 8))
+        mic_header = ttk.Frame(microphone, style="MS.Card.TFrame")
+        mic_header.pack(fill=tk.X)
+        mic_name = sysmod.get_input_device_preference() or "System default"
+        self.ms_route_mic_name_var = tk.StringVar(value=mic_name)
+        ttk.Label(mic_header, text="Microphone", style="MS.Section.TLabel").pack(side=tk.LEFT)
+        ttk.Label(mic_header, textvariable=self.ms_route_mic_name_var, style="MS.CardMuted.TLabel").pack(side=tk.RIGHT)
+        meter = ttk.Frame(microphone, style="MS.Card.TFrame")
+        meter.pack(fill=tk.X, pady=(8, 0))
+        self.ms_route_level_var = tk.DoubleVar(value=0.0)
+        self.ms_route_dbfs_var = tk.StringVar(value="−60.0 dBFS")
+        ttk.Progressbar(meter, variable=self.ms_route_level_var, maximum=100, style="MS.Horizontal.TProgressbar").pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(meter, textvariable=self.ms_route_dbfs_var, style="MS.CardMuted.TLabel", width=12, anchor=tk.E).pack(side=tk.RIGHT, padx=(8, 0))
+
+        preferences = _card(sidebar, padding=(13, 9))
+        preferences.pack(fill=tk.X, pady=(0, 8))
+        pref_row = ttk.Frame(preferences, style="MS.Card.TFrame")
+        pref_row.pack(fill=tk.X)
+        self.ms_route_language_var = tk.StringVar(value=language_summary(get_backend_config().allowed_output_languages))
+        with settings_lock:
+            cue_enabled = bool(settings.get("audio_cues_enabled", True))
+            cue_volume = int(settings.get("audio_cue_volume", 30))
+        self.ms_route_cue_var = tk.StringVar(value=f"{cue_volume}%" if cue_enabled else "Muted")
+        ttk.Label(pref_row, text="Language", style="MS.CardMuted.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(pref_row, text="Cue volume", style="MS.CardMuted.TLabel").grid(row=0, column=2, sticky="w", padx=(20, 0))
+        ttk.Label(pref_row, textvariable=self.ms_route_language_var, style="MS.Card.TLabel").grid(row=1, column=0, sticky="w", pady=(3, 0))
+        ttk.Separator(pref_row, orient=tk.VERTICAL).grid(row=0, column=1, rowspan=2, sticky="ns", padx=(16, 0))
+        ttk.Label(pref_row, textvariable=self.ms_route_cue_var, style="MS.Card.TLabel").grid(row=1, column=2, sticky="w", padx=(20, 0), pady=(3, 0))
+
+        result = _card(sidebar, padding=(13, 10))
+        result.pack(fill=tk.X, pady=(0, 8))
+        result_header = ttk.Frame(result, style="MS.Card.TFrame")
+        result_header.pack(fill=tk.X)
+        ttk.Label(result_header, text="Last result", style="MS.Section.TLabel").pack(side=tk.LEFT)
+        ttk.Button(result_header, text="Copy", style="MS.Compact.TButton", command=sysmod.copy_last_transcript_from_tray).pack(side=tk.RIGHT)
         self.ms_routing_result_var = tk.StringVar(value="No result in this session")
-        ttk.Label(telemetry, textvariable=self.ms_routing_result_var, style="MS.Metric.TLabel").pack(anchor=tk.W, pady=(14, 4))
-        self.ms_attempts_var = tk.StringVar(value="Attempt timings appear after a completed request; no live provider is claimed while routing.")
-        ttk.Label(telemetry, textvariable=self.ms_attempts_var, style="MS.CardMuted.TLabel", wraplength=960, justify=tk.LEFT).pack(anchor=tk.W)
+        ttk.Label(result, textvariable=self.ms_routing_result_var, style="MS.CompactMetric.TLabel", wraplength=330, justify=tk.LEFT).pack(anchor=tk.W, pady=(7, 0))
+
+        updates = _card(sidebar, padding=(13, 10))
+        updates.pack(fill=tk.X)
+        updates_header = ttk.Frame(updates, style="MS.Card.TFrame")
+        updates_header.pack(fill=tk.X)
+        ttk.Label(updates_header, text=f"Updates · {sysmod.APP_VERSION}", style="MS.Section.TLabel").pack(side=tk.LEFT)
+        ttk.Button(updates_header, text="Check", style="MS.Compact.TButton", command=self.check_for_updates).pack(side=tk.RIGHT)
+        ttk.Label(updates, textvariable=self.update_status_var, style="MS.CardMuted.TLabel", wraplength=330, justify=tk.LEFT).pack(anchor=tk.W, pady=(7, 0))
+        self._apply_route_strategy_visuals()
+
+    def _selected_route_strategy_id(self) -> str:
+        display = self.ms_strategy_display_var.get()
+        return STRATEGY_IDS.get(display, self.provider_strategy_var.get() or "server-default")
+
+    def _apply_route_strategy_visuals(self) -> None:
+        if not hasattr(self, "ms_provider_cards"):
+            return
+        strategy_id = self._selected_route_strategy_id()
+        order = provider_order_for_strategy(strategy_id, self._capabilities)
+        if order is None:
+            visible = tuple(spec[0] for spec in PROVIDER_CARD_SPECS)
+            note = "Gateway default · server decides provider order"
+        else:
+            visible = order
+            names = {provider_id: title for provider_id, title, _model, _location in PROVIDER_CARD_SPECS}
+            chain = " → ".join(names[provider_id] for provider_id in visible)
+            if strategy_id == "server-default":
+                note = f"Gateway default · {chain}"
+            else:
+                note = f"Selected route · {chain}"
+        self.ms_route_order_var.set(note)
+        self.ms_route_telemetry_card.pack_forget()
+        for card in self.ms_provider_cards.values():
+            card.pack_forget()
+        for position, provider_id in enumerate(visible, start=1):
+            self.ms_provider_cards[provider_id].pack(fill="x", pady=(0, 8))
+            _paint_route_badge(
+                self.ms_provider_badges[provider_id],
+                position if order is not None else None,
+                size=28,
+            )
+        self.ms_route_telemetry_card.pack(fill=tk.BOTH, expand=True)
 
     def _build_corrections_page(self, page: ttk.Frame) -> None:
         editor = _card(page)
@@ -418,6 +878,10 @@ class MidnightSignalManagementMixin:
             settings["audio_cues_enabled"] = bool(self.ms_cues_enabled_var.get())
             settings["audio_cue_volume"] = max(0, min(100, int(round(self.ms_cue_volume_var.get()))))
         save_settings()
+        if hasattr(self, "ms_route_cue_var"):
+            enabled = bool(self.ms_cues_enabled_var.get())
+            volume = max(0, min(100, int(round(self.ms_cue_volume_var.get()))))
+            self.ms_route_cue_var.set(f"{volume}%" if enabled else "Muted")
 
     def _selected_output_languages(self) -> tuple[str, ...]:
         widget = getattr(self, "ms_output_language_list", None)
@@ -438,15 +902,35 @@ class MidnightSignalManagementMixin:
     def _save_backend_midnight(self) -> None:
         self.provider_strategy_var.set(STRATEGY_IDS.get(self.ms_strategy_display_var.get(), "server-default"))
         self._apply_backend()
+        self._capability_generation += 1
+        self._corrections_generation += 1
+        self._correction_mutation_generation += 1
+        self._correction_mutations_pending = 0
+        self._correction_mutation_errors.clear()
+        self._correction_refresh_notice = None
+        self._corrections_loading = False
+        # Capability chains are authenticated observations of one exact
+        # gateway/config identity.  Never carry their numbering across a save.
+        self._capabilities = {}
+        self._provider_profiles = ()
         self.ms_backend_status_var.set(self.backend_status_var.get())
+        if hasattr(self, "ms_route_language_var"):
+            self.ms_route_language_var.set(language_summary(get_backend_config().allowed_output_languages))
+        self._apply_route_strategy_visuals()
         self.window.after(120, self._refresh_gateway_capabilities)
 
     def _refresh_gateway_capabilities(self) -> None:
         if not hasattr(self, "ms_route_summary_var"):
             return
         config = get_backend_config()
+        self._capability_generation += 1
+        request_generation = self._capability_generation
+        config_identity = capability_config_identity(config)
         if config.backend != "api":
+            self._capabilities = {}
+            self._provider_profiles = ()
             self.ms_route_summary_var.set("The embedded backend is selected; gateway telemetry is inactive.")
+            self._apply_route_strategy_visuals()
             return
         self.ms_route_summary_var.set("Checking gateway health and provider capabilities…")
 
@@ -456,40 +940,78 @@ class MidnightSignalManagementMixin:
                 payload = ApiTranscriptionClient(config, timeout_seconds=10.0).get_capabilities()
                 rtt = (time.monotonic() - started) * 1000.0
             except Exception:
-                sysmod.enqueue_management_task(self._finish_capabilities_error)
+                sysmod.enqueue_management_task(
+                    self._finish_capabilities_error,
+                    request_generation,
+                    config_identity,
+                )
                 return
-            sysmod.enqueue_management_task(self._finish_capabilities, payload, rtt)
+            safe_payload = dict(payload)
+            sysmod.enqueue_management_task(
+                self._finish_capabilities,
+                safe_payload,
+                rtt,
+                request_generation,
+                config_identity,
+            )
 
         threading.Thread(target=worker, name="CtrlSpeakCapabilityCards", daemon=True).start()
 
-    def _finish_capabilities_error(self) -> None:
-        if not self.is_open():
+    def _capability_request_is_current(
+        self,
+        request_generation: int,
+        config_identity: tuple[object, ...],
+    ) -> bool:
+        if not self.is_open() or request_generation != self._capability_generation:
+            return False
+        try:
+            return capability_config_identity(get_backend_config()) == config_identity
+        except Exception:
+            return False
+
+    def _finish_capabilities_error(
+        self,
+        request_generation: int,
+        config_identity: tuple[object, ...],
+    ) -> None:
+        if not self._capability_request_is_current(request_generation, config_identity):
             return
+        self._capabilities = {}
+        self._provider_profiles = ()
         self.ms_route_summary_var.set("Gateway unavailable · check the URL, WireGuard link, and token")
-        for state_var, timing_var, detail_var in self.ms_provider_vars.values():
+        for state_var, timing_var, detail_var, last_var in self.ms_provider_vars.values():
             state_var.set("UNAVAILABLE")
             timing_var.set("Gateway RTT —")
             detail_var.set("No authenticated capability telemetry was accepted")
+            last_var.set("Last request —")
+        for index, (provider_id, _title, _model, _location) in enumerate(PROVIDER_CARD_SPECS, start=1):
+            signal = self.ms_provider_signals.get(provider_id)
+            if signal is not None:
+                _paint_provider_signal(signal, seed=index, colour=CORAL)
+        self._apply_route_strategy_visuals()
 
-    def _finish_capabilities(self, payload: Mapping[str, object], gateway_rtt: float) -> None:
-        if not self.is_open():
+    def _finish_capabilities(
+        self,
+        payload: Mapping[str, object],
+        gateway_rtt: float,
+        request_generation: int,
+        config_identity: tuple[object, ...],
+    ) -> None:
+        if not self._capability_request_is_current(request_generation, config_identity):
             return
         self._capabilities = dict(payload)
         snapshot = sysmod.transcription_ui_session.snapshot()
         active_id = snapshot.provider.provider_id if snapshot.provider else None
         profiles = providers_from_capabilities(payload, active_provider_id=active_id)
         self._provider_profiles = profiles
-        strategies = payload.get("strategies")
-        if isinstance(strategies, list):
-            labels = []
-            for item in strategies:
-                if isinstance(item, dict) and item.get("id"):
-                    strategy_id = str(item["id"])
-                    label = STRATEGY_LABELS.setdefault(strategy_id, strategy_id.replace("-", " ").title())
-                    STRATEGY_IDS[label] = strategy_id
-                    labels.append(label)
-            if labels:
-                self.ms_strategy_combo.configure(values=tuple(labels))
+        choices = strategy_choices_from_capabilities(payload)
+        labels: list[str] = []
+        for strategy_id, label in choices:
+            STRATEGY_LABELS.setdefault(strategy_id, label)
+            STRATEGY_IDS[label] = strategy_id
+            labels.append(label)
+        self.ms_strategy_combo.configure(values=tuple(labels))
+        self.ms_route_strategy_combo.configure(values=tuple(labels))
         self.ms_route_summary_var.set(
             f"Gateway {payload.get('version', 'unknown')} · RTT {format_latency_ms(gateway_rtt)} · "
             f"{STRATEGY_LABELS.get(self.provider_strategy_var.get(), self.provider_strategy_var.get())}"
@@ -500,13 +1022,17 @@ class MidnightSignalManagementMixin:
             "ubuntu-gpu-large-v3-turbo": by_id.get("ubuntu-gpu-large-v3-turbo"),
             "openai-gpt-transcribe": by_id.get("openai-gpt-transcribe"),
         }
-        for provider_id, variables in self.ms_provider_vars.items():
-            state_var, timing_var, detail_var = variables
+        for index, (provider_id, _title, _model, _location) in enumerate(PROVIDER_CARD_SPECS, start=1):
+            variables = self.ms_provider_vars[provider_id]
+            state_var, timing_var, detail_var, _last_var = variables
             profile = aliases.get(provider_id)
+            signal = self.ms_provider_signals.get(provider_id)
             if profile is None:
                 state_var.set("UNKNOWN")
                 timing_var.set("Gateway telemetry —")
                 detail_var.set("Provider not advertised")
+                if signal is not None:
+                    _paint_provider_signal(signal, seed=index, colour=OUTLINE)
                 continue
             state_var.set(profile.state_label.upper())
             if profile.probe_duration_ms is not None:
@@ -519,7 +1045,21 @@ class MidnightSignalManagementMixin:
             elif profile.circuit_retry_after_ms:
                 detail_var.set(f"Circuit retry in {format_latency_ms(profile.circuit_retry_after_ms)}")
             else:
-                detail_var.set(profile.model_name or profile.device or "Advertised by gateway")
+                device = profile.device.upper() if profile.device else None
+                detail_var.set(" · ".join(part for part in (profile.model_name, device) if part) or "Advertised by gateway")
+            if signal is not None:
+                state_name = profile.state_label.casefold()
+                colour = (
+                    MINT
+                    if state_name in {"ready", "available with key"}
+                    else AMBER
+                    if state_name == "starting"
+                    else CORAL
+                    if state_name == "unavailable"
+                    else OUTLINE
+                )
+                _paint_provider_signal(signal, seed=index, colour=colour)
+        self._apply_route_strategy_visuals()
 
     def _correction_client(self) -> ApiTranscriptionClient:
         config = get_backend_config()
@@ -531,27 +1071,74 @@ class MidnightSignalManagementMixin:
         if not hasattr(self, "ms_correction_status_var") or self._corrections_loading:
             return
         self._corrections_loading = True
+        self._corrections_generation += 1
+        request_generation = self._corrections_generation
         self.ms_correction_status_var.set("Loading correction rules…")
 
         def worker() -> None:
             try:
                 rules = self._correction_client().list_corrections()
             except Exception as exc:
-                self.window.after(0, lambda: self._finish_corrections([], str(exc)))
+                error_text = str(exc)
+                sysmod.enqueue_management_task(
+                    self._finish_corrections_request,
+                    request_generation,
+                    (),
+                    error_text,
+                )
                 return
-            self.window.after(0, lambda: self._finish_corrections(rules, None))
+            safe_rules = tuple(dict(rule) for rule in rules)
+            sysmod.enqueue_management_task(
+                self._finish_corrections_request,
+                request_generation,
+                safe_rules,
+                None,
+            )
 
         threading.Thread(target=worker, name="CtrlSpeakCorrectionsList", daemon=True).start()
+
+    def _finish_corrections_request(
+        self,
+        request_generation: int,
+        rules: Sequence[Mapping[str, object]],
+        error: str | None,
+    ) -> None:
+        if not self.is_open() or request_generation != self._corrections_generation:
+            return
+        self._finish_corrections([dict(rule) for rule in rules], error)
 
     def _finish_corrections(self, rules: list[dict[str, object]], error: str | None) -> None:
         if not self.is_open():
             return
         self._corrections_loading = False
+        notice = getattr(self, "_correction_refresh_notice", None)
+        self._correction_refresh_notice = None
         if error:
-            self.ms_correction_status_var.set(f"Corrections unavailable: {error}")
+            status = f"Corrections unavailable: {error}"
+            if notice:
+                status += f" · {notice}"
+            self.ms_correction_status_var.set(status)
+            if hasattr(self, "ms_route_correction_preview_var"):
+                self.ms_route_correction_preview_var.set("Corrections unavailable")
             return
         self._correction_rules = rules
-        self.ms_correction_status_var.set(f"{len(rules)} visible correction rule{'s' if len(rules) != 1 else ''}")
+        status = f"{len(rules)} visible correction rule{'s' if len(rules) != 1 else ''}"
+        if notice:
+            status += f" · {notice}"
+        self.ms_correction_status_var.set(status)
+        if hasattr(self, "ms_route_correction_preview_var"):
+            enabled = [rule for rule in rules if rule.get("enabled")]
+            if enabled:
+                first = enabled[0]
+                source = str(first.get("source_phrase") or "").strip()
+                replacement = str(first.get("replacement_phrase") or "").strip()
+                preview = f"{source}  →  {replacement}" if source and replacement else f"{len(enabled)} enabled rules"
+                remaining = len(enabled) - 1
+                if remaining > 0:
+                    preview += f"  ·  +{remaining} more"
+            else:
+                preview = "No enabled correction rules"
+            self.ms_route_correction_preview_var.set(preview)
         self._render_corrections()
 
     def _render_corrections(self) -> None:
@@ -590,17 +1177,120 @@ class MidnightSignalManagementMixin:
         self.ms_correction_tree.selection_remove(*self.ms_correction_tree.selection())
 
     def _run_correction_mutation(self, label: str, action: Callable[[ApiTranscriptionClient], object]) -> None:
-        self.ms_correction_status_var.set(f"{label}…")
+        self._corrections_generation += 1
+        self._corrections_loading = False
+        request_generation = self._correction_mutation_generation
+        mutation_queue = getattr(self, "_correction_mutation_queue", None)
+        if mutation_queue is None:
+            mutation_queue = queue.Queue()
+            self._correction_mutation_queue = mutation_queue
+            self._correction_mutation_worker_active = False
+        self._correction_mutations_pending = (
+            int(getattr(self, "_correction_mutations_pending", 0)) + 1
+        )
+        if not hasattr(self, "_correction_mutation_errors"):
+            self._correction_mutation_errors = []
+        self.ms_correction_status_var.set(
+            f"{label}… · {self._correction_mutations_pending} queued"
+        )
+        mutation_queue.put((request_generation, str(label), action))
+        self._start_correction_mutation_worker()
+
+    def _start_correction_mutation_worker(self) -> None:
+        if self._correction_mutation_worker_active:
+            return
+        self._correction_mutation_worker_active = True
 
         def worker() -> None:
-            try:
-                action(self._correction_client())
-            except Exception as exc:
-                self.window.after(0, lambda: self.ms_correction_status_var.set(f"{label} failed: {exc}"))
-                return
-            self.window.after(0, self._refresh_corrections)
+            # One FIFO daemon consumes every queued operation, preserving the
+            # order in which toolbar actions were submitted without blocking Tk.
+            while True:
+                try:
+                    request_generation, label, action = (
+                        self._correction_mutation_queue.get_nowait()
+                    )
+                except queue.Empty:
+                    break
+                error_text: str | None = None
+                if request_generation == self._correction_mutation_generation:
+                    try:
+                        action(self._correction_client())
+                    except Exception as exc:
+                        error_text = str(exc)
+                    sysmod.enqueue_management_task(
+                        self._finish_correction_mutation,
+                        request_generation,
+                        label,
+                        error_text,
+                    )
+                self._correction_mutation_queue.task_done()
+            sysmod.enqueue_management_task(self._finish_correction_mutation_worker)
 
-        threading.Thread(target=worker, name="CtrlSpeakCorrectionMutation", daemon=True).start()
+        thread = threading.Thread(
+            target=worker,
+            name="CtrlSpeakCorrectionMutation",
+            daemon=True,
+        )
+        try:
+            thread.start()
+        except Exception as exc:
+            self._correction_mutation_worker_active = False
+            error_text = str(exc)
+            while True:
+                try:
+                    request_generation, queued_label, _action = (
+                        self._correction_mutation_queue.get_nowait()
+                    )
+                except queue.Empty:
+                    break
+                self._correction_mutation_queue.task_done()
+                sysmod.enqueue_management_task(
+                    self._finish_correction_mutation,
+                    request_generation,
+                    queued_label,
+                    error_text,
+                )
+
+    def _finish_correction_mutation_worker(self) -> None:
+        self._correction_mutation_worker_active = False
+        if self.is_open() and not self._correction_mutation_queue.empty():
+            # Covers the narrow race where Tk queued another operation after
+            # the daemon observed Empty but before this completion callback.
+            self._start_correction_mutation_worker()
+
+    def _finish_correction_mutation(
+        self,
+        request_generation: int,
+        label: str,
+        error: str | None,
+    ) -> None:
+        if not self.is_open() or request_generation != self._correction_mutation_generation:
+            return
+        self._correction_mutations_pending = max(
+            0, int(getattr(self, "_correction_mutations_pending", 1)) - 1
+        )
+        if error:
+            self._correction_mutation_errors.append(f"{label} failed: {error}")
+        if self._correction_mutations_pending:
+            suffix = (
+                f" · latest issue: {self._correction_mutation_errors[-1]}"
+                if self._correction_mutation_errors
+                else ""
+            )
+            self.ms_correction_status_var.set(
+                f"{self._correction_mutations_pending} correction change(s) queued{suffix}"
+            )
+            return
+        if self._correction_mutation_errors:
+            self._correction_refresh_notice = "Mutation issue: " + "; ".join(
+                self._correction_mutation_errors
+            )
+            self._correction_mutation_errors.clear()
+        # Invalidate any list request that started between mutations, then take
+        # one authoritative snapshot after every serialized commit has settled.
+        self._corrections_generation += 1
+        self._corrections_loading = False
+        self._refresh_corrections()
 
     def _validated_correction_fields(self) -> tuple[str, str] | None:
         source = self.ms_correction_source_var.get().strip()
@@ -653,6 +1343,8 @@ class MidnightSignalManagementMixin:
         self.ms_capture_detail_var.set(f"{snapshot.headline} · {snapshot.detail}")
         self.ms_level_var.set(snapshot.level_fraction * 100)
         self.ms_dbfs_var.set(snapshot.level_label)
+        self.ms_route_level_var.set(snapshot.level_fraction * 100)
+        self.ms_route_dbfs_var.set(snapshot.level_label)
         if snapshot.provider:
             provider = snapshot.provider
             self.ms_last_provider_var.set(f"{provider.display_name} · {provider.latency_label}")
@@ -661,6 +1353,11 @@ class MidnightSignalManagementMixin:
             self.ms_routing_result_var.set(f"{provider.display_name} · {provider.latency_label}")
             attempt_text = "  ·  ".join(f"{attempt.display_name}: {attempt.duration_label} ({attempt.outcome.value})" for attempt in snapshot.attempts)
             self.ms_attempts_var.set(attempt_text or "No per-provider attempts were reported.")
+            for attempt in snapshot.attempts:
+                provider_id = "gateway-tiny" if attempt.provider_id == "nova-tiny-whisper" else attempt.provider_id
+                variables = self.ms_provider_vars.get(provider_id)
+                if variables:
+                    variables[3].set(f"Last request {attempt.duration_label} · {attempt.outcome.value}")
         self.ms_backend_status_var.set(self.backend_status_var.get())
         self._shell_poll_job = self.window.after(200, self._poll_midnight_state)
 
@@ -703,6 +1400,12 @@ class MidnightSignalManagementMixin:
     def close(self) -> None:
         from utils import gui as gui_module
 
+        self._capability_generation += 1
+        self._corrections_generation += 1
+        self._correction_mutation_generation += 1
+        self._correction_mutations_pending = 0
+        self._correction_mutation_errors.clear()
+        self._correction_refresh_notice = None
         coordinator = getattr(self, "_update_coordinator", None)
         if coordinator is not None:
             try:
@@ -744,7 +1447,11 @@ class MidnightTrayFlyout:
         self.quit_app = quit_app
         self.window: tk.Toplevel | None = None
         self._poll_job: str | None = None
+        self._capability_generation = 0
+        self._capabilities: dict[str, object] = {}
         self._provider_rows: dict[str, tuple[tk.StringVar, tk.StringVar]] = {}
+        self._provider_cards: dict[str, ttk.Frame] = {}
+        self._provider_badges: dict[str, tk.Canvas] = {}
 
     def is_open(self) -> bool:
         try:
@@ -762,6 +1469,9 @@ class MidnightTrayFlyout:
         if self.is_open():
             self.window.lift()
             return
+        # A reopened panel must not number Gateway default with an observation
+        # made before a config/token change while the flyout was closed.
+        self._capabilities = {}
         win = tk.Toplevel(self.root, class_="CtrlSpeakFlyout")
         win.title("CtrlSpeak quick panel")
         win.overrideredirect(True)
@@ -814,9 +1524,9 @@ class MidnightTrayFlyout:
         self.status_var = tk.StringVar(value="● READY")
         ttk.Label(header, textvariable=self.status_var, style="MS.Ready.TLabel").pack(side=tk.RIGHT)
         self.route_var = tk.StringVar(value="Hold Right Ctrl to speak")
-        ttk.Label(frame, textvariable=self.route_var, style="MS.TLabel", foreground=MUTED).pack(anchor=tk.W, pady=(7, 14))
+        ttk.Label(frame, textvariable=self.route_var, style="MS.TLabel", foreground=MUTED).pack(anchor=tk.W, pady=(4, 10))
 
-        mic = _card(frame, padding=(16, 14))
+        mic = _card(frame, padding=(13, 10))
         mic.pack(fill=tk.X)
         self.level_var = tk.DoubleVar(value=0)
         self.level_label_var = tk.StringVar(value="−60.0 dBFS")
@@ -825,50 +1535,78 @@ class MidnightTrayFlyout:
         mic_name = sysmod.get_input_device_preference() or "System default"
         if len(mic_name) > 28:
             mic_name = mic_name[:27] + "…"
-        ttk.Label(mic_header, text=f"MICROPHONE · {mic_name}", style="MS.CardMuted.TLabel").pack(side=tk.LEFT)
+        ttk.Label(mic_header, text=f"◉  {mic_name}", style="MS.Card.TLabel").pack(side=tk.LEFT)
         with settings_lock:
             cue_volume = int(settings.get("audio_cue_volume", 30))
             cue_enabled = bool(settings.get("audio_cues_enabled", True))
         audio_label = f"Cues {cue_volume}%" if cue_enabled else "Cues muted"
-        ttk.Button(mic_header, text=audio_label, style="MS.TButton", command=self._open_control).pack(side=tk.RIGHT)
+        ttk.Button(mic_header, text=audio_label, style="MS.Compact.TButton", command=self._open_control).pack(side=tk.RIGHT)
         row = ttk.Frame(mic, style="MS.Card.TFrame")
-        row.pack(fill=tk.X, pady=(8, 0))
+        row.pack(fill=tk.X, pady=(6, 0))
         ttk.Progressbar(row, variable=self.level_var, maximum=100, style="MS.Horizontal.TProgressbar").pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Label(row, textvariable=self.level_label_var, style="MS.Card.TLabel", width=12, anchor=tk.E).pack(side=tk.RIGHT, padx=(10, 0))
 
-        providers = _card(frame, padding=(16, 12))
-        providers.pack(fill=tk.X, pady=(10, 0))
-        provider_header = ttk.Frame(providers, style="MS.Card.TFrame")
-        provider_header.pack(fill=tk.X, pady=(0, 5))
-        ttk.Label(provider_header, text="PROVIDER ROUTE", style="MS.CardMuted.TLabel").pack(side=tk.LEFT)
-        ttk.Button(provider_header, text="Refresh", style="MS.TButton", command=self._refresh_capabilities).pack(side=tk.RIGHT)
-        for provider_id, label in (("ubuntu-gpu-large-v3-turbo", "Ubuntu GPU"), ("openai-gpt-transcribe", "OpenAI"), ("gateway-tiny", "Gateway Tiny")):
-            row = ttk.Frame(providers, style="MS.Card.TFrame")
-            row.pack(fill=tk.X, pady=3)
+        hero = ttk.Frame(frame, style="MS.Root.TFrame")
+        hero.pack(pady=(11, 9))
+        ttk.Label(hero, text="Hold", style="MS.TLabel", font=("Segoe UI Semibold", 14)).pack(side=tk.LEFT)
+        ttk.Label(hero, text=" Right Ctrl ", style="MS.TLabel", foreground=CYAN, font=("Segoe UI Semibold", 14)).pack(side=tk.LEFT)
+        ttk.Label(hero, text="to speak", style="MS.TLabel", font=("Segoe UI Semibold", 14)).pack(side=tk.LEFT)
+
+        provider_header = ttk.Frame(frame, style="MS.Root.TFrame")
+        provider_header.pack(fill=tk.X, pady=(0, 4))
+        self.provider_route_label_var = tk.StringVar(value="PROVIDER ROUTE · GATEWAY DEFAULT")
+        ttk.Label(provider_header, textvariable=self.provider_route_label_var, style="MS.TLabel", foreground=MUTED, font=("Segoe UI Semibold", 8)).pack(side=tk.LEFT)
+        ttk.Button(provider_header, text="Refresh", style="MS.Compact.TButton", command=self._refresh_capabilities).pack(side=tk.RIGHT)
+        for index, (provider_id, label, model, _location) in enumerate(PROVIDER_CARD_SPECS, start=1):
+            provider = _card(frame, padding=(10, 7))
+            provider.pack(fill=tk.X, pady=3)
+            number = tk.Canvas(provider, width=24, height=24, background=CARD, highlightthickness=0, borderwidth=0)
+            number.pack(side=tk.LEFT, padx=(0, 9))
+            _paint_route_badge(number, None, size=24)
+            identity = ttk.Frame(provider, style="MS.Card.TFrame")
+            identity.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            ttk.Label(identity, text=label, style="MS.Card.TLabel", font=("Segoe UI Semibold", 10)).pack(anchor=tk.W)
+            ttk.Label(identity, text=model, style="MS.CardMuted.TLabel").pack(anchor=tk.W, pady=(1, 0))
+            metrics = ttk.Frame(provider, style="MS.Card.TFrame")
+            metrics.pack(side=tk.RIGHT)
             state_var = tk.StringVar(value="Unknown")
             timing_var = tk.StringVar(value="—")
-            ttk.Label(row, text=label, style="MS.Card.TLabel").pack(side=tk.LEFT)
-            ttk.Label(row, textvariable=state_var, style="MS.CardMuted.TLabel").pack(side=tk.LEFT, padx=(12, 0))
-            ttk.Label(row, textvariable=timing_var, style="MS.Card.TLabel").pack(side=tk.RIGHT)
+            ttk.Label(metrics, textvariable=state_var, style="MS.CompactMetric.TLabel", anchor=tk.E).pack(anchor=tk.E)
+            ttk.Label(metrics, textvariable=timing_var, style="MS.CardMuted.TLabel", anchor=tk.E).pack(anchor=tk.E, pady=(1, 0))
             self._provider_rows[provider_id] = (state_var, timing_var)
+            self._provider_cards[provider_id] = provider
+            self._provider_badges[provider_id] = number
 
-        last = _card(frame, padding=(16, 12))
-        last.pack(fill=tk.X, pady=(10, 0))
-        ttk.Label(last, text="LAST TRANSCRIPTION", style="MS.CardMuted.TLabel").pack(anchor=tk.W)
+        last = _card(frame, padding=(12, 9))
+        last.pack(fill=tk.X, pady=(8, 0))
+        self._provider_following_widget = last
+        last_header = ttk.Frame(last, style="MS.Card.TFrame")
+        last_header.pack(fill=tk.X)
+        ttk.Label(last_header, text="LAST RESULT", style="MS.CardMuted.TLabel").pack(side=tk.LEFT)
+        ttk.Label(last_header, text="This session", style="MS.CardMuted.TLabel").pack(side=tk.RIGHT)
         self.last_var = tk.StringVar(value="Nothing transcribed in this session")
-        ttk.Label(last, textvariable=self.last_var, style="MS.Card.TLabel", wraplength=360, justify=tk.LEFT).pack(anchor=tk.W, pady=(6, 0))
+        result_row = ttk.Frame(last, style="MS.Card.TFrame")
+        result_row.pack(fill=tk.X, pady=(5, 0))
+        ttk.Label(result_row, textvariable=self.last_var, style="MS.Card.TLabel", wraplength=270, justify=tk.LEFT).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(result_row, text="Copy", style="MS.Compact.TButton", command=sysmod.copy_last_transcript_from_tray).pack(side=tk.RIGHT, padx=(8, 0))
 
         actions = ttk.Frame(frame, style="MS.Root.TFrame")
-        actions.pack(fill=tk.X, pady=(12, 0))
-        ttk.Button(actions, text="Copy last", style="MS.TButton", command=sysmod.copy_last_transcript_from_tray).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(actions, text="Add correction", style="MS.Primary.TButton", command=self._open_corrections).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
-        secondary = ttk.Frame(frame, style="MS.Root.TFrame")
-        secondary.pack(fill=tk.X, pady=(8, 0))
-        self.cancel_button = ttk.Button(secondary, text="Cancel active", style="MS.Danger.TButton", command=sysmod.cancel_active_transcription)
-        self.cancel_button.pack(side=tk.LEFT)
-        ttk.Button(secondary, text="Quit", style="MS.Danger.TButton", command=self._quit).pack(side=tk.RIGHT)
-        ttk.Button(secondary, text="Updates", style="MS.TButton", command=self._check_updates).pack(side=tk.RIGHT, padx=(0, 8))
-        ttk.Button(secondary, text="Open", style="MS.TButton", command=self._open_control).pack(side=tk.RIGHT, padx=(0, 8))
+        actions.pack(fill=tk.X, pady=(8, 0))
+        actions.columnconfigure(0, weight=1)
+        actions.columnconfigure(1, weight=1)
+        ttk.Button(actions, text="＋  Add correction", style="MS.Primary.TButton", command=self._open_corrections).grid(row=0, column=0, sticky="ew", padx=(0, 4), pady=(0, 4))
+        ttk.Button(actions, text="Routing", style="MS.TButton", command=self._open_control).grid(row=0, column=1, sticky="ew", padx=(4, 0), pady=(0, 4))
+        ttk.Button(actions, text="Audio controls", style="MS.TButton", command=self._open_control).grid(row=1, column=0, sticky="ew", padx=(0, 4), pady=(4, 0))
+        ttk.Button(actions, text="Open CtrlSpeak", style="MS.TButton", command=self._open_control).grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=(4, 0))
+
+        footer = ttk.Frame(frame, style="MS.Root.TFrame")
+        footer.pack(fill=tk.X, pady=(9, 0))
+        ttk.Label(footer, text=f"●  {sysmod.APP_VERSION}", style="MS.Ready.TLabel").pack(side=tk.LEFT)
+        self.cancel_button = ttk.Button(footer, text="Cancel", style="MS.Danger.TButton", command=sysmod.cancel_active_transcription)
+        self.cancel_button.pack(side=tk.LEFT, padx=(9, 0))
+        ttk.Button(footer, text="Quit", style="MS.Danger.TButton", command=self._quit).pack(side=tk.RIGHT)
+        ttk.Button(footer, text="Check updates", style="MS.Compact.TButton", command=self._check_updates).pack(side=tk.RIGHT, padx=(0, 7))
+        self._apply_route_strategy_visuals()
         self.window = win
         win.lift()
         win.focus_force()
@@ -890,6 +1628,33 @@ class MidnightTrayFlyout:
     def _quit(self) -> None:
         self.close()
         self.quit_app()
+
+    def _apply_route_strategy_visuals(self) -> None:
+        if not self._provider_cards or not hasattr(self, "_provider_following_widget"):
+            return
+        strategy_id = get_runtime_backend_config().provider_strategy
+        order = provider_order_for_strategy(strategy_id, self._capabilities)
+        if order is None:
+            visible = tuple(spec[0] for spec in PROVIDER_CARD_SPECS)
+            label = "PROVIDER ROUTE · GATEWAY DEFAULT (SERVER ORDER)"
+        else:
+            visible = order
+            names = {provider_id: title for provider_id, title, _model, _location in PROVIDER_CARD_SPECS}
+            label = "PROVIDER ROUTE · " + " → ".join(names[item].upper() for item in visible)
+        self.provider_route_label_var.set(label)
+        for card in self._provider_cards.values():
+            card.pack_forget()
+        for position, provider_id in enumerate(visible, start=1):
+            self._provider_cards[provider_id].pack(
+                fill="x",
+                pady=3,
+                before=self._provider_following_widget,
+            )
+            _paint_route_badge(
+                self._provider_badges[provider_id],
+                position if order is not None else None,
+                size=24,
+            )
 
     def _poll(self) -> None:
         if not self.is_open():
@@ -913,7 +1678,12 @@ class MidnightTrayFlyout:
 
     def _refresh_capabilities(self) -> None:
         config = get_runtime_backend_config()
+        self._capability_generation += 1
+        request_generation = self._capability_generation
+        config_identity = capability_config_identity(config)
         if config.backend != "api":
+            self._capabilities = {}
+            self._apply_route_strategy_visuals()
             return
 
         def worker() -> None:
@@ -922,14 +1692,61 @@ class MidnightTrayFlyout:
                 payload = ApiTranscriptionClient(config, timeout_seconds=6.0).get_capabilities()
                 rtt = (time.monotonic() - started) * 1000
             except Exception:
+                sysmod.enqueue_management_task(
+                    self._apply_capabilities_error,
+                    request_generation,
+                    config_identity,
+                )
                 return
-            sysmod.enqueue_management_task(self._apply_capabilities, payload, rtt)
+            sysmod.enqueue_management_task(
+                self._apply_capabilities,
+                dict(payload),
+                rtt,
+                request_generation,
+                config_identity,
+            )
 
         threading.Thread(target=worker, name="CtrlSpeakFlyoutCapabilities", daemon=True).start()
 
-    def _apply_capabilities(self, payload: Mapping[str, object], rtt: float) -> None:
-        if not self.is_open():
+    def _flyout_capability_request_is_current(
+        self,
+        request_generation: int,
+        config_identity: tuple[object, ...],
+    ) -> bool:
+        if not self.is_open() or request_generation != self._capability_generation:
+            return False
+        try:
+            return capability_config_identity(get_runtime_backend_config()) == config_identity
+        except Exception:
+            return False
+
+    def _apply_capabilities_error(
+        self,
+        request_generation: int,
+        config_identity: tuple[object, ...],
+    ) -> None:
+        if not self._flyout_capability_request_is_current(request_generation, config_identity):
             return
+        self._capabilities = {}
+        for provider_id, (state_var, timing_var) in self._provider_rows.items():
+            if provider_id == "openai-gpt-transcribe":
+                key_label = "configured" if get_session_openai_api_key() else "key required"
+                state_var.set(f"Unavailable · {key_label}")
+            else:
+                state_var.set("Unavailable")
+            timing_var.set("—")
+        self._apply_route_strategy_visuals()
+
+    def _apply_capabilities(
+        self,
+        payload: Mapping[str, object],
+        rtt: float,
+        request_generation: int,
+        config_identity: tuple[object, ...],
+    ) -> None:
+        if not self._flyout_capability_request_is_current(request_generation, config_identity):
+            return
+        self._capabilities = dict(payload)
         profiles = providers_from_capabilities(payload)
         by_id = {profile.provider_id: profile for profile in profiles}
         aliases = {"gateway-tiny": by_id.get("gateway-tiny") or by_id.get("nova-tiny-whisper"), **by_id}
@@ -937,15 +1754,29 @@ class MidnightTrayFlyout:
             profile = aliases.get(provider_id)
             if profile:
                 if provider_id == "openai-gpt-transcribe":
-                    state_var.set("Key configured" if get_session_openai_api_key() else "Key required")
+                    key_label = "configured" if get_session_openai_api_key() else "key required"
+                    capability_label = profile.state_label
+                    if capability_label.casefold() in {"ready", "available with key"}:
+                        capability_label = "Available with key"
+                    state_var.set(f"{capability_label} · {key_label}")
                 else:
                     state_var.set(profile.state_label)
                 timing = profile.probe_duration_ms if profile.probe_duration_ms is not None else rtt
-                timing_var.set(format_latency_ms(timing))
+                prefix = "Probe" if profile.probe_duration_ms is not None else "Gateway"
+                timing_var.set(f"{prefix} {format_latency_ms(timing)}")
+            else:
+                if provider_id == "openai-gpt-transcribe":
+                    key_label = "configured" if get_session_openai_api_key() else "key required"
+                    state_var.set(f"Not advertised · {key_label}")
+                else:
+                    state_var.set("Not advertised")
+                timing_var.set("—")
+        self._apply_route_strategy_visuals()
 
     def close(self) -> None:
         if not self.is_open():
             return
+        self._capability_generation += 1
         if self._poll_job:
             try:
                 self.window.after_cancel(self._poll_job)
@@ -958,6 +1789,10 @@ class MidnightTrayFlyout:
 __all__ = [
     "MidnightSignalManagementMixin",
     "MidnightTrayFlyout",
+    "PROVIDER_CARD_SPECS",
+    "ROUTING_COLUMN_WEIGHTS",
     "apply_midnight_signal_theme",
     "flyout_geometry",
+    "language_summary",
+    "provider_signal_levels",
 ]

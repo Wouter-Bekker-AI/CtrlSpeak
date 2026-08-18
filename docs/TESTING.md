@@ -1,4 +1,4 @@
-# CtrlSpeak v0.7.0 Midnight Signal testing playbook
+# CtrlSpeak v0.7.1 Midnight Signal testing playbook
 
 Run commands from the v0.7 repository root in a project-compatible Python
 environment. The required fast suite is GUI-free and performs no model
@@ -70,6 +70,35 @@ The tests stub optional GUI/audio packages during headless collection. Passing
 them does not prove that the host has X11, PortAudio, a tray backend, or working
 Whisper native libraries.
 
+## v0.7.1 native-audio regression gates
+
+v0.7.0 passed the headless and packaged metadata checks but could still crash
+inside `_portaudio` when right Ctrl started recording. The recorder and the new
+recording-start cue could initialize separate PyAudio managers concurrently;
+PortAudio's process-global Windows host state is not safe across those competing
+lifecycles. The failure is a native access violation and therefore bypasses
+Python exception handling and application logs.
+
+Before v0.7.1 is tagged:
+
+1. Run the deterministic audio-lifecycle tests. A guarded fake backend must
+   reject any second PortAudio initialization or termination while capture is
+   live. Cover start, normal release, cancellation while the recorder lingers,
+   and shutdown.
+2. Confirm cue delivery failure cannot prevent microphone capture and that
+   cancelling a session cannot detach a still-live recorder or allow an old
+   generation to clear newer state.
+3. On Windows with a physical/default microphone, run at least 50 right-Ctrl
+   press/release cycles with cues enabled, including rapid presses and
+   cancellations. The process must remain alive and responsive.
+4. Repeat that stress pass against the exact one-file `dist/CtrlSpeak.exe`, not
+   only source mode. Inspect the matching Windows Application event-log window;
+   there must be no Application Error/WER entry for `CtrlSpeak.exe`,
+   `_portaudio*.pyd`, or exception `0xc0000005`.
+5. Repeat with cues muted and with the output device unavailable. Recording
+   must remain usable, and shutdown/startup must remove bounded stale recording
+   files without retaining audio content.
+
 For a read-only Windows visual pass that does not start a second hotkey listener
 or model, use the source harness:
 
@@ -94,7 +123,7 @@ Run these checks against both source and the exact packaged
 available:
 
 1. Open CtrlSpeak from the stable filename. Confirm the tray and control center
-   show 0.7.0, render the graphite Midnight Signal hierarchy cleanly, remain
+   show 0.7.1, render the graphite Midnight Signal hierarchy cleanly, remain
    readable at the supported scales, and expose visible keyboard focus.
 2. Left-click the tray icon and verify the branded quick surface; right-click
    and verify the dependable native fallback menu. Exercise Manage, Copy last
@@ -103,7 +132,8 @@ available:
 3. Hold right Ctrl on each connected monitor. Confirm the slim recording capsule
    appears on the active monitor without taking focus, its timer advances, the
    waveform/dBFS meter reacts to the microphone, and silence settles at the
-   documented floor rather than displaying fake activity.
+   documented floor rather than displaying fake activity. Recording-start
+   feedback must not crash, stall, or race the input stream.
 4. Release right Ctrl. Confirm the capsule transitions to the elongated
    transcribing animation. It must not show providers arranged around the
    microphone or claim a provider before a result arrives.
@@ -194,13 +224,14 @@ source environment and again against `dist/CtrlSpeak`:
 The updater cannot be proven end to end by source-mode unit tests. Against the
 exact signed artifacts on clean Windows and Ubuntu/X11 hosts:
 
-1. Install v0.6.2 as `CtrlSpeak.exe` or `CtrlSpeak` and confirm the tray/control
-   center show 0.6.2.
-2. Publish the controlled signed v0.7.0 release with both required platform
+1. Install v0.7.0 as `CtrlSpeak.exe` or `CtrlSpeak` and confirm the tray/control
+   center show 0.7.0. Do not exercise its known Windows recording-start path;
+   use it only to validate signed update discovery and handoff.
+2. Publish the controlled signed v0.7.1 release with both required platform
    artifacts and the three metadata assets.
 3. Check for the update from the GUI, inspect version/size, download, and confirm
    the UI remains responsive.
-4. Restart and verify the same stable path now reports 0.7.0 while API URL/token,
+4. Restart and verify the same stable path now reports 0.7.1 while API URL/token,
    mode, input device, models, CUDA files, and corrections remain intact.
 5. Interrupt and resume a download; confirm the final artifact hash matches the
    signed manifest.
@@ -240,7 +271,7 @@ acceptance test. Do not use its host-level guidance on an Ubuntu system.
 
 ## Companion API tests
 
-The maintained v0.7.0 role-aware service is in `server/whisper_transcription`. Its
+The maintained v0.7.1 role-aware service is in `server/whisper_transcription`. Its
 headless suite uses a fake model and does not download CUDA/model assets, bind a
 network port, restart systemd, or change a firewall:
 
@@ -271,7 +302,7 @@ After taking timestamped source/configuration/database rollback copies and
 deploying one role at a time:
 
 1. Confirm the dedicated `CtrlSpeak` gateway and Ubuntu worker each report
-   version 0.7.0 and their intended `gateway`/`worker` roles. Nova must not gain
+   version 0.7.1 and their intended `gateway`/`worker` roles. Nova must not gain
    a CtrlSpeak listener.
 2. Confirm the gateway retains all correction/audit rows, uses the existing
    authenticated identities, stores no OpenAI key, and listens only on its

@@ -16,11 +16,18 @@ pytestmark = pytest.mark.core_headless
 
 
 def test_release_version_gate_matches_current_patch():
-    assert release.read_app_version() == "0.7.0"
-    assert release.read_server_versions() == ("0.7.0", "0.7.0")
-    assert release.check_version("v0.7.0") == "0.7.0"
+    assert release.read_app_version() == "0.7.1"
+    assert release.read_server_versions() == ("0.7.1", "0.7.1")
+    assert release.check_version("v0.7.1") == "0.7.1"
     with pytest.raises(SystemExit, match="tag/version mismatch"):
         release.check_version("v0.5.0")
+
+
+def test_midnight_signal_visible_identity_uses_version_source():
+    source = (release.ROOT / "utils" / "midnight_signal_ui.py").read_text("utf-8")
+
+    assert "0.7.0  ·  MIDNIGHT SIGNAL" not in source
+    assert "APP_VERSION" in source
 
 
 def test_generate_and_verify_complete_release_set(tmp_path, monkeypatch):
@@ -46,14 +53,14 @@ def test_generate_and_verify_complete_release_set(tmp_path, monkeypatch):
     monkeypatch.setattr(release, "verify_signed_manifest", verify_with_test_key)
     release.generate(
         Namespace(
-            tag="v0.7.0",
+            tag="v0.7.1",
             windows=str(windows),
             linux=str(linux),
             output_dir=str(tmp_path),
             published_at="2026-08-18T12:00:00Z",
         )
     )
-    release.verify(Namespace(directory=str(tmp_path), tag="v0.7.0"))
+    release.verify(Namespace(directory=str(tmp_path), tag="v0.7.1"))
 
     assert (tmp_path / "update-manifest.json").is_file()
     assert (tmp_path / "update-manifest.sig").is_file()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from array import array
+import io
 import math
 import sys
 import wave
@@ -13,6 +14,7 @@ from utils.audio_cues import (
     DEFAULT_PEAK_CEILING,
     MAX_CUE_SECONDS,
     Pcm16Cue,
+    cue_to_wav_bytes,
     load_wav_cue,
     peak_fraction,
     prepare_cue,
@@ -92,6 +94,26 @@ def test_wav_loader_rejects_non_pcm16_width(tmp_path) -> None:
         load_wav_cue(source)
 
 
+def test_cue_to_wav_bytes_preserves_prepared_pcm_and_format() -> None:
+    cue = Pcm16Cue(
+        _pcm16([0, 1200, -1200, 0, 500, -500]),
+        sample_rate=16_000,
+        channels=2,
+        kind=CueKind.RECORDING_STARTED,
+    )
+
+    payload = cue_to_wav_bytes(cue)
+
+    assert payload[:4] == b"RIFF"
+    assert payload[8:12] == b"WAVE"
+    with wave.open(io.BytesIO(payload), "rb") as handle:
+        assert handle.getnchannels() == 2
+        assert handle.getsampwidth() == 2
+        assert handle.getframerate() == 16_000
+        assert handle.getnframes() == cue.frame_count
+        assert handle.readframes(handle.getnframes()) == cue.frames
+
+
 def test_cue_player_obeys_enabled_setting_and_isolates_sink_failure(caplog) -> None:
     delivered: list[Pcm16Cue] = []
     player = CuePlayer(delivered.append, volume=0.5)
@@ -109,6 +131,33 @@ def test_cue_player_obeys_enabled_setting_and_isolates_sink_failure(caplog) -> N
     broken = CuePlayer(broken_sink)
     assert broken.play(CueKind.ERROR, background=False) is True
     assert "cue playback failed" in caplog.text.casefold()
+
+
+def test_cue_player_reports_background_thread_start_failure_without_wedging(
+    monkeypatch, caplog
+) -> None:
+    from utils import audio_cues
+
+    delivered: list[Pcm16Cue] = []
+
+    class RefusedThread:
+        def __init__(self, *, target, **_kwargs) -> None:
+            self.target = target
+
+        def start(self) -> None:
+            raise RuntimeError("interpreter is shutting down")
+
+    monkeypatch.setattr(audio_cues.threading, "Thread", RefusedThread)
+    player = CuePlayer(delivered.append)
+
+    assert player.play(CueKind.CANCELLED, background=True) is False
+    assert delivered == []
+    assert "cue worker failed to start" in caplog.text.casefold()
+
+    # Cancellation/release code can continue, and a later synchronous cue is
+    # still usable; CuePlayer retains no pending/started lifecycle state.
+    assert player.play(CueKind.SUCCESS, background=False) is True
+    assert [cue.kind for cue in delivered] == [CueKind.SUCCESS]
 
 
 @pytest.mark.parametrize(

@@ -9,6 +9,7 @@ from __future__ import annotations
 from array import array
 from dataclasses import dataclass, replace
 from enum import Enum
+import io
 import logging
 import math
 from pathlib import Path
@@ -195,6 +196,83 @@ def load_wav_cue(path: str | Path, *, kind: CueKind | None = None) -> Pcm16Cue:
     return cue
 
 
+def cue_to_wav_bytes(cue: Pcm16Cue) -> bytes:
+    """Wrap a validated PCM cue in a RIFF/WAVE container in memory.
+
+    Windows' native ``PlaySound`` API accepts an in-memory WAVE image.  Keeping
+    this conversion here lets the Windows cue sink avoid PortAudio entirely
+    while preserving the already prepared volume, peak ceiling, and fades.
+    """
+
+    _validate_cue(cue)
+    output = io.BytesIO()
+    with wave.open(output, "wb") as handle:
+        handle.setnchannels(cue.channels)
+        handle.setsampwidth(2)
+        handle.setframerate(cue.sample_rate)
+        handle.writeframes(cue.frames)
+    return output.getvalue()
+
+
+_background_delivery_lock = threading.Lock()
+_background_delivery_worker: threading.Thread | None = None
+_background_delivery_pending: tuple[CueSink, Pcm16Cue] | None = None
+
+
+def _deliver_cue(sink: CueSink, cue: Pcm16Cue) -> None:
+    try:
+        sink(cue)
+    except Exception:
+        # Never let a missing/disconnected output device break capture.
+        LOGGER.exception("CtrlSpeak UI cue playback failed")
+
+
+def _background_delivery_loop() -> None:
+    """Serialize playback while retaining at most the newest pending cue."""
+
+    global _background_delivery_pending, _background_delivery_worker
+    while True:
+        with _background_delivery_lock:
+            delivery = _background_delivery_pending
+            _background_delivery_pending = None
+            if delivery is None:
+                _background_delivery_worker = None
+                return
+        _deliver_cue(*delivery)
+
+
+def _enqueue_background_delivery(sink: CueSink, cue: Pcm16Cue) -> bool:
+    """Accept one nonblocking cue, superseding any older waiting delivery.
+
+    The currently playing native cue is allowed to finish, but rapid lifecycle
+    changes retain only their newest pending signal.  This prevents stale
+    processing/cancel sounds and unbounded waiting threads from crossing into
+    a later dictation generation.
+    """
+
+    global _background_delivery_pending, _background_delivery_worker
+    with _background_delivery_lock:
+        _background_delivery_pending = (sink, cue)
+        if _background_delivery_worker is not None:
+            return True
+        worker = threading.Thread(
+            target=_background_delivery_loop,
+            name=f"CtrlSpeakCue-{cue.kind.value if cue.kind else 'preview'}",
+            daemon=True,
+        )
+        _background_delivery_worker = worker
+        try:
+            # Starting under the short arbitration lock prevents another
+            # caller from accepting work behind a worker that never started.
+            worker.start()
+        except Exception:
+            LOGGER.exception("CtrlSpeak UI cue worker failed to start")
+            _background_delivery_worker = None
+            _background_delivery_pending = None
+            return False
+    return True
+
+
 class CuePlayer:
     """Small safe wrapper around an injected OS/audio-library playback sink."""
 
@@ -224,19 +302,7 @@ class CuePlayer:
             peak_ceiling=self.peak_ceiling,
         )
 
-        def deliver() -> None:
-            try:
-                self._sink(cue)
-            except Exception:
-                # Never let a missing/disconnected output device break capture.
-                LOGGER.exception("CtrlSpeak UI cue playback failed")
-
         if background:
-            threading.Thread(
-                target=deliver,
-                name=f"CtrlSpeakCue-{kind.value}",
-                daemon=True,
-            ).start()
-        else:
-            deliver()
+            return _enqueue_background_delivery(self._sink, cue)
+        _deliver_cue(self._sink, cue)
         return True

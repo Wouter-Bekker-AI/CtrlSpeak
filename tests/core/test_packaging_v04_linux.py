@@ -28,11 +28,12 @@ def test_v07_pyinstaller_spec_uses_stable_artifact_and_platform_adapters() -> No
     assert "utils.audio_cues" in spec
     assert "utils.midnight_overlay" in spec
     assert "utils.ui_theme" in spec
+    assert "'winsound'" in spec
     assert "cryptography" in spec
     assert "pynput._util.xorg" in spec
     assert "pynput.keyboard._xorg" in spec
     assert "pynput.mouse._xorg" in spec
-    assert system.APP_VERSION == "0.7.0"
+    assert system.APP_VERSION == "0.7.1"
 
 
 def test_build_helper_routes_windows_and_linux_to_v07_spec() -> None:
@@ -71,10 +72,23 @@ def test_desktop_launcher_template_and_appstream_metadata_are_consistent() -> No
     assert launchable.text == "ctrlspeak.desktop"
     release = component.find("releases/release")
     assert release is not None
-    assert release.attrib["version"] == "0.7.0"
+    assert release.attrib["version"] == "0.7.1"
 
     assert icon_path.is_file()
     assert icon_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_v071_windows_and_hotfix_release_metadata_are_consistent() -> None:
+    version_info = (ROOT / "packaging" / "windows_version_info.txt").read_text("utf-8")
+    release_notes = (ROOT / "docs" / "V0.7.1_HOTFIX_RELEASE.md").read_text("utf-8")
+    changelog = (ROOT / "CHANGELOG.md").read_text("utf-8")
+
+    assert "filevers=(0, 7, 1, 0)" in version_info
+    assert "prodvers=(0, 7, 1, 0)" in version_info
+    assert "StringStruct(u'FileVersion', u'0.7.1')" in version_info
+    assert "StringStruct(u'ProductVersion', u'0.7.1')" in version_info
+    assert "Target tag: `v0.7.1`" in release_notes
+    assert "0.7.1 — 2026-08-18" in changelog
 
 
 def test_linux_build_documentation_names_prerequisites_and_uninstalled_template() -> None:
