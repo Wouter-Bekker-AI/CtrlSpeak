@@ -1,4 +1,4 @@
-# CtrlSpeak v0.6.2 user flow
+# CtrlSpeak v0.7.0 Midnight Signal user flow
 
 ## 1. Launch and platform readiness
 
@@ -51,11 +51,17 @@ All persistent data is below `$XDG_CONFIG_HOME/CtrlSpeak` or
 1. A non-suppressing global `pynput` listener observes the right Ctrl press.
 2. CtrlSpeak creates a unique WAV below the XDG `temp/` directory and opens the
    selected/default PortAudio input device.
-3. The waveform overlay updates while the key is held.
-4. Releasing right Ctrl stops recording, changes the overlay to Processing, and
-   starts the processing sound. The packaged chime is uniformly attenuated when
-   necessary to remain at or below the -6 dBFS peak ceiling.
-5. Audio/open-device errors are logged and reported; they do not leave a
+3. Midnight Signal opens a compact, non-focus-stealing recording capsule on the
+   active monitor. It shows a live waveform, elapsed time, microphone name, and
+   an RMS input meter labelled in dBFS. The meter is smoothed for readability;
+   it is never presented as an acoustic SPL measurement.
+4. Releasing right Ctrl stops recording and transitions the same capsule into a
+   calm elongated/elliptical transcribing animation. Providers are not arranged
+   around the microphone and the UI does not predict which route will win.
+5. The generated processing cue begins at the saved volume. Its PCM signal is
+   peak-limited to the documented product ceiling without changing pitch;
+   mute and reduced-feedback preferences are honoured immediately.
+6. Audio/open-device errors are logged and reported; they do not leave a
    recording beside the executable.
 
 ## 4. Transcription and injection
@@ -80,13 +86,19 @@ authentication, network, or schema errors are shown and never trigger embedded
 fallback.
 
 The gateway may use its selected published cascade. `provider_used`, `attempts`,
-and `degraded` make that routing visible. The default `ubuntu-gpu-preferred`
+`degraded`, and measured duration fields make that routing visible. The default `ubuntu-gpu-preferred`
 route is Ubuntu GPU, then OpenAI with the caller's key, then gateway tiny.
 `openai-preferred` reverses the first two; Ubuntu-only, OpenAI-only, and
 gateway-tiny-only routes are also available. Cascades continue after quota/key
 failures and record them; single-provider routes return them. An offline Ubuntu
 worker is probed within 500 ms and then bypassed through a 30-second circuit
 instead of delaying every request.
+
+Midnight Signal labels each timing by its real scope. Gateway probe duration,
+per-attempt duration, worker inference duration, and complete route duration
+remain separate. Unsupported or missing telemetry displays as unavailable;
+sample concept values are never substituted. The provider name and fallback
+path appear only after the authenticated gateway result reports them.
 
 When configured, the ordered language policy is sent as the multipart
 `allowed_languages` field. The maintained server validates and enforces
@@ -109,19 +121,37 @@ it, and the client independently refuses an out-of-policy response.
    **Copy last transcript** recovery value. Only after successful injection does
    it make the result eligible for edit feedback.
 
-The processing sound/overlay stops and the temporary WAV is cleaned in every
-result path.
+The processing animation stops at a terminal result and its short acknowledgement
+dismisses automatically. The generation-owned temporary WAV is removed after
+the recorder/provider worker exits. A bounded shutdown also attempts exact-path
+cleanup, and the next single-instance startup removes any crash-stale
+`recording-*.wav` files from CtrlSpeak's private temp directory.
 
-### Tray recovery
+## 5. Tray and quick actions
+
+The left-click tray surface is the compact daily interface. It shows current
+capture state, active microphone, selected route, provider readiness, the last
+safe timing measurements, and fallback status with restrained hierarchy. It
+offers direct actions for **Manage CtrlSpeak**, **Copy last transcript**,
+**Submit correction…**, gateway refresh, update check, cue-status access to the
+control center's mute/volume settings, and Quit. The native right-click menu
+remains the dependable platform fallback.
+
+Status data is operational only: version, route/provider identifiers, bounded
+health states, dBFS, and durations. It never displays or retains transcript
+text, audio, API keys, bearer tokens, correction phrases, or arbitrary server
+exception strings.
+
+### Transcript recovery
 
 The tray's **Copy last transcript** item is disabled until transcription first
 succeeds. It copies the retained text even if active-field insertion failed and
 reports the clipboard outcome. CtrlSpeak retains exactly one result in memory;
 it does not persist transcript history, and the value disappears on exit.
 
-### Tray correction submission
+### Correction submission
 
-The tray's **Submit correction…** action opens one small form. Enter the phrase
+**Submit correction…** opens one focused form. Enter the phrase
 CtrlSpeak currently produces and the replacement it should return. Submission
 uses the runtime-pinned gateway URL and bearer identity; the token is never
 shown in the form or logged. The default user-scoped rule affects only that
@@ -151,10 +181,12 @@ The field selection/copy technique cannot guarantee support for every toolkit,
 terminal, remote surface, password field, or multiline editor. Disable edit
 feedback in the management window when the workflow is unsuitable.
 
-## 7. Management window
+## 7. Midnight Signal control center
 
-The tray's **Manage CtrlSpeak** action raises one Tk management window. It
-contains:
+The tray's **Manage CtrlSpeak** action raises one Midnight Signal management
+window. A calm graphite tabbed workspace separates daily controls from advanced
+configuration; detail is available without presenting every setting at once.
+It contains:
 
 - current version, stable update channel, last-check time, signed update status,
   download progress, release link, and update controls;
@@ -167,11 +199,19 @@ contains:
 - CPU/GPU preference and Linux **Recheck system CUDA** status;
 - client start/stop and clean application shutdown.
 
+The routing view uses ordered provider cards rather than a circular microphone
+diagram. It distinguishes route selection, readiness, health-probe time,
+attempt time, inference time, and total route time. Ready, requires-key,
+starting, unavailable, fallback, and unknown states use both text and shape—not
+colour alone. Keyboard focus remains visible; logical focus order, scalable
+text, high-contrast-compatible labels, and a reduced-motion path are release
+requirements.
+
 Backend changes explicitly require restart. On Linux, the destructive Windows
 **Delete CtrlSpeak** flow only reports that automatic uninstall is unsupported;
 the user/operator removes their manually installed files.
 
-## 7. Signed update flow
+## 8. Signed update flow
 
 1. **Check for updates** queries GitHub's latest stable CtrlSpeak Release on a
    worker thread. The tray and control center share one generation-aware
@@ -195,9 +235,12 @@ the user/operator removes their manually installed files.
 Source checkouts are discovery-only. They never run Git commands or overwrite
 working files from the GUI.
 
-## 8. Shutdown
+## 9. Shutdown
 
-Quit stops the hotkey/recording path, hides overlays, cleans temporary audio,
-stops embedded discovery/server threads, stops the tray, exits Tk, and releases
-the XDG instance lock. No service, firewall, desktop launcher, or remote API
-deployment is modified.
+Quit stops the hotkey/recording path, signals the generation-local cancellation
+and recorder-stop events, waits a bounded time for active workers, attempts
+exact-path temporary-audio cleanup, hides overlays, stops embedded
+discovery/server threads, stops the tray, exits Tk, and releases the XDG
+instance lock. A later locked startup removes a file that an unresponsive
+provider kept open beyond the shutdown bound. No service, firewall, desktop
+launcher, or remote API deployment is modified.

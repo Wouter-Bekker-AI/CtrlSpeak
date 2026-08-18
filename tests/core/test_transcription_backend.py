@@ -54,6 +54,14 @@ class RecordingSession:
         self.calls.append({"url": url, **kwargs})
         return self.response
 
+    def patch(self, url: str, **kwargs):
+        self.calls.append({"url": url, **kwargs})
+        return self.response
+
+    def delete(self, url: str, **kwargs):
+        self.calls.append({"url": url, **kwargs})
+        return self.response
+
 
 def test_backend_display_names_are_explicit_and_round_trip() -> None:
     assert backend_display_name("bundled") == "Embedded / local"
@@ -441,6 +449,215 @@ def test_api_client_rejects_invalid_correction_submission(
         client.create_correction(source, replacement, scope=scope)
 
     assert session.calls == []
+
+
+def test_api_client_lists_identity_visible_corrections_with_filters() -> None:
+    items = [
+        {
+            "id": "rule-user",
+            "source_phrase": "control speak",
+            "replacement_phrase": "CtrlSpeak",
+            "enabled": True,
+            "scope": "user",
+            "owner_id": "desktop-user",
+        },
+        {
+            "id": "rule-global",
+            "source_phrase": "open ai",
+            "replacement_phrase": "OpenAI",
+            "enabled": True,
+            "scope": "global",
+            "owner_id": None,
+        },
+    ]
+    session = RecordingSession(FakeResponse(200, {"items": items}))
+    client = ApiTranscriptionClient(
+        BackendConfig("api", "https://gateway.example.test", "client-token", "disabled"),
+        session=session,
+    )
+
+    assert client.list_corrections(enabled=True, include_all=True) == items
+    assert session.calls == [
+        {
+            "url": "https://gateway.example.test/v1/corrections",
+            "headers": {"Authorization": "Bearer client-token"},
+            "timeout": 300.0,
+            "params": {"enabled": "true", "include_all": "true"},
+        }
+    ]
+
+
+def test_api_client_reads_and_url_quotes_one_correction_id() -> None:
+    item = {
+        "id": "team/rule?one",
+        "source_phrase": "control speak",
+        "replacement_phrase": "CtrlSpeak",
+    }
+    session = RecordingSession(FakeResponse(200, item))
+    client = ApiTranscriptionClient(
+        BackendConfig("api", DEFAULT_API_URL, "client-token", "disabled"),
+        session=session,
+    )
+
+    assert client.get_correction("team/rule?one") == item
+    assert session.calls[0]["url"] == (
+        f"{DEFAULT_API_URL}/v1/corrections/team%2Frule%3Fone"
+    )
+    assert session.calls[0]["headers"] == {"Authorization": "Bearer client-token"}
+
+
+def test_api_client_updates_all_mutable_correction_fields() -> None:
+    updated = {
+        "id": "rule-123",
+        "source_phrase": "control suite",
+        "replacement_phrase": "CtrlSpeak",
+        "context_terms": ["speech"],
+        "tags": ["product"],
+        "enabled": False,
+        "priority": 20,
+        "language_codes": ["en", "af"],
+        "send_as_keyword": True,
+        "scope": "user",
+        "owner_id": "desktop-user",
+    }
+    session = RecordingSession(FakeResponse(200, updated))
+    client = ApiTranscriptionClient(
+        BackendConfig("api", "https://gateway.example.test", "client-token", "disabled"),
+        session=session,
+    )
+
+    result = client.update_correction(
+        "rule-123",
+        source_phrase="  control suite ",
+        replacement_phrase=" CtrlSpeak ",
+        context_terms=("speech",),
+        tags=["product"],
+        enabled=False,
+        priority=20,
+        language_codes=["English", "af", "en"],
+        send_as_keyword=True,
+    )
+
+    assert result == updated
+    assert session.calls == [
+        {
+            "url": "https://gateway.example.test/v1/corrections/rule-123",
+            "headers": {"Authorization": "Bearer client-token"},
+            "timeout": 300.0,
+            "json": {
+                "source_phrase": "control suite",
+                "replacement_phrase": "CtrlSpeak",
+                "context_terms": ["speech"],
+                "tags": ["product"],
+                "enabled": False,
+                "send_as_keyword": True,
+                "priority": 20,
+                "language_codes": ["en", "af"],
+            },
+        }
+    ]
+
+
+def test_api_client_deletes_correction_without_parsing_204_body() -> None:
+    session = RecordingSession(FakeResponse(204, {}))
+    client = ApiTranscriptionClient(
+        BackendConfig("api", DEFAULT_API_URL, "client-token", "disabled"),
+        session=session,
+    )
+
+    assert client.delete_correction("rule-123") is None
+    assert session.calls == [
+        {
+            "url": f"{DEFAULT_API_URL}/v1/corrections/rule-123",
+            "headers": {"Authorization": "Bearer client-token"},
+            "timeout": 300.0,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda client: client.list_corrections(enabled="yes"),
+        lambda client: client.get_correction("  "),
+        lambda client: client.update_correction("rule-1"),
+        lambda client: client.update_correction("rule-1", enabled="yes"),
+        lambda client: client.update_correction("rule-1", priority=True),
+        lambda client: client.update_correction("rule-1", language_codes=["not-a-language"]),
+        lambda client: client.delete_correction(""),
+    ],
+)
+def test_api_client_rejects_invalid_correction_management_before_network(operation) -> None:
+    session = RecordingSession(FakeResponse(500, {"detail": "must not be called"}))
+    client = ApiTranscriptionClient(
+        BackendConfig("api", DEFAULT_API_URL, None, "disabled"),
+        session=session,
+    )
+
+    with pytest.raises(ValueError):
+        operation(client)
+    assert session.calls == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"items": "not-a-list"},
+        {"items": [{"id": "rule-1", "source_phrase": "missing replacement"}]},
+    ],
+)
+def test_api_client_rejects_malformed_correction_lists(payload: dict[str, object]) -> None:
+    session = RecordingSession(FakeResponse(200, payload))
+    client = ApiTranscriptionClient(
+        BackendConfig("api", DEFAULT_API_URL, None, "disabled"),
+        session=session,
+    )
+
+    with pytest.raises(ApiBackendError, match="correction-rule list|correction rule"):
+        client.list_corrections()
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda client: client.list_corrections(),
+        lambda client: client.get_correction("rule-1"),
+        lambda client: client.update_correction("rule-1", enabled=False),
+        lambda client: client.delete_correction("rule-1"),
+    ],
+)
+def test_correction_management_never_calls_gateway_for_bundled_backend(operation) -> None:
+    session = RecordingSession(FakeResponse(500, {"detail": "must not be called"}))
+    client = ApiTranscriptionClient(
+        BackendConfig("bundled", DEFAULT_API_URL, None, "disabled"),
+        session=session,
+    )
+
+    with pytest.raises(ValueError, match="Remote API backend"):
+        operation(client)
+    assert session.calls == []
+
+
+def test_api_client_rejects_mismatched_updated_correction() -> None:
+    session = RecordingSession(
+        FakeResponse(
+            200,
+            {
+                "id": "different-rule",
+                "source_phrase": "control speak",
+                "replacement_phrase": "CtrlSpeak",
+                "enabled": False,
+            },
+        )
+    )
+    client = ApiTranscriptionClient(
+        BackendConfig("api", DEFAULT_API_URL, None, "disabled"),
+        session=session,
+    )
+
+    with pytest.raises(ApiBackendError, match="mismatched correction rule"):
+        client.update_correction("rule-1", enabled=False)
 
 
 def test_bundled_transcription_records_and_applies_only_local_exact_overrides(

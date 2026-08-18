@@ -1,4 +1,4 @@
-# CtrlSpeak transcription service v0.6.2
+# CtrlSpeak transcription service v0.7.0
 
 This directory contains both CtrlSpeak server roles:
 
@@ -96,6 +96,14 @@ ceiling by default. A failed probe opens a 30-second circuit so later requests
 fail over immediately; a healthy result is cached for five seconds. The long
 provider timeout applies only after a worker connection has been established
 for actual inference.
+
+`GET /v1/capabilities` exposes safe provider-health telemetry for the worker,
+including its latest bounded probe status and duration, cache lifetime, and
+circuit retry delay. Every `/v1/transcribe` attempt includes a measured
+`duration_ms`; worker successes also include the worker-observed
+`inference_duration_ms`. The response and stored audit metadata include the
+complete `routing_duration_ms`. These values are server-observed timings and
+never include audio, transcript text, API keys, or bearer credentials.
 
 Install/reload the user unit:
 

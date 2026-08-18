@@ -11,19 +11,19 @@ ROOT = Path(__file__).resolve().parents[2]
 pytestmark = pytest.mark.core_headless
 
 
-def test_historical_v03_spec_is_preserved_but_standard_build_uses_v05() -> None:
+def test_historical_v03_spec_is_preserved_but_standard_build_uses_v07() -> None:
     spec_path = ROOT / "packaging" / "CtrlSpeak_v0.3.spec"
     assert spec_path.is_file()
     spec = spec_path.read_text("utf-8")
     assert "name='CtrlSpeak_v0.3'" in spec
     assert "assets' / 'icon.ico'" in spec
     build_helper = (ROOT / "utils" / "build_exe.py").read_text("utf-8")
-    assert '"CtrlSpeak_v0.6.spec"' in build_helper
+    assert '"CtrlSpeak_v0.7.spec"' in build_helper
     assert "standard_spec_path" in build_helper
-    assert system.APP_VERSION == "0.6.2"
+    assert system.APP_VERSION == "0.7.0"
 
 
-def test_build_documentation_names_stable_v05_artifact_and_command() -> None:
+def test_build_documentation_names_stable_v07_artifact_and_command() -> None:
     documentation = (ROOT / "packaging" / "BUILDING.md").read_text("utf-8")
     assert "CtrlSpeak.exe" in documentation
     assert "python -m utils.build_exe" in documentation

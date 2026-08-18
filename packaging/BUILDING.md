@@ -1,4 +1,4 @@
-# Building CtrlSpeak v0.6 for Windows and Linux
+# Building CtrlSpeak v0.7 for Windows and Linux
 
 This is the maintained standard CtrlSpeak packaging path. It produces the
 stable filename `dist/CtrlSpeak.exe` on Windows or `dist/CtrlSpeak` on Linux;
@@ -60,18 +60,19 @@ From the project root:
 python -m utils.build_exe
 ```
 
-The helper selects `packaging/CtrlSpeak_v0.6.spec`. The equivalent direct
+The helper selects `packaging/CtrlSpeak_v0.7.spec`. The equivalent direct
 command is:
 
 ```bash
-pyinstaller --noconfirm --clean packaging/CtrlSpeak_v0.6.spec
+pyinstaller --noconfirm --clean packaging/CtrlSpeak_v0.7.spec
 ```
 
-The one-file spec uses `console=False`, includes the native PNG icon and shipped
-assets, collects the Whisper/CTranslate2/HTTP runtime data, includes the X11
-`pynput` and Linux `pystray` backends, and explicitly excludes the lazy Windows
-input adapter. Whisper weights and Linux system CUDA/cuDNN libraries are not
-bundled.
+The one-file spec uses `console=False`, includes the native icon and shipped
+audio/video/text assets, collects the Whisper/CTranslate2/HTTP runtime data,
+includes the Midnight Signal UI-state/audio-cue helpers, includes the X11
+`pynput` and Linux `pystray` backends, and explicitly excludes the irrelevant
+platform input adapter. Whisper weights and Linux system CUDA/cuDNN libraries
+are not bundled.
 
 Expected artifact:
 
@@ -145,9 +146,9 @@ actionable message if the system runtime is not usable.
 
 ## Stable cross-platform packaging and updates
 
-On Windows the same v0.6 specification produces `CtrlSpeak.exe` with
+On Windows the same v0.7 specification produces `CtrlSpeak.exe` with
 `console=False`; the executable does not have a console window. Windows version
-resources identify product/file version 0.6.2. The historical v0.2-v0.4 specs
+resources identify product/file version 0.7.0. The historical v0.2-v0.6 specs
 remain in the repository for reproducibility but are no longer selected by the
 standard build helper. The Watcher option remains Windows-only and does not use
 the standard CtrlSpeak updater identity.

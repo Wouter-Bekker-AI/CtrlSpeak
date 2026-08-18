@@ -23,6 +23,7 @@ from utils.system import (
     start_server,
     run_tray,
     apply_auto_setup,
+    cleanup_stale_recordings,
 )
 
 from utils.gui import (
@@ -119,6 +120,13 @@ def main(argv: list[str]) -> int:
         logger.warning("Another CtrlSpeak instance appears to be running; exiting")
         notify("CtrlSpeak is already running.")
         return 0
+
+    stale_recordings = cleanup_stale_recordings()
+    if stale_recordings:
+        logger.info(
+            "Removed %d stale CtrlSpeak recording file(s) from the private temp directory",
+            stale_recordings,
+        )
 
     # Load settings early
     logger.info("Loading configuration settings")

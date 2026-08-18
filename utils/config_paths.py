@@ -21,7 +21,7 @@ from utils.languages import is_valid_allowed_output_languages_setting
 CONFIG_FILENAME = "settings.json"
 LOG_DIR_NAME = "logs"
 ASSETS_DIR_NAME = "assets"
-SETTINGS_SCHEMA_VERSION = 3
+SETTINGS_SCHEMA_VERSION = 4
 SETTINGS_BACKUP_PREFIX = "settings.pre-migration-v2"
 
 DEFAULT_SETTINGS: Dict[str, object] = {
@@ -45,6 +45,10 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "last_update_check_at": None,
     "show_whats_new_on_update": True,
     "whats_new_last_seen_version": APP_VERSION,
+    "overlay_enabled": True,
+    "reduced_motion": False,
+    "audio_cues_enabled": True,
+    "audio_cue_volume": 30,
 }
 
 settings_lock = threading.RLock()
@@ -98,6 +102,10 @@ _SETTING_VALIDATORS: Dict[str, Callable[[object], bool]] = {
     "last_update_check_at": _is_optional_string,
     "show_whats_new_on_update": lambda value: isinstance(value, bool),
     "whats_new_last_seen_version": lambda value: isinstance(value, str),
+    "overlay_enabled": lambda value: isinstance(value, bool),
+    "reduced_motion": lambda value: isinstance(value, bool),
+    "audio_cues_enabled": lambda value: isinstance(value, bool),
+    "audio_cue_volume": lambda value: _is_plain_int(value) and 0 <= int(value) <= 100,
 }
 
 def get_config_dir() -> Path:
@@ -148,6 +156,27 @@ def cleanup_recording_file(path: Optional[Path]) -> None:
     except Exception:
         logger = get_logger()
         logger.exception("Failed to remove temporary recording file: %s", path)
+
+
+def cleanup_stale_recordings() -> int:
+    """Remove only CtrlSpeak-generated recording WAVs after single-instance lock.
+
+    Callers must hold the application's single-instance lock so no live desktop
+    generation can own a matching path.  The exact filename pattern and direct
+    parent check keep cleanup bounded to CtrlSpeak's private temp directory.
+    """
+
+    temp_dir = get_temp_dir().resolve()
+    removed = 0
+    for candidate in temp_dir.glob("recording-*.wav"):
+        try:
+            if candidate.parent.resolve() != temp_dir:
+                continue
+            candidate.unlink(missing_ok=True)
+            removed += 1
+        except Exception:
+            get_logger().exception("Failed to remove stale CtrlSpeak recording")
+    return removed
 
 
 def _settings_backup_path(path: Path) -> Path:

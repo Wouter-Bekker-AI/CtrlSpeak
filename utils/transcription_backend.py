@@ -42,6 +42,8 @@ class BackendPersistenceError(RuntimeError):
 class HttpSession(Protocol):
     def post(self, url: str, **kwargs: Any) -> Any: ...
     def get(self, url: str, **kwargs: Any) -> Any: ...
+    def patch(self, url: str, **kwargs: Any) -> Any: ...
+    def delete(self, url: str, **kwargs: Any) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -366,11 +368,27 @@ class ApiTranscriptionClient:
         extra_headers: Mapping[str, str] | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        return self._request_json(
+            "post",
+            path,
+            extra_headers=extra_headers,
+            **kwargs,
+        )
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        extra_headers: Mapping[str, str] | None = None,
+        **kwargs: Any,
+    ) -> Any:
         url = f"{self.config.api_url}{path}"
         headers = self._headers()
         headers.update(extra_headers or {})
         try:
-            response = self.session.post(
+            sender = getattr(self.session, method)
+            response = sender(
                 url,
                 headers=headers,
                 timeout=self.timeout_seconds,
@@ -385,6 +403,22 @@ class ApiTranscriptionClient:
         if response.status_code < 200 or response.status_code >= 300:
             detail = self._response_detail(response)
             raise ApiBackendError(f"Whisper API returned HTTP {response.status_code}: {detail}")
+        return response
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        extra_headers: Mapping[str, str] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        response = self._request(
+            method,
+            path,
+            extra_headers=extra_headers,
+            **kwargs,
+        )
         try:
             payload = response.json()
         except Exception as exc:
@@ -392,6 +426,38 @@ class ApiTranscriptionClient:
         if not isinstance(payload, dict):
             raise ApiBackendError("Whisper API returned a JSON response with the wrong shape")
         return payload
+
+    @staticmethod
+    def _correction_rule_id(rule_id: object) -> str:
+        normalized = str(rule_id or "").strip()
+        if not normalized:
+            raise ValueError("correction rule id must be non-empty")
+        return normalized
+
+    @staticmethod
+    def _validate_correction_rule(
+        payload: Mapping[str, Any],
+        *,
+        expected_id: str | None = None,
+        expected_values: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        rule_id = payload.get("id")
+        source = payload.get("source_phrase")
+        replacement = payload.get("replacement_phrase")
+        if not isinstance(rule_id, str) or not rule_id:
+            raise ApiBackendError("CtrlSpeak API did not return a correction-rule id")
+        if not isinstance(source, str) or not isinstance(replacement, str):
+            raise ApiBackendError("CtrlSpeak API returned an invalid correction rule")
+        if expected_id is not None and rule_id != expected_id:
+            raise ApiBackendError("CtrlSpeak API returned a mismatched correction rule")
+        for key, expected in (expected_values or {}).items():
+            if payload.get(key) != expected:
+                raise ApiBackendError("CtrlSpeak API returned a mismatched correction rule")
+        return dict(payload)
+
+    def _require_remote_corrections(self) -> None:
+        if self.config.backend != "api":
+            raise ValueError("correction management requires the Remote API backend")
 
     def get_capabilities(self) -> dict[str, Any]:
         url = f"{self.config.api_url}/v1/capabilities"
@@ -454,15 +520,140 @@ class ApiTranscriptionClient:
                 "scope": normalized_scope,
             },
         )
-        rule_id = payload.get("id")
-        if not isinstance(rule_id, str) or not rule_id:
-            raise ApiBackendError("CtrlSpeak API did not return a correction-rule id")
+        return self._validate_correction_rule(
+            payload,
+            expected_values={
+                "source_phrase": source,
+                "replacement_phrase": replacement,
+            },
+        )
+
+    def list_corrections(
+        self,
+        *,
+        enabled: bool | None = None,
+        include_all: bool = False,
+    ) -> list[dict[str, Any]]:
+        """List correction rules visible to the authenticated gateway identity."""
+        self._require_remote_corrections()
+        if enabled is not None and not isinstance(enabled, bool):
+            raise ValueError("enabled correction filter must be true, false, or omitted")
+        if not isinstance(include_all, bool):
+            raise ValueError("include_all correction filter must be true or false")
+        params: dict[str, str] = {}
+        if enabled is not None:
+            params["enabled"] = str(enabled).lower()
+        if include_all:
+            params["include_all"] = "true"
+        payload = self._request_json(
+            "get",
+            "/v1/corrections",
+            **({"params": params} if params else {}),
+        )
+        items = payload.get("items")
+        if not isinstance(items, list):
+            raise ApiBackendError("CtrlSpeak API returned an invalid correction-rule list")
+        rules: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise ApiBackendError("CtrlSpeak API returned an invalid correction-rule list")
+            rules.append(self._validate_correction_rule(item))
+        return rules
+
+    def get_correction(self, rule_id: str) -> dict[str, Any]:
+        """Read one correction rule by its opaque gateway identifier."""
+        self._require_remote_corrections()
+        normalized_id = self._correction_rule_id(rule_id)
+        payload = self._request_json(
+            "get",
+            f"/v1/corrections/{quote(normalized_id, safe='')}",
+        )
+        return self._validate_correction_rule(payload, expected_id=normalized_id)
+
+    def update_correction(
+        self,
+        rule_id: str,
+        *,
+        source_phrase: str | None = None,
+        replacement_phrase: str | None = None,
+        context_terms: list[str] | tuple[str, ...] | None = None,
+        tags: list[str] | tuple[str, ...] | None = None,
+        enabled: bool | None = None,
+        priority: int | None = None,
+        language_codes: object | None = None,
+        send_as_keyword: bool | None = None,
+    ) -> dict[str, Any]:
+        """Patch supported mutable fields on one authenticated correction rule."""
+        self._require_remote_corrections()
+        normalized_id = self._correction_rule_id(rule_id)
+        changes: dict[str, Any] = {}
+        if source_phrase is not None:
+            source = str(source_phrase).strip()
+            if not source:
+                raise ValueError("the phrase to replace must be non-empty")
+            changes["source_phrase"] = source
+        if replacement_phrase is not None:
+            replacement = str(replacement_phrase).strip()
+            if not replacement:
+                raise ValueError("the replacement phrase must be non-empty")
+            changes["replacement_phrase"] = replacement
         if (
-            payload.get("source_phrase") != source
-            or payload.get("replacement_phrase") != replacement
+            "source_phrase" in changes
+            and "replacement_phrase" in changes
+            and changes["source_phrase"] == changes["replacement_phrase"]
         ):
-            raise ApiBackendError("CtrlSpeak API returned a mismatched correction rule")
-        return payload
+            raise ValueError("the replacement must differ from the original phrase")
+        for field_name, values in (("context_terms", context_terms), ("tags", tags)):
+            if values is None:
+                continue
+            if not isinstance(values, (list, tuple)) or not all(
+                isinstance(item, str) for item in values
+            ):
+                raise ValueError(f"{field_name} must contain only strings")
+            if len(values) > 50:
+                raise ValueError(f"{field_name} supports at most 50 values")
+            changes[field_name] = list(values)
+        for field_name, value in (("enabled", enabled), ("send_as_keyword", send_as_keyword)):
+            if value is None:
+                continue
+            if not isinstance(value, bool):
+                raise ValueError(f"{field_name} must be true or false")
+            changes[field_name] = value
+        if priority is not None:
+            if isinstance(priority, bool) or not isinstance(priority, int):
+                raise ValueError("priority must be an integer")
+            if not -1000 <= priority <= 1000:
+                raise ValueError("priority must be between -1000 and 1000")
+            changes["priority"] = priority
+        if language_codes is not None:
+            changes["language_codes"] = list(
+                normalize_allowed_output_languages(
+                    language_codes,
+                    source="correction languages",
+                )
+            )
+        if not changes:
+            raise ValueError("provide at least one correction field to update")
+
+        payload = self._request_json(
+            "patch",
+            f"/v1/corrections/{quote(normalized_id, safe='')}",
+            json=changes,
+        )
+        return self._validate_correction_rule(
+            payload,
+            expected_id=normalized_id,
+            expected_values=changes,
+        )
+
+    def delete_correction(self, rule_id: str) -> None:
+        """Delete one correction rule visible to the authenticated identity."""
+        self._require_remote_corrections()
+        normalized_id = self._correction_rule_id(rule_id)
+        self._request(
+            "delete",
+            f"/v1/corrections/{quote(normalized_id, safe='')}",
+        )
 
     def transcribe(self, audio_path: Path) -> TranscriptionResult:
         path = Path(audio_path)

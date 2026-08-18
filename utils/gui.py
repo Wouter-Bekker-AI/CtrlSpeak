@@ -96,12 +96,41 @@ from utils.update_manager import (
 tk_root: Optional[tk.Tk] = None
 management_window: Optional["ManagementWindow"] = None
 correction_submission_dialog: Optional["CorrectionSubmissionDialog"] = None
+tray_flyout = None
 _management_thread_ident: Optional[int] = None
 _management_thread_lock = threading.Lock()
 _management_thread_ready = threading.Event()
 _management_queue_job: Optional[str] = None
 
 logger = get_logger(__name__)
+_dpi_awareness_configured = False
+
+
+def configure_process_dpi_awareness() -> bool:
+    """Enable per-monitor DPI awareness before creating the first Tk root."""
+
+    global _dpi_awareness_configured
+    if _dpi_awareness_configured or not sys.platform.startswith("win"):
+        return _dpi_awareness_configured
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        if bool(user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))):
+            _dpi_awareness_configured = True
+            return True
+    except Exception:
+        logger.debug("Per-monitor-v2 DPI awareness was unavailable", exc_info=True)
+    try:
+        import ctypes
+
+        # PROCESS_PER_MONITOR_DPI_AWARE
+        result = int(ctypes.windll.shcore.SetProcessDpiAwareness(2))
+        _dpi_awareness_configured = result in {0, -2147024891}
+    except Exception:
+        logger.debug("Fallback process DPI awareness was unavailable", exc_info=True)
+    return _dpi_awareness_configured
 
 
 def _set_window_icon(window: tk.Misc) -> None:
@@ -661,8 +690,60 @@ def hide_waveform_overlay() -> None:
         _waveform_mode = "live"
         _waveform_msg = "Processing…"
 
+
+# v0.7 Midnight Signal overlay.  The legacy renderer above remains only as a
+# compact rollback/reference path for older source checkouts; these later
+# definitions are the runtime API imported by utils.system.
+_midnight_overlay = None
+
+
+def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
+    global _midnight_overlay
+    with settings_lock:
+        enabled = bool(settings.get("overlay_enabled", True))
+        reduced_motion = bool(settings.get("reduced_motion", False))
+    if not enabled or tk_root is None or not tk_root.winfo_exists():
+        return
+    try:
+        from utils.midnight_overlay import MidnightSignalOverlay
+
+        if _midnight_overlay is not None and _midnight_overlay.is_open():
+            _midnight_overlay.set_waveform_provider(provider)
+            return
+        _midnight_overlay = MidnightSignalOverlay(
+            tk_root,
+            snapshot_provider=sysmod.transcription_ui_session.snapshot,
+            waveform_provider=provider,
+            device_label_provider=sysmod.get_input_device_preference,
+            reduced_motion=reduced_motion,
+        )
+        _midnight_overlay.show()
+    except Exception:
+        logger.exception("Failed to open the Midnight Signal overlay")
+
+
+def set_waveform_processing(message: str = "Transcribing…") -> None:
+    del message  # copy is state-driven and cannot falsely claim a live provider
+    global _midnight_overlay
+    if _midnight_overlay is None or not _midnight_overlay.is_open():
+        show_waveform_overlay(lambda: np.zeros(32, dtype=np.float32))
+
+
+def hide_waveform_overlay(delay_ms: int = 0) -> None:
+    global _midnight_overlay
+    overlay = _midnight_overlay
+    if overlay is None:
+        return
+    try:
+        overlay.close(delay_ms=max(0, int(delay_ms)))
+    except Exception:
+        logger.exception("Failed to close the Midnight Signal overlay")
+    if delay_ms <= 0:
+        _midnight_overlay = None
+
 # ---------------- Splash (1s) ----------------
 def show_splash_screen(duration_ms: int) -> None:
+    configure_process_dpi_awareness()
     try:
         root = tk.Tk(className="CtrlSpeak")
     except tk.TclError:
@@ -1245,6 +1326,7 @@ def _initialize_management_ui_on_main_thread() -> None:
 
     sysmod.management_ui_thread = None
 
+    configure_process_dpi_awareness()
     try:
         root = tk.Tk(className="CtrlSpeak")
     except Exception:
@@ -1330,7 +1412,7 @@ def pump_management_events_once() -> None:
 def _teardown_management_ui() -> None:
     """Reset management UI globals after the loop exits."""
 
-    global tk_root, management_window, _management_thread_ident, _management_queue_job
+    global tk_root, management_window, tray_flyout, _management_thread_ident, _management_queue_job
 
     root = tk_root
     if root is not None and _management_queue_job is not None:
@@ -1342,12 +1424,18 @@ def _teardown_management_ui() -> None:
 
     if root is not None:
         try:
+            if tray_flyout is not None:
+                tray_flyout.close()
+        except Exception:
+            logger.debug("Failed to close tray flyout during UI teardown", exc_info=True)
+        try:
             root.destroy()
         except Exception:
             logger.exception("Failed to destroy management UI root during teardown")
 
     tk_root = None
     management_window = None
+    tray_flyout = None
     _management_thread_ident = None
     _management_thread_ready.clear()
     sysmod.management_ui_thread = None
@@ -1403,6 +1491,40 @@ def _show_management_window(icon: pystray.Icon) -> None:
         management_window.refresh_status()
         return
     management_window = ManagementWindow(icon)
+
+
+def _show_management_page(icon: pystray.Icon, page_name: str) -> None:
+    _show_management_window(icon)
+    active = management_window
+    if active is None or not active.is_open():
+        return
+    notebook = getattr(active, "ms_notebook", None)
+    pages = getattr(active, "ms_pages", {})
+    page = pages.get(page_name) if isinstance(pages, dict) else None
+    if notebook is not None and page is not None:
+        notebook.select(page)
+
+
+def _show_tray_flyout(icon: pystray.Icon) -> None:
+    global tray_flyout
+    from utils.midnight_signal_ui import MidnightTrayFlyout
+
+    if tray_flyout is None:
+        tray_flyout = MidnightTrayFlyout(
+            tk_root,
+            icon,
+            open_control=lambda: _show_management_window(icon),
+            open_corrections=lambda: _show_management_page(icon, "Corrections"),
+            check_updates=lambda: _open_and_check_updates(icon),
+            quit_app=lambda: sysmod.on_exit(icon, None),
+        )
+    tray_flyout.toggle()
+
+
+def _open_and_check_updates(icon: pystray.Icon) -> None:
+    _show_management_page(icon, "Updates")
+    if management_window is not None:
+        management_window.check_for_updates()
 
 
 def _show_correction_submission_dialog(icon: pystray.Icon) -> None:
@@ -1626,7 +1748,7 @@ class CorrectionSubmissionDialog:
             self.window.destroy()
         correction_submission_dialog = None
 
-class ManagementWindow:
+class _LegacyManagementWindow:
     def __init__(self, icon: pystray.Icon):
         self._icon = icon
         self.window = tk.Toplevel(tk_root)
@@ -2299,9 +2421,7 @@ class ManagementWindow:
         if transaction is None or release is None:
             self.update_status_var.set("The verified update transaction is unavailable; check again.")
             return
-        if sysmod.recording or (
-            sysmod.recording_thread is not None and sysmod.recording_thread.is_alive()
-        ):
+        if sysmod.is_transcription_busy():
             messagebox.showwarning(
                 "CtrlSpeak is busy",
                 "Wait for recording and transcription to finish before installing the update.",
@@ -3180,3 +3300,12 @@ class ManagementWindow:
             self._unbind_mousewheel(None)
             self.window.destroy()
         management_window = None
+
+
+# The v0.7 shell retains the mature controllers above behind a hidden rollback
+# window and replaces every user-visible surface with Midnight Signal.
+from utils.midnight_signal_ui import MidnightSignalManagementMixin
+
+
+class ManagementWindow(MidnightSignalManagementMixin, _LegacyManagementWindow):
+    pass

@@ -1,7 +1,8 @@
-# CtrlSpeak API v0.6.2
+# CtrlSpeak API v0.7.0
 
-The maintained implementation is in `server/whisper_transcription`. v0.6 has
-three explicit deployment roles:
+The maintained implementation is in `server/whisper_transcription`. The v0.7
+contract preserves the three deployment roles introduced in v0.6 and adds safe,
+measured routing telemetry for Midnight Signal. The roles are:
 
 - `gateway`: client-facing orchestration, identities, provider routing,
   language enforcement, corrections, feedback, and audit records;
@@ -54,7 +55,7 @@ loaded model/runtime:
 ```json
 {
   "status": "ready",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "role": "worker",
   "model": "large-v3-turbo",
   "device": "cuda",
@@ -67,11 +68,17 @@ providers permitted for the caller:
 
 ```json
 {
-  "version": "0.6.2",
+  "version": "0.7.0",
   "role": "gateway",
   "accepts_client_transcriptions": true,
   "applies_corrections": true,
   "openai_key_storage": "request_only",
+  "telemetry": {
+    "attempt_duration_ms": true,
+    "routing_duration_ms": true,
+    "worker_inference_duration_ms": true,
+    "worker_health": true
+  },
   "default_strategy": "ubuntu-gpu-preferred",
   "providers": [
     {
@@ -84,7 +91,17 @@ providers permitted for the caller:
       "paid": false,
       "fast_failover": true,
       "health_cache_seconds": 5.0,
-      "circuit_break_seconds": 30.0
+      "circuit_break_seconds": 30.0,
+      "health": {
+        "status": "ready",
+        "probe_status": "ready",
+        "probe_duration_ms": 18.4,
+        "probe_age_ms": 121.7,
+        "probe_timeout_ms": 500.0,
+        "connect_timeout_ms": 350.0,
+        "cache_remaining_ms": 4878.3,
+        "circuit_retry_after_ms": 0.0
+      }
     },
     {
       "id": "openai-gpt-transcribe",
@@ -208,14 +225,45 @@ Successful response fields are additive to v0.5:
       "provider": "ubuntu-gpu-large-v3-turbo",
       "status": "failed",
       "category": "worker_unavailable",
-      "retryable": true
+      "retryable": true,
+      "duration_ms": 351.2
     },
-    {"provider": "openai-gpt-transcribe", "status": "succeeded"}
+    {
+      "provider": "openai-gpt-transcribe",
+      "status": "succeeded",
+      "duration_ms": 842.6
+    }
   ],
   "degraded": true,
+  "routing_duration_ms": 1194.1,
   "usage": {"type": "tokens", "total_tokens": 120}
 }
 ```
+
+### Telemetry semantics
+
+All `*_ms` values are non-negative milliseconds measured by the component that
+performed the work. They are optional/additive protocol fields:
+
+- `health.probe_duration_ms` is the gateway-observed Ubuntu worker health
+  request duration; `probe_age_ms`, `cache_remaining_ms`, and
+  `circuit_retry_after_ms` describe the current bounded fast-failover state.
+- `attempts[].duration_ms` is time spent by the gateway on that provider
+  attempt, including its provider-specific network and validation work.
+- `attempts[].inference_duration_ms`, when present for the Ubuntu worker, is
+  measured inside the worker around model inference. It is not network or total
+  request latency.
+- `routing_duration_ms` is gateway time from beginning the selected route until
+  success or exhaustion. It can be longer than inference and is not presented
+  as inference by the desktop.
+
+An omitted/null value means the measurement is unavailable. Clients must show
+that honestly rather than substituting a sample value or relabelling their own
+wall-clock timer. Capability flags state which telemetry families this server
+supports. These structures contain provider IDs, bounded public status/category
+values, and timings only; they must not contain audio, transcript text, tokens,
+OpenAI keys, prompts, correction phrases, upstream response bodies, or internal
+exception messages.
 
 The five primary strategies are:
 
@@ -292,7 +340,7 @@ binds feedback to the original transcription ID, URL, and client bearer token.
   "rule_ids": [],
   "confirmed_text": "the user-confirmed final text",
   "capture_method": "active_field_on_enter",
-  "client_metadata": {"client": "CtrlSpeak", "version": "0.6.2"}
+  "client_metadata": {"client": "CtrlSpeak", "version": "0.7.0"}
 }
 ```
 
@@ -301,8 +349,9 @@ binds feedback to the original transcription ID, URL, and client bearer token.
 `POST /v1/worker/transcribe` exists only in worker role and requires the worker
 bearer token. Fields are `audio`, `allowed_languages`, legacy `language`,
 `initial_prompt`, JSON-string-array `keywords`, and `word_timestamps`. It
-returns raw model output plus `provider` and `corrected: false`. It never stores
-the audio, transcript, client identity, correction, or OpenAI credential.
+returns raw model output plus `provider`, measured `inference_duration_ms`, and
+`corrected: false`. It never stores the audio, transcript, client identity,
+correction, or OpenAI credential.
 
 ## Errors and interactive documentation
 

@@ -16,6 +16,11 @@ import httpx
 LOGGER = logging.getLogger("ctrlspeak_whisper_transcription.providers")
 
 
+def _duration_ms(started_at: float, finished_at: float) -> float:
+    """Return a stable, non-negative millisecond duration for public telemetry."""
+    return round(max(0.0, finished_at - started_at) * 1000.0, 3)
+
+
 class InferenceBackend(Protocol):
     name: str
     device: str
@@ -161,6 +166,9 @@ class RemoteWorkerProvider:
         self._probe_lock = threading.Lock()
         self._healthy_until = 0.0
         self._circuit_open_until = 0.0
+        self._last_probe_at: float | None = None
+        self._last_probe_duration_ms: float | None = None
+        self._last_probe_status = "not_probed"
         self._worker_metadata = {
             "model": "large-v3-turbo",
             "device": "cuda",
@@ -187,6 +195,35 @@ class RemoteWorkerProvider:
         with self._state_lock:
             self._healthy_until = 0.0
             self._circuit_open_until = now + self.circuit_break_seconds
+
+    def _record_probe(self, status: str, started_at: float) -> None:
+        finished_at = self._monotonic()
+        with self._state_lock:
+            self._last_probe_at = finished_at
+            self._last_probe_duration_ms = _duration_ms(started_at, finished_at)
+            self._last_probe_status = status
+
+    def _health_snapshot(self, status: str) -> dict[str, Any]:
+        now = self._monotonic()
+        with self._state_lock:
+            probe_age_ms = (
+                _duration_ms(self._last_probe_at, now)
+                if self._last_probe_at is not None
+                else None
+            )
+            return {
+                "status": status,
+                "probe_status": self._last_probe_status,
+                "probe_duration_ms": self._last_probe_duration_ms,
+                "probe_age_ms": probe_age_ms,
+                "probe_timeout_ms": round(self.health_probe_timeout_seconds * 1000.0, 3),
+                "connect_timeout_ms": round(self.connect_timeout_seconds * 1000.0, 3),
+                "cache_remaining_ms": _duration_ms(now, max(now, self._healthy_until)),
+                "circuit_retry_after_ms": _duration_ms(
+                    now,
+                    max(now, self._circuit_open_until),
+                ),
+            }
 
     @staticmethod
     def _circuit_failure() -> ProviderFailure:
@@ -219,6 +256,7 @@ class RemoteWorkerProvider:
                     self.health_probe_timeout_seconds,
                 ),
             )
+            probe_started_at = self._monotonic()
             try:
                 with self._client_context() as client:
                     response = client.get(
@@ -227,6 +265,7 @@ class RemoteWorkerProvider:
                         timeout=timeout,
                     )
             except httpx.RequestError as exc:
+                self._record_probe("unavailable", probe_started_at)
                 self._mark_unavailable()
                 raise ProviderFailure(
                     "GPU worker failed its fast health probe",
@@ -234,6 +273,7 @@ class RemoteWorkerProvider:
                     retryable=True,
                 ) from exc
             if response.status_code != 200:
+                self._record_probe("unavailable", probe_started_at)
                 self._mark_unavailable()
                 raise ProviderFailure(
                     "GPU worker failed its fast health probe",
@@ -244,6 +284,7 @@ class RemoteWorkerProvider:
                 payload = dict(response.json())
             except (ValueError, TypeError):
                 payload = {}
+            self._record_probe("ready", probe_started_at)
             self._mark_ready(payload)
 
     def describe(self) -> dict[str, Any]:
@@ -254,6 +295,7 @@ class RemoteWorkerProvider:
             status = "circuit_open" if exc.category == "worker_circuit_open" else "unavailable"
         with self._state_lock:
             metadata = dict(self._worker_metadata)
+        health = self._health_snapshot(status)
         return {
             "id": self.id,
             "kind": "ctrlspeak_worker",
@@ -265,6 +307,7 @@ class RemoteWorkerProvider:
             "fast_failover": True,
             "health_cache_seconds": self.health_cache_seconds,
             "circuit_break_seconds": self.circuit_break_seconds,
+            "health": health,
         }
 
     def transcribe(self, audio_path: Path, context: ProviderContext) -> dict[str, Any]:
@@ -465,6 +508,7 @@ class RoutedResult:
     provider_id: str
     attempts: tuple[dict[str, Any], ...]
     degraded: bool
+    routing_duration_ms: float
 
 
 class ProviderRouter:
@@ -474,10 +518,12 @@ class ProviderRouter:
         strategies: dict[str, tuple[str, ...]],
         *,
         default_strategy: str,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.providers = {provider.id: provider for provider in providers}
         self.strategies = strategies
         self.default_strategy = default_strategy
+        self._monotonic = monotonic
         if default_strategy not in strategies:
             raise ValueError("default provider strategy is not configured")
         for strategy, chain in strategies.items():
@@ -532,25 +578,63 @@ class ProviderRouter:
                     status_code=422,
                 )
         attempts: list[dict[str, Any]] = []
+        routing_started_at = self._monotonic()
         for current_id in chain:
             if current_id not in allowed_provider_ids:
-                attempts.append({"provider": current_id, "status": "not_authorized"})
+                attempts.append(
+                    {
+                        "provider": current_id,
+                        "status": "not_authorized",
+                        "duration_ms": 0.0,
+                    }
+                )
                 continue
             provider = self.providers.get(current_id)
             if provider is None:
                 continue
+            attempt_started_at = self._monotonic()
             try:
                 result = provider.transcribe(audio_path, context)
-                attempts.append({"provider": current_id, "status": "succeeded"})
-                return RoutedResult(result, current_id, tuple(attempts), len(attempts) > 1)
+                attempt = {
+                    "provider": current_id,
+                    "status": "succeeded",
+                    "duration_ms": _duration_ms(attempt_started_at, self._monotonic()),
+                }
+                inference_duration_ms = result.get("inference_duration_ms")
+                if (
+                    isinstance(inference_duration_ms, (int, float))
+                    and not isinstance(inference_duration_ms, bool)
+                    and inference_duration_ms >= 0
+                ):
+                    attempt["inference_duration_ms"] = round(
+                        float(inference_duration_ms),
+                        3,
+                    )
+                attempts.append(attempt)
+                return RoutedResult(
+                    result,
+                    current_id,
+                    tuple(attempts),
+                    len(attempts) > 1,
+                    _duration_ms(routing_started_at, self._monotonic()),
+                )
             except ProviderFailure as exc:
-                attempts.append(exc.public_dict(current_id))
+                attempt = exc.public_dict(current_id)
+                attempt["duration_ms"] = _duration_ms(
+                    attempt_started_at,
+                    self._monotonic(),
+                )
+                attempts.append(attempt)
                 # A named single-provider route preserves the provider's exact
                 # terminal error.  Cascading strategies are explicit user
                 # consent to try the next provider even for credential/quota
                 # failures, while still recording the cause in ``attempts``.
                 if not exc.retryable and len(chain) == 1:
                     exc.attempts = attempts  # type: ignore[attr-defined]
+                    exc.routing_duration_ms = _duration_ms(  # type: ignore[attr-defined]
+                        routing_started_at,
+                        self._monotonic(),
+                    )
                     raise
         failure = ProviderFailure(
             "No configured transcription provider completed the request",
@@ -560,4 +644,8 @@ class ProviderRouter:
             action="Check the GPU worker or provide an OpenAI API key.",
         )
         failure.attempts = attempts  # type: ignore[attr-defined]
+        failure.routing_duration_ms = _duration_ms(  # type: ignore[attr-defined]
+            routing_started_at,
+            self._monotonic(),
+        )
         raise failure

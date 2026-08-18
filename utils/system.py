@@ -32,7 +32,7 @@ from collections import deque
 from utils.config_paths import (
     settings, settings_lock, load_settings, save_settings,
     get_config_dir, get_config_file_path, get_temp_dir,
-    create_recording_file_path, cleanup_recording_file, resource_path,
+    create_recording_file_path, cleanup_recording_file, cleanup_stale_recordings, resource_path,
     asset_path, app_icon_path, get_logger, get_logs_dir,
 )
 from utils.hotkeys import (
@@ -42,6 +42,8 @@ from utils.hotkeys import (
     key_name as hotkey_key_name,
 )
 from utils.version import APP_VERSION
+from utils.audio_cues import CueKind, CuePlayer, Pcm16Cue
+from utils.ui_state import TranscriptionUiSession, UiPhase
 
 
 logger = get_logger(__name__)
@@ -155,6 +157,11 @@ recording_thread: Optional[threading.Thread] = None
 listener: Optional[object] = None
 recording_file_path: Optional[Path] = None
 listener_lock = threading.Lock()
+_client_state_lock = threading.RLock()
+# Lock ordering, whenever locks must be nested:
+#   _client_state_lock -> listener_lock or _transcription_state_lock
+# Shutdown releases the client/listener locks before it waits for lifecycle
+# workers, so lifecycle code never needs to acquire the client-state lock.
 client_enabled = True
 
 instance_lock_handle: Optional[object] = None
@@ -164,6 +171,14 @@ processing_sound_data: Optional[bytes] = None
 processing_sound_settings: Optional[Dict[str, int]] = None
 _ready_sound_lock = threading.Lock()
 _ready_sound_played = False
+transcription_ui_session = TranscriptionUiSession()
+transcription_thread: Optional[threading.Thread] = None
+transcription_cancel_event = threading.Event()
+_transcription_state_lock = threading.RLock()
+_recording_failed_event = threading.Event()
+_recording_stop_event = threading.Event()
+_transcription_generation = 0
+_active_transcription_generation: Optional[int] = None
 
 recording_temp_dir_name = "temp"
 AUTO_MODE = False
@@ -500,10 +515,13 @@ def copy_last_transcript_from_tray(_icon=None, _item=None) -> bool:
 
 def notify_error(context: str, details: str) -> None:
     snippet = (details or "").strip() or "Unknown error"
-    message = f"{context}\n\nDetails:\n{snippet}"
     write_error_log(context, snippet)
-    copy_to_clipboard(message)
-    notify(message, title="CtrlSpeak Error")
+    # Full technical information belongs in the rotating log.  Normal failures
+    # use short, actionable copy and never overwrite the user's clipboard.
+    notify(
+        f"{context}. Open CtrlSpeak or the log folder for details.",
+        title="CtrlSpeak",
+    )
 
 
 def format_exception_details(exc: BaseException | None) -> str:
@@ -604,6 +622,13 @@ def _push_waveform_bytes(chunk: bytes) -> None:
         while _waveform_samples > _WAVEFORM_MAX_SAMPLES and _waveform_buffers:
             popped = _waveform_buffers.popleft()
             _waveform_samples -= popped.size
+
+
+def _clear_waveform_buffers() -> None:
+    global _waveform_samples
+    with _waveform_lock:
+        _waveform_buffers.clear()
+        _waveform_samples = 0
 
 def get_recent_waveform(ms: int = 500) -> np.ndarray:
     """Return last ms of audio as float32 [-1,1] for drawing."""
@@ -740,20 +765,58 @@ def _processing_sound_loop():
         pa_instance.terminate()
 
 
+def _play_pcm_cue(cue: Pcm16Cue) -> None:
+    """Play one prepared cue; output-device failures never affect transcription."""
+
+    pa_instance = pyaudio.PyAudio()
+    stream = None
+    try:
+        stream = pa_instance.open(
+            format=pyaudio.paInt16,
+            channels=cue.channels,
+            rate=cue.sample_rate,
+            output=True,
+            frames_per_buffer=1024,
+        )
+        stream.write(cue.frames)
+    finally:
+        if stream is not None:
+            try:
+                stream.stop_stream()
+                stream.close()
+            except Exception:
+                logger.debug("Failed to close the UI cue stream", exc_info=True)
+        pa_instance.terminate()
+
+
+def play_ui_cue(kind: CueKind, *, background: bool = True) -> bool:
+    """Play a short, headphone-safe Midnight Signal cue using saved controls."""
+
+    with settings_lock:
+        enabled = bool(settings.get("audio_cues_enabled", True))
+        raw_volume = settings.get("audio_cue_volume", 30)
+    try:
+        volume = max(0.0, min(1.0, int(raw_volume) / 100.0))
+    except (TypeError, ValueError):
+        volume = 0.30
+    return CuePlayer(
+        _play_pcm_cue,
+        enabled=enabled and volume > 0,
+        volume=volume,
+        peak_ceiling=0.25,
+    ).play(kind, background=background)
+
+
 def start_processing_feedback():
-    global processing_sound_thread
-    if processing_sound_thread and processing_sound_thread.is_alive():
-        return
-    processing_sound_stop_event.clear()
-    processing_sound_thread = threading.Thread(target=_processing_sound_loop, daemon=True)
-    processing_sound_thread.start()
+    """Compatibility entry point: play once; v0.7 deliberately has no loop."""
+
+    play_ui_cue(CueKind.PROCESSING_STARTED)
+
 
 def stop_processing_feedback():
-    global processing_sound_thread
+    """The v0.7 processing cue is finite, so there is nothing to stop."""
+
     processing_sound_stop_event.set()
-    if processing_sound_thread and processing_sound_thread.is_alive():
-        processing_sound_thread.join(timeout=1.0)
-    processing_sound_thread = None
 
 
 def play_model_ready_sound_once() -> None:
@@ -763,34 +826,7 @@ def play_model_ready_sound_once() -> None:
             return
         _ready_sound_played = True
 
-    def _worker() -> None:
-        pa_instance = None
-        stream = None
-        try:
-            data, settings_audio = load_processing_sound()
-            pa_instance = pyaudio.PyAudio()
-            stream = pa_instance.open(
-                format=pyaudio.get_format_from_width(settings_audio["width"]),
-                channels=settings_audio["channels"],
-                rate=settings_audio["rate"],
-                output=True,
-            )
-            stream.write(data)
-        except Exception:
-            logger.exception("Failed to play model ready sound")
-        finally:
-            try:
-                if stream is not None:
-                    stream.stop_stream(); stream.close()
-            except Exception:
-                logger.exception("Failed to close ready sound stream cleanly")
-            if pa_instance is not None:
-                try:
-                    pa_instance.terminate()
-                except Exception:
-                    logger.exception("Failed to terminate PyAudio after ready sound")
-
-    threading.Thread(target=_worker, name="CtrlSpeakReadySound", daemon=True).start()
+    play_ui_cue(CueKind.SUCCESS)
 
 
 def list_input_audio_devices() -> List[Tuple[str, str]]:
@@ -867,8 +903,20 @@ def _resolve_input_device_index(pa_instance: pyaudio.PyAudio, preferred: Optiona
     return None
 
 
-def record_audio(target_path: Path) -> None:
+def record_audio(
+    target_path: Path,
+    stop_event: Optional[threading.Event] = None,
+) -> None:
+    """Capture one recording until its session-local stop event is set.
+
+    ``stop_event`` is deliberately per dictation.  Falling back to the legacy
+    global flag keeps the helper callable by older integrations, while the
+    hotkey lifecycle never reuses that mutable flag to control a worker.
+    """
+
     pyaudio_instance = pyaudio.PyAudio()
+    stream = None
+    sample_width: Optional[int] = None
     stream_kwargs = dict(
         format=FORMAT,
         channels=CHANNELS,
@@ -879,39 +927,71 @@ def record_audio(target_path: Path) -> None:
     preferred_index = _resolve_input_device_index(pyaudio_instance)
     if preferred_index is not None:
         stream_kwargs["input_device_index"] = preferred_index
-    try:
-        stream = pyaudio_instance.open(**stream_kwargs)
-    except Exception:
-        if "input_device_index" in stream_kwargs:
-            logger.exception("Failed to open preferred input device; falling back to system default")
-            stream_kwargs.pop("input_device_index", None)
-            stream = pyaudio_instance.open(**stream_kwargs)
-        else:
-            raise
     frames = []
     try:
-        while recording:
+        try:
+            stream = pyaudio_instance.open(**stream_kwargs)
+        except Exception:
+            if "input_device_index" in stream_kwargs:
+                logger.exception("Failed to open preferred input device; falling back to system default")
+                stream_kwargs.pop("input_device_index", None)
+                stream = pyaudio_instance.open(**stream_kwargs)
+            else:
+                raise
+        sample_width = pyaudio_instance.get_sample_size(FORMAT)
+        def should_continue() -> bool:
+            return not stop_event.is_set() if stop_event is not None else recording
+
+        while should_continue():
             _chunk = stream.read(CHUNKSIZE)
             frames.append(_chunk)
             _push_waveform_bytes(_chunk)
-
+            transcription_ui_session.update_level_pcm16(_chunk)
     finally:
-        stream.stop_stream(); stream.close(); pyaudio_instance.terminate()
+        if stream is not None:
+            try:
+                stream.stop_stream()
+                stream.close()
+            except Exception:
+                logger.debug("Failed to close microphone stream cleanly", exc_info=True)
+        pyaudio_instance.terminate()
+    if sample_width is None:
+        raise RuntimeError("The microphone stream did not provide a sample width")
     target_path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(target_path), "wb") as wf:
         wf.setnchannels(CHANNELS)
-        wf.setsampwidth(pyaudio_instance.get_sample_size(FORMAT))
+        wf.setsampwidth(sample_width)
         wf.setframerate(RATE)
         wf.writeframes(b"".join(frames))
 
 
-def _record_audio_worker(target_path: Path) -> None:
+def _record_audio_worker(
+    target_path: Path,
+    generation: Optional[int] = None,
+    stop_event: Optional[threading.Event] = None,
+    failure_event: Optional[threading.Event] = None,
+    cancel_event: Optional[threading.Event] = None,
+) -> None:
     """Keep microphone/backend failures inside CtrlSpeak's reporting path."""
+
+    failure = failure_event or _recording_failed_event
+    cancel = cancel_event or transcription_cancel_event
     try:
-        record_audio(target_path)
+        if stop_event is None:
+            record_audio(target_path)
+        else:
+            record_audio(target_path, stop_event)
     except Exception as exc:
+        with _transcription_state_lock:
+            is_current = (
+                generation is None
+                or generation == _active_transcription_generation
+            )
+            if is_current:
+                failure.set()
         logger.exception("Microphone recording failed")
-        notify_error("Microphone recording failed", format_exception_details(exc))
+        if is_current and not cancel.is_set():
+            notify_error("Microphone recording failed", format_exception_details(exc))
 
 # ---------------- Client keyboard listener ----------------
 def _client_hotkey_available() -> bool:
@@ -937,75 +1017,427 @@ def _client_hotkey_available() -> bool:
     return False
 
 
+def _set_terminal_overlay_hide(delay_ms: int) -> None:
+    try:
+        from utils.gui import hide_waveform_overlay
+
+        enqueue_management_task(hide_waveform_overlay, delay_ms)
+    except Exception:
+        logger.exception("Failed to schedule the Midnight Signal overlay dismissal")
+
+
+def _show_recording_overlay() -> None:
+    try:
+        from utils.gui import show_waveform_overlay
+
+        enqueue_management_task(show_waveform_overlay, lambda: get_recent_waveform(500))
+    except Exception:
+        logger.exception("Failed to show the Midnight Signal recording overlay")
+
+
+def _show_processing_overlay() -> None:
+    try:
+        from utils.gui import set_waveform_processing
+
+        enqueue_management_task(set_waveform_processing, "Transcribing…")
+    except Exception:
+        logger.exception("Failed to switch the Midnight Signal overlay to processing")
+
+
+def _prepare_ui_session_for_recording() -> None:
+    phase = transcription_ui_session.phase
+    if phase is not UiPhase.IDLE:
+        if phase in {UiPhase.SUCCESS, UiPhase.ERROR, UiPhase.CANCELLED}:
+            transcription_ui_session.reset()
+        else:
+            raise RuntimeError(f"CtrlSpeak is already {phase.value}")
+    transcription_ui_session.begin_recording()
+
+
+def _next_transcription_generation_locked() -> int:
+    global _transcription_generation, _active_transcription_generation
+    _transcription_generation += 1
+    _active_transcription_generation = _transcription_generation
+    return _transcription_generation
+
+
+def _session_is_current_locked(generation: Optional[int]) -> bool:
+    """Return whether a worker still owns the active lifecycle globals."""
+
+    return generation is None or generation == _active_transcription_generation
+
+
+def _safe_error_category(exc: BaseException) -> str:
+    for attribute in ("error_code", "category", "code"):
+        value = getattr(exc, attribute, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip().casefold().replace("-", "_")
+    message = str(exc).casefold()
+    if any(term in message for term in ("quota", "billing", "credit", "insufficient_quota")):
+        return "openai_quota_exhausted"
+    if any(term in message for term in ("api key", "unauthorized", "authentication", "401")):
+        return "openai_invalid_key"
+    if "language" in message:
+        return "language_policy"
+    if any(term in message for term in ("provider", "worker", "gateway", "connection")):
+        return "providers_exhausted"
+    return "unexpected_error"
+
+
+def is_transcription_busy(_item=None) -> bool:
+    with _transcription_state_lock:
+        # A referenced worker is pending even in the tiny interval between
+        # Thread construction and ``start()``.  References are cleared only by
+        # that generation's finalizer after the worker has really exited.
+        worker_pending = transcription_thread is not None
+        recorder_pending = recording_thread is not None
+        return (
+            recording
+            or worker_pending
+            or recorder_pending
+            or _active_transcription_generation is not None
+            or transcription_ui_session.phase in {UiPhase.RECORDING, UiPhase.PROCESSING}
+        )
+
+
+def _finish_cancelled_session() -> None:
+    phase = transcription_ui_session.phase
+    if phase not in {UiPhase.RECORDING, UiPhase.PROCESSING}:
+        return
+    transcription_ui_session.cancel()
+    play_ui_cue(CueKind.CANCELLED)
+    _set_terminal_overlay_hide(1200)
+    _refresh_tray_menu()
+    schedule_management_refresh()
+
+
+def cancel_active_transcription(_icon=None, _item=None) -> bool:
+    """Cancel recording immediately or suppress a pending request's insertion."""
+
+    global recording, transcription_thread
+    reaper: Optional[threading.Thread] = None
+    with _transcription_state_lock:
+        phase = transcription_ui_session.phase
+        if phase not in {UiPhase.RECORDING, UiPhase.PROCESSING} and not recording:
+            return False
+        generation = _active_transcription_generation
+        cancel_event = transcription_cancel_event
+        cancel_event.set()
+        _recording_stop_event.set()
+        recording = False
+        path = recording_file_path
+        recorder = recording_thread
+        _finish_cancelled_session()
+
+        # A capture cancelled before key release has no coordinator yet.  Give
+        # it one, retain both worker references, and clean only after the
+        # recorder has genuinely stopped.
+        if transcription_thread is None:
+            reaper = threading.Thread(
+                target=_cancelled_recording_reaper,
+                args=(generation, path, recorder),
+                name="CtrlSpeakRecorderCancel",
+                daemon=True,
+            )
+            transcription_thread = reaper
+
+    if reaper is not None:
+        try:
+            reaper.start()
+        except Exception:
+            logger.exception("Failed to start the cancelled-recording cleanup worker")
+    return True
+
+
+def _finalize_transcription_session(
+    generation: Optional[int],
+    path: Path | None,
+    *,
+    owner_thread: Optional[threading.Thread] = None,
+    recorder: Optional[threading.Thread] = None,
+) -> None:
+    """Clean one generation without ever clearing a newer generation's state."""
+
+    global recording, recording_file_path, recording_thread, transcription_thread
+    global _active_transcription_generation
+
+    should_cleanup = True
+    with _transcription_state_lock:
+        if not _session_is_current_locked(generation):
+            should_cleanup = True
+        else:
+            candidate_recorder = recorder or recording_thread
+            recorder_stopped = candidate_recorder is None or not candidate_recorder.is_alive()
+            should_cleanup = recorder_stopped
+            if (
+                recording_thread is candidate_recorder
+                and candidate_recorder is not None
+                and recorder_stopped
+            ):
+                recording_thread = None
+            if generation is None or owner_thread is None or transcription_thread is owner_thread:
+                transcription_thread = None
+            if recording_file_path == path and recorder_stopped:
+                recording_file_path = None
+            recording = False
+            if recording_thread is None and transcription_thread is None:
+                _active_transcription_generation = None
+    if should_cleanup:
+        cleanup_recording_file(path)
+
+
+def _cancelled_recording_reaper(
+    generation: Optional[int],
+    path: Path | None,
+    recorder: Optional[threading.Thread],
+) -> None:
+    if recorder is not None and recorder is not threading.current_thread():
+        try:
+            recorder.join()
+        except RuntimeError:
+            # A cancellation can land in the narrow interval before start().
+            # The owning hotkey callback will start the recorder before it
+            # releases the lifecycle lock; an unstarted legacy test double is
+            # simply treated as already stopped.
+            logger.debug("Recorder was not started before cancellation cleanup")
+    _finalize_transcription_session(
+        generation,
+        path,
+        owner_thread=threading.current_thread(),
+        recorder=recorder,
+    )
+    _refresh_tray_menu()
+    schedule_management_refresh()
+
+
+def _finish_recording_then_transcribe(
+    generation: Optional[int],
+    path: Path | None,
+    recorder: Optional[threading.Thread],
+    failure_event: threading.Event,
+    cancel_event: threading.Event,
+    started_at: float,
+) -> None:
+    """Wait for the WAV flush off the listener thread, then transcribe it."""
+
+    global recording_thread
+    if recorder is not None and recorder is not threading.current_thread():
+        try:
+            recorder.join()
+        except RuntimeError:
+            logger.exception("Recorder coordination failed before transcription")
+            failure_event.set()
+
+    with _transcription_state_lock:
+        if not _session_is_current_locked(generation):
+            cleanup_recording_file(path)
+            return
+        if recording_thread is recorder:
+            recording_thread = None
+        cancelled = cancel_event.is_set()
+        failed = failure_event.is_set()
+        if cancelled:
+            _finish_cancelled_session()
+        elif failed and transcription_ui_session.phase is UiPhase.PROCESSING:
+            transcription_ui_session.fail("microphone_failed")
+
+    if cancelled:
+        _finalize_transcription_session(
+            generation,
+            path,
+            owner_thread=threading.current_thread(),
+            recorder=recorder,
+        )
+        _refresh_tray_menu()
+        schedule_management_refresh()
+        return
+    if failed:
+        play_ui_cue(CueKind.ERROR)
+        _set_terminal_overlay_hide(3800)
+        _finalize_transcription_session(
+            generation,
+            path,
+            owner_thread=threading.current_thread(),
+            recorder=recorder,
+        )
+        _refresh_tray_menu()
+        schedule_management_refresh()
+        return
+
+    _transcribe_recording_worker(
+        path,
+        started_at,
+        generation=generation,
+        cancel_event=cancel_event,
+        owner_thread=threading.current_thread(),
+        recorder=recorder,
+    )
+
+
+def _transcribe_recording_worker(
+    path: Path | None,
+    started_at: float,
+    *,
+    generation: Optional[int] = None,
+    cancel_event: Optional[threading.Event] = None,
+    owner_thread: Optional[threading.Thread] = None,
+    recorder: Optional[threading.Thread] = None,
+) -> None:
+    from utils.models import transcribe_audio_result
+
+    cancel = cancel_event or transcription_cancel_event
+    owner = owner_thread or threading.current_thread()
+    try:
+        with _transcription_state_lock:
+            if not _session_is_current_locked(generation):
+                return
+            if cancel.is_set():
+                _finish_cancelled_session()
+                return
+        if path is None or not path.exists() or path.stat().st_size <= 44:
+            raise RuntimeError("The recording did not contain usable audio")
+        result = transcribe_audio_result(str(path), play_feedback=False)
+        if result is None or not result.text:
+            raise RuntimeError("No transcription text was returned")
+
+        # Cancellation and insertion form one commit point.  A cancellation
+        # that acquires the lifecycle lock first suppresses insertion; once
+        # insertion begins, cancellation cannot report a contradictory
+        # CANCELLED terminal state.
+        with _transcription_state_lock:
+            if not _session_is_current_locked(generation):
+                return
+            if cancel.is_set():
+                _finish_cancelled_session()
+                return
+            if transcription_ui_session.phase is not UiPhase.PROCESSING:
+                return
+            inject_transcription_result(result)
+            elapsed_ms = (time.monotonic() - started_at) * 1000.0
+            transcription_ui_session.complete(result.metadata or {}, elapsed_ms=elapsed_ms)
+        play_ui_cue(CueKind.SUCCESS)
+        _set_terminal_overlay_hide(1600)
+    except Exception as exc:
+        with _transcription_state_lock:
+            if not _session_is_current_locked(generation):
+                return
+            cancelled = cancel.is_set()
+            if cancelled:
+                _finish_cancelled_session()
+            else:
+                category = _safe_error_category(exc)
+                if transcription_ui_session.phase is UiPhase.PROCESSING:
+                    transcription_ui_session.fail(
+                        category,
+                        elapsed_ms=(time.monotonic() - started_at) * 1000.0,
+                    )
+        if not cancelled:
+            logger.exception("Transcription or text insertion failed")
+            notify_error("Transcription failed", format_exception_details(exc))
+            play_ui_cue(CueKind.ERROR)
+            _set_terminal_overlay_hide(3800)
+    finally:
+        _finalize_transcription_session(
+            generation,
+            path,
+            owner_thread=owner,
+            recorder=recorder,
+        )
+        _refresh_tray_menu()
+        schedule_management_refresh()
+
+
 def on_press(key):
     global recording, recording_thread, recording_file_path
+    global transcription_cancel_event, _recording_failed_event, _recording_stop_event
     _observe_pynput_press(key)
-    if not client_enabled:
-        return
-    if is_right_control(key) and not recording:
+    with _client_state_lock:
+        if not client_enabled:
+            return
+    if is_right_control(key):
+        with _transcription_state_lock:
+            if is_transcription_busy():
+                return
         if not _client_hotkey_available():
             return
-        recording = True
-        recording_file_path = create_recording_file_path()
-        recording_thread = threading.Thread(
-            target=_record_audio_worker,
-            args=(recording_file_path,),
-            name="CtrlSpeakRecorder",
-            daemon=True,
-        )
-        recording_thread.start()
-        try:
-            from utils.gui import show_waveform_overlay
-            enqueue_management_task(show_waveform_overlay, lambda: get_recent_waveform(500))
-        except Exception:
-            logger.exception("Failed to show waveform overlay while recording")
+        # `_client_hotkey_available()` can take long enough for shutdown to
+        # disable the listener.  The final state check therefore shares the
+        # client-state lock with stop_client_listener().  Starting and
+        # registering a recorder is one atomic commit from shutdown's point of
+        # view: either shutdown wins and this callback returns, or shutdown
+        # waits and then cancels the fully registered generation.
+        with _client_state_lock:
+            if not client_enabled:
+                return
+            with _transcription_state_lock:
+                if is_transcription_busy():
+                    return
+                try:
+                    _prepare_ui_session_for_recording()
+                except RuntimeError:
+                    return
+                generation = _next_transcription_generation_locked()
+                transcription_cancel_event = threading.Event()
+                _recording_stop_event = threading.Event()
+                _recording_failed_event = threading.Event()
+                _clear_waveform_buffers()
+                recording = True
+                recording_file_path = create_recording_file_path()
+                recording_thread = threading.Thread(
+                    target=_record_audio_worker,
+                    args=(
+                        recording_file_path,
+                        generation,
+                        _recording_stop_event,
+                        _recording_failed_event,
+                        transcription_cancel_event,
+                    ),
+                    name="CtrlSpeakRecorder",
+                    daemon=True,
+                )
+                recording_thread.start()
+            _show_recording_overlay()
+            play_ui_cue(CueKind.RECORDING_STARTED)
+            _refresh_tray_menu()
+            schedule_management_refresh()
 
 
 def on_release(key):
-    from utils.models import transcribe_audio_result
-    global recording, recording_thread, recording_file_path
+    global recording, transcription_thread
     _observe_pynput_release(key)
     if is_right_control(key):
-        if recording:
-            recording = False
-            if recording_thread:
-                recording_thread.join(); recording_thread = None
+        with _transcription_state_lock:
+            if not recording:
+                return
+            generation = _active_transcription_generation
+            cancel_event = transcription_cancel_event
+            failure_event = _recording_failed_event
+            recorder = recording_thread
             path = recording_file_path
-            # switch overlay into “processing” mode
-            try:
-                from utils.gui import set_waveform_processing
-                enqueue_management_task(set_waveform_processing, "Processing…")
-            except Exception:
-                logger.exception("Failed to switch waveform overlay to processing mode")
-            # START the loading sound so GUI gets live levels + waveform
-            try:
-                start_processing_feedback()
-            except Exception:
-                logger.exception("Failed to start processing feedback loop")
-            result = None
-            text = None
-            try:
-                if path and path.exists() and path.stat().st_size > 0:
-                    result = transcribe_audio_result(str(path))
-                    text = result.text if result else None
-            except Exception as exc:
-                notify_error("Transcription failed", format_exception_details(exc)); text = None
-            if text:
-                try:
-                    if result is not None:
-                        inject_transcription_result(result)
-                except Exception as exc: notify_error("Text insertion failed", format_exception_details(exc))
-            try:
-                stop_processing_feedback()
-            except Exception:
-                logger.exception("Failed to stop processing feedback loop")
-            try:
-                from utils.gui import hide_waveform_overlay
-                enqueue_management_task(hide_waveform_overlay)
-            except Exception:
-                logger.exception("Failed to hide waveform overlay")
-            cleanup_recording_file(path)
-            recording_file_path = None
+            recording = False
+            _recording_stop_event.set()
+            if cancel_event.is_set() or transcription_ui_session.phase is not UiPhase.RECORDING:
+                return
+            transcription_ui_session.begin_processing()
+            _show_processing_overlay()
+            start_processing_feedback()
+            started_at = time.monotonic()
+            transcription_thread = threading.Thread(
+                target=_finish_recording_then_transcribe,
+                args=(
+                    generation,
+                    path,
+                    recorder,
+                    failure_event,
+                    cancel_event,
+                    started_at,
+                ),
+                name="CtrlSpeakTranscriber",
+                daemon=True,
+            )
+            transcription_thread.start()
+        _refresh_tray_menu()
+        schedule_management_refresh()
 
 # ---- Discovery wrappers to restore original side-effects ----
 def _apply_last_connected(server: Optional[ServerInfo]) -> Optional[ServerInfo]:
@@ -1037,67 +1469,116 @@ def _refresh_best_server_async():
 
 def start_client_listener() -> None:
     global listener, client_enabled
-    with listener_lock:
-        if listener is not None:
-            return
-        client_enabled = True
-        try:
-            candidate = create_global_listener(
-                on_press=on_press,
-                on_release=on_release,
-            )
-            candidate.start()
-            listener = candidate
-        except DesktopSessionError as exc:
-            client_enabled = False
-            logger.warning("CtrlSpeak hotkey listener is unavailable: %s", exc)
-            notify(str(exc), title="CtrlSpeak desktop support")
-            return
-        except Exception as exc:
-            client_enabled = False
-            logger.exception("CtrlSpeak hotkey listener failed to start")
-            notify(
-                "The global hotkey listener could not start. On Ubuntu, use an Ubuntu on "
-                f"Xorg session and verify pynput dependencies. {exc}",
-                title="CtrlSpeak desktop support",
-            )
-            return
+    with _client_state_lock:
+        with listener_lock:
+            if listener is not None:
+                return
+            client_enabled = True
+            try:
+                candidate = create_global_listener(
+                    on_press=on_press,
+                    on_release=on_release,
+                )
+                candidate.start()
+                listener = candidate
+            except DesktopSessionError as exc:
+                client_enabled = False
+                logger.warning("CtrlSpeak hotkey listener is unavailable: %s", exc)
+                notify(str(exc), title="CtrlSpeak desktop support")
+                return
+            except Exception as exc:
+                client_enabled = False
+                logger.exception("CtrlSpeak hotkey listener failed to start")
+                notify(
+                    "The global hotkey listener could not start. On Ubuntu, use an Ubuntu on "
+                    f"Xorg session and verify pynput dependencies. {exc}",
+                    title="CtrlSpeak desktop support",
+                )
+                return
     from utils.transcription_backend import uses_bundled_runtime
     if uses_bundled_runtime():
         threading.Thread(target=_refresh_best_server_async, daemon=True).start()
     schedule_management_refresh()
 
-def stop_client_listener() -> None:
-    global listener, client_enabled, recording, recording_thread, recording_file_path
-    thread_to_join: Optional[threading.Thread] = None
+
+def cancel_and_wait_for_active_transcription(timeout_seconds: float = 2.5) -> bool:
+    """Cancel active work and wait a bounded time for its workers to exit.
+
+    The normal lifecycle workers retain and clear their own references.  The
+    final reconciliation below exists for shutdown-time legacy/stale state and
+    runs only after a referenced thread is demonstrably no longer alive.
+    """
+
+    global recording, recording_file_path, recording_thread, transcription_thread
+    global _active_transcription_generation
+
+    try:
+        timeout = max(0.0, float(timeout_seconds))
+    except (TypeError, ValueError):
+        timeout = 2.5
+
+    cancel_active_transcription()
+    with _transcription_state_lock:
+        transcription_cancel_event.set()
+        _recording_stop_event.set()
+        recording = False
+        recorder = recording_thread
+        transcriber = transcription_thread
+        path = recording_file_path
+
+    deadline = time.monotonic() + timeout
+    current = threading.current_thread()
+    for worker in (recorder, transcriber):
+        if worker is None or worker is current:
+            continue
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            worker.join(timeout=remaining)
+        except RuntimeError:
+            logger.debug("Shutdown encountered a worker that had not started")
+
     cleanup_path: Optional[Path] = None
-    should_hide_waveform = False
-    with listener_lock:
-        _feedback_modifiers.clear()
-        client_enabled = False
-        if listener is not None:
-            listener.stop(); listener = None
-        if recording:
-            recording = False
-            should_hide_waveform = True
-        if recording_thread is not None:
-            thread_to_join = recording_thread
+    with _transcription_state_lock:
+        if recording_thread is not None and not recording_thread.is_alive():
             recording_thread = None
-            should_hide_waveform = True
-        if recording_file_path is not None:
-            cleanup_path = recording_file_path
+        if transcription_thread is not None and not transcription_thread.is_alive():
+            transcription_thread = None
+        stopped = recording_thread is None and transcription_thread is None
+        if stopped:
+            cleanup_path = recording_file_path or path
             recording_file_path = None
-            should_hide_waveform = True
-    if thread_to_join:
-        thread_to_join.join()
-    if should_hide_waveform:
+            _active_transcription_generation = None
+
+    if cleanup_path is not None:
+        cleanup_recording_file(cleanup_path)
+    if not stopped:
+        # The process is shutting down and no new request may start.  Attempt
+        # exact-path cleanup even when a provider call ignores cancellation;
+        # Windows may defer it while the file is open, so the next locked
+        # startup also performs bounded stale-recording cleanup.
+        cleanup_recording_file(path)
+        logger.warning(
+            "CtrlSpeak shutdown timed out waiting for active transcription workers"
+        )
+    return stopped
+
+
+def stop_client_listener() -> None:
+    global listener, client_enabled
+    with _client_state_lock:
+        with listener_lock:
+            _feedback_modifiers.clear()
+            client_enabled = False
+            if listener is not None:
+                listener.stop(); listener = None
+    had_active_work = is_transcription_busy()
+    cancel_and_wait_for_active_transcription()
+    if had_active_work:
         try:
             from utils.gui import hide_waveform_overlay
             enqueue_management_task(hide_waveform_overlay)
         except Exception:
             logger.exception("Failed to hide waveform overlay when stopping listener")
-    if cleanup_path is not None:
-        cleanup_recording_file(cleanup_path)
     schedule_management_refresh()
 
 # ---------------- Server (HTTP) ----------------
@@ -1259,6 +1740,13 @@ def open_management_dialog(icon, item):
     enqueue_management_task(_show_management_window, icon)
 
 
+def open_tray_flyout(icon, item):
+    from utils.gui import ensure_management_ui_thread, _show_tray_flyout
+
+    ensure_management_ui_thread()
+    enqueue_management_task(_show_tray_flyout, icon)
+
+
 def check_for_updates_from_tray(icon, item):
     from utils.gui import ensure_management_ui_thread, _show_management_window
 
@@ -1324,18 +1812,32 @@ def run_tray():
         run_management_ui_loop()
         return
 
+    def tray_status_label(_item) -> str:
+        phase = transcription_ui_session.phase
+        state = "Ready" if phase in {UiPhase.IDLE, UiPhase.SUCCESS} else phase.value.title()
+        return f"CtrlSpeak {APP_VERSION} · {state}"
+
     menu_items = [
-        pystray.MenuItem(f"CtrlSpeak {APP_VERSION}", lambda _icon, _item: None, enabled=False),
-        pystray.MenuItem("Manage CtrlSpeak", open_management_dialog),
+        pystray.MenuItem(tray_status_label, lambda _icon, _item: None, enabled=False),
+        pystray.MenuItem("Show CtrlSpeak", open_tray_flyout, default=True),
+        pystray.MenuItem("Open control centre", open_management_dialog),
         pystray.MenuItem("Submit correction…", submit_correction_from_tray),
         pystray.MenuItem(
             "Copy last transcript",
             copy_last_transcript_from_tray,
             enabled=has_last_transcript,
         ),
+        pystray.MenuItem(
+            "Cancel active transcription",
+            cancel_active_transcription,
+            enabled=is_transcription_busy,
+        ),
         pystray.MenuItem("Check for updates", check_for_updates_from_tray),
-        pystray.MenuItem("Quit", on_exit),
     ]
+    separator = getattr(pystray.Menu, "SEPARATOR", None)
+    if separator is not None:
+        menu_items.append(separator)
+    menu_items.append(pystray.MenuItem("Quit", on_exit))
     icon = pystray.Icon(
         "CtrlSpeak",
         create_icon_image(),

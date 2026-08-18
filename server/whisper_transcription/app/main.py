@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol
@@ -28,7 +29,7 @@ from app.providers import (
 )
 
 
-SERVICE_VERSION = "0.6.2"
+SERVICE_VERSION = "0.7.0"
 LOGGER = logging.getLogger("ctrlspeak_whisper_transcription")
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = Path(os.environ.get("WHISPER_DATA_DIR", ROOT / "data"))
@@ -489,6 +490,9 @@ def create_app(
                 "role": role,
                 "accepts_client_transcriptions": False,
                 "applies_corrections": False,
+                "telemetry": {
+                    "inference_duration_ms": True,
+                },
                 "provider": {
                     "id": "ubuntu-gpu-large-v3-turbo",
                     "kind": "local_whisper",
@@ -510,6 +514,12 @@ def create_app(
             "accepts_client_transcriptions": True,
             "applies_corrections": True,
             "openai_key_storage": "request_only",
+            "telemetry": {
+                "attempt_duration_ms": True,
+                "routing_duration_ms": True,
+                "worker_inference_duration_ms": True,
+                "worker_health": True,
+            },
             **description,
         }
 
@@ -563,6 +573,7 @@ def create_app(
                 vocabulary = "Known spellings: " + ", ".join(decoded_keywords)
                 effective_prompt = f"{initial_prompt}\n{vocabulary}" if initial_prompt else vocabulary
             temp_path = await receive_audio(audio)
+            inference_started_at = time.monotonic()
             try:
                 result = await run_in_threadpool(
                     backend.transcribe,
@@ -571,6 +582,10 @@ def create_app(
                     effective_prompt,
                     word_timestamps,
                 )
+                inference_duration_ms = round(
+                    max(0.0, time.monotonic() - inference_started_at) * 1000.0,
+                    3,
+                )
             except Exception as exc:
                 LOGGER.exception("worker transcription failed")
                 raise HTTPException(500, "worker transcription failed") from exc
@@ -578,6 +593,7 @@ def create_app(
                 await audio.close()
                 temp_path.unlink(missing_ok=True)
             result["provider"] = "ubuntu-gpu-large-v3-turbo"
+            result["inference_duration_ms"] = inference_duration_ms
             result["corrected"] = False
             return result
 
@@ -717,6 +733,9 @@ def create_app(
                     "retryable": exc.retryable,
                     "attempts": getattr(exc, "attempts", []),
                 }
+                routing_duration_ms = getattr(exc, "routing_duration_ms", None)
+                if routing_duration_ms is not None:
+                    detail["routing_duration_ms"] = routing_duration_ms
                 if exc.action:
                     detail["action"] = exc.action
                 raise HTTPException(exc.status_code, detail) from exc
@@ -762,6 +781,7 @@ def create_app(
                     "requested_strategy": strategy or router.default_strategy,
                     "attempts": list(routed.attempts),
                     "degraded": routed.degraded,
+                    "routing_duration_ms": routed.routing_duration_ms,
                     "usage": result.get("usage"),
                 },
             )
@@ -781,6 +801,7 @@ def create_app(
                 "requested_strategy": strategy or router.default_strategy,
                 "attempts": list(routed.attempts),
                 "degraded": routed.degraded,
+                "routing_duration_ms": routed.routing_duration_ms,
                 "usage": result.get("usage"),
             }
 

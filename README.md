@@ -1,4 +1,4 @@
-# CtrlSpeak v0.6.2
+# CtrlSpeak v0.7.0
 
 CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into
@@ -6,7 +6,10 @@ the active field. v0.5 adds signed in-application updates with a stable installe
 filename. v0.5.1 adds an ordered output-language allowlist enforced by both the
 embedded model and maintained remote API, while preserving the v0.4 Linux and
 transcription-backend design. v0.6 adds capability-aware gateway routing and a
-dedicated GPU worker role:
+dedicated GPU worker role. v0.7 introduces the **Midnight Signal** experience:
+a focused dark control center, a compact hold-to-record capsule, a calm
+elliptical processing animation, a more useful tray surface, truthful provider
+timings, and configurable peak-bounded feedback sounds.
 
 - **Embedded / local** runs the bundled `faster-whisper` workflow and retains
   the existing model (`small` or `large-v3`) and device (`cpu` or `cuda`)
@@ -18,6 +21,39 @@ dedicated GPU worker role:
 The legacy **Client + Server** and **Client Only** roles remain inside the
 embedded/local backend. Remote API mode is independent of those roles and does
 not start discovery, a local server, or a model download.
+
+## v0.7 Midnight Signal interface
+
+Midnight Signal combines the clean visual restraint of the original Midnight
+Glass concept with Signal Studio's operational detail. The interface uses a
+graphite surface, restrained cyan/green state accents, clear typography, and
+progressive disclosure. It does not arrange providers around a microphone or
+pretend to know which provider will win before the gateway responds.
+
+The recording overlay is a slim capsule with a live timer, waveform/level
+feedback, and a correctly labelled dBFS reading. Releasing right Ctrl moves the
+same surface into a calm transcribing state with an elongated elliptical motion
+treatment. Success names the provider actually reported by the result; a
+fallback path is shown only after the gateway returns measured attempts.
+
+The tray and control center expose the useful detail without turning every
+transcription into a diagnostic task:
+
+- current microphone and live input level;
+- selected route and provider readiness;
+- measured probe, routing, attempt, and inference durations when supplied;
+- fallback/degraded state and safe failure categories;
+- **Copy last transcript**, **Submit correction…**, audio-cue controls, gateway
+  check, update status, settings, and Quit; and
+- the existing corrections, secure OpenAI credential, language, model, device,
+  feedback, and signed-update controls in a cleaner information hierarchy.
+
+Telemetry is intentionally truthful. Missing or unsupported measurements show
+an em dash or an explanatory unavailable state; client wall-clock time is not
+labelled as server inference, and illustrative concept values never appear as
+live data. UI snapshots retain no transcript text, audio, bearer credentials,
+or OpenAI key. See `docs/V0.7_MIDNIGHT_SIGNAL_RELEASE.md` for the approved
+experience and release acceptance contract.
 
 ## v0.6.2 routing and credential patch
 
@@ -255,7 +291,7 @@ is hardcoded. API mode calls:
 
 When output languages are configured, the request includes an ordered
 comma-separated `allowed_languages` multipart field such as `en` or `en,af`.
-The maintained v0.6.2 gateway validates a maximum of five codes, forces one of
+The maintained v0.7.0 gateway validates a maximum of five codes, forces one of
 them, uses the first as a fallback, and refuses to return a reported language
 outside the list. Omitting the field preserves automatic detection. The legacy
 single `language` field is still accepted by the server.
@@ -355,7 +391,7 @@ The maintained native build command is:
 python -m utils.build_exe
 ```
 
-It selects `packaging/CtrlSpeak_v0.5.spec` and produces the stable one-file
+It selects `packaging/CtrlSpeak_v0.7.spec` and produces the stable one-file
 executable `dist/CtrlSpeak.exe` on Windows or `dist/CtrlSpeak` on Linux. The
 native icon, updater verification key, and runtime assets are bundled; model
 weights and system CUDA libraries remain external. PyInstaller does not
@@ -378,6 +414,7 @@ or deploys an API.
 python -m pytest -m core_headless
 python -m pytest -q tests/core
 python -m pytest -q tests/core/test_update_manager.py tests/core/test_update_helper.py
+python -m pytest -q tests/core/test_ui_state.py tests/core/test_audio_cues.py
 python -m pytest -q server/whisper_transcription/tests
 python -m compileall .
 git diff --check

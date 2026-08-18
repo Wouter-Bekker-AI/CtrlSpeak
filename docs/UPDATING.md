@@ -1,4 +1,4 @@
-# CtrlSpeak v0.6.2 update and release guide
+# CtrlSpeak v0.7.0 update and release guide
 
 ## End-user update flow
 
@@ -70,6 +70,16 @@ key/quota failures while single-provider routes preserve the exact error. The
 Windows client can remember the user's OpenAI key in Windows Credential Manager
 without adding it to settings, releases, logs, or the gateway.
 
+v0.7.0 is the Midnight Signal interface release. It replaces the utilitarian
+tray/control-center presentation with a coherent dark interface, a compact live
+recording capsule, an elongated processing animation, clearer navigation and
+quick actions, accessible state labels, saved audio-cue controls, and detailed
+provider health/routing information. Provider and latency information is based
+only on authenticated measured telemetry; missing measurements remain visibly
+unavailable, and a fallback path appears only after the gateway reports it.
+The API remains backward-compatible while adding optional probe, attempt,
+inference, and total-routing millisecond fields.
+
 ## Trust and safety model
 
 The standard client hard-codes:
@@ -102,9 +112,11 @@ partials cannot become executable candidates.
 
 ## Maintainer release workflow
 
-`APP_VERSION` in `utils/version.py` is the release version source. Windows file
-metadata in `packaging/windows_version_info.txt`, the AppStream release, Git tag,
-manifest version, and release title must agree.
+`APP_VERSION` in `utils/version.py` is the desktop release version source. The
+server package version in `server/whisper_transcription/pyproject.toml`, runtime
+`SERVICE_VERSION`, Windows file metadata in
+`packaging/windows_version_info.txt`, the AppStream release, Git tag, manifest
+version, and release title must all agree.
 
 For each release:
 
@@ -113,27 +125,31 @@ For each release:
 
    ```text
    python -m pytest -m core_headless
+   python -m pytest -q server/whisper_transcription/tests
    python -m compileall main.py utils scripts tests
    git diff --check
    ```
 
 3. Perform the physical Windows/Ubuntu checks in `docs/TESTING.md` appropriate
    to the change.
-4. Commit and push the reviewed `v0.6` branch.
-5. Create the immutable annotated tag `v0.6.2` at that commit and push it.
-6. Observe `.github/workflows/release.yml` through all three stages:
+4. Back up and deploy the version-matched gateway/worker service source using
+   the administrative acceptance procedure below. The desktop updater does not
+   deploy servers.
+5. Commit and push the reviewed `v0.7` branch.
+6. Create the immutable annotated tag `v0.7.0` at that commit and push it.
+7. Observe `.github/workflows/release.yml` through all three stages:
 
    - clean Windows/Linux tests and native one-file builds;
    - packaged health probes plus manifest generation/signing; and
    - draft upload, five-asset download/audit, then stable publication.
 
-7. Independently download the five release assets and run:
+8. Independently download the five release assets and run:
 
    ```text
-   python scripts/release.py verify --directory <asset-directory> --tag v0.6.2
+   python scripts/release.py verify --directory <asset-directory> --tag v0.7.0
    ```
 
-8. Test the update from the immediately previous stable version on both
+9. Test the update from the immediately previous stable version on both
    platforms. Do not move a published tag or replace consumed assets; publish a
    new patch version instead.
 
@@ -154,6 +170,39 @@ Expected local output is `dist/CtrlSpeak.exe` on Windows and
 `dist/CtrlSpeak` on Linux. GitHub Actions renames copies to the public
 platform-qualified release names before creating the manifest. Model weights
 and CUDA runtimes remain external.
+
+The standard helper selects `packaging/CtrlSpeak_v0.7.spec`. Historical specs
+remain unchanged for reproducibility and are not release inputs.
+
+## Gateway and worker deployment
+
+Publishing a desktop release does not update systemd services. Before the
+stable tag is published:
+
+1. Confirm the exact dedicated gateway and Ubuntu worker targets and their
+   service roles. Do not deploy the gateway role onto Nova; Nova remains the
+   private WireGuard transport/Hermes host.
+2. Create timestamped rollback copies of each service source tree and a
+   consistent SQLite backup before replacing source. Preserve protected
+   environment files, client/worker tokens, model caches, virtual environments,
+   and runtime data outside Git.
+3. Stage the `server/whisper_transcription` subtree, install the role-specific
+   dependency profile if it changed, run the server tests, and verify the
+   redacted runtime configuration before restart.
+4. Restart one role at a time. Verify systemd state, the private listener,
+   authenticated health/capabilities, version `0.7.0`, correction inventory,
+   telemetry flags, and a real language-restricted transcription. The gateway
+   must still report the provider actually used and retain correction/audit
+   data.
+5. Verify GPU-worker-offline fast failover without weakening the 350 ms connect,
+   500 ms probe, cache, or circuit-break limits. Roll back source and database
+   together if schema or startup acceptance fails.
+
+The Hermes `telegrampersonal` command adapter requires no update for v0.7 when
+the existing `/v1/transcribe` contract and authentication remain compatible.
+Do not overwrite its host-specific adapter with a generic repository copy: the
+deployed Nova adapter forwards its request-scoped provider and OpenAI credential
+without persisting either at the gateway.
 
 For a package smoke test, use a writable temporary output path:
 

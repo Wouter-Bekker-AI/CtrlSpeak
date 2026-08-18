@@ -22,6 +22,11 @@
     <category>Accessibility</category>
   </categories>
   <releases>
+    <release version="0.7.0" date="2026-08-18">
+      <description>
+        <p>Introduces the Midnight Signal interface, truthful provider telemetry, accessible recording and processing overlays, and safer configurable audio cues.</p>
+      </description>
+    </release>
     <release version="0.6.2" date="2026-08-15" />
     <release version="0.6.1" date="2026-08-15" />
     <release version="0.6.0" date="2026-08-14" />

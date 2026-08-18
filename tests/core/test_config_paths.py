@@ -167,3 +167,29 @@ def test_create_and_cleanup_recording_file(tmp_path, monkeypatch):
     assert file_path.exists()
     config_paths.cleanup_recording_file(file_path)
     assert not file_path.exists()
+
+
+def test_stale_recording_cleanup_is_bounded_to_generated_temp_wavs(tmp_path, monkeypatch):
+    config_home = tmp_path / "cfg"
+    config_home.mkdir()
+    if config_paths.sys.platform.startswith("win"):
+        monkeypatch.setenv("APPDATA", str(config_home))
+    else:
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+
+    import importlib
+
+    importlib.reload(config_paths)
+    temp_dir = config_paths.get_temp_dir()
+    stale_one = temp_dir / "recording-first.wav"
+    stale_two = temp_dir / "recording-second.wav"
+    unrelated_wav = temp_dir / "keep-me.wav"
+    unrelated_text = temp_dir / "recording-not-a-wav.txt"
+    for path in (stale_one, stale_two, unrelated_wav, unrelated_text):
+        path.write_bytes(b"temporary")
+
+    assert config_paths.cleanup_stale_recordings() == 2
+    assert not stale_one.exists()
+    assert not stale_two.exists()
+    assert unrelated_wav.exists()
+    assert unrelated_text.exists()
