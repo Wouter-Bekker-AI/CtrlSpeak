@@ -1,4 +1,4 @@
-# CtrlSpeak v0.7.2 Midnight Signal user flow
+# CtrlSpeak v0.7.3 Midnight Signal user flow
 
 ## 1. Launch and platform readiness
 
@@ -53,11 +53,13 @@ All persistent data is below `$XDG_CONFIG_HOME/CtrlSpeak` or
    selected/default PortAudio input device.
 3. Midnight Signal opens a compact, non-focus-stealing recording capsule on the
    active monitor. It shows a live waveform, elapsed time, microphone name, and
-   an RMS input meter labelled in dBFS. The meter is smoothed for readability;
-   it is never presented as an acoustic SPL measurement.
+   an RMS input meter labelled in dBFS. The packaged CtrlSpeak microphone mark,
+   not a generic microphone glyph, identifies the recording phase. The meter is
+   smoothed for readability; it is never presented as an acoustic SPL measurement.
 4. Releasing right Ctrl stops recording and transitions the same capsule into a
-   calm elongated/elliptical transcribing animation. Providers are not arranged
-   around the microphone and the UI does not predict which route will win.
+   calm elongated/elliptical transcribing animation that retains the CtrlSpeak
+   brand mark. Providers are not arranged around the microphone and the UI does
+   not predict which route will win.
 5. The generated processing cue begins at the saved volume. Its PCM signal is
    peak-limited to the documented product ceiling without changing pitch;
    mute and reduced-feedback preferences are honoured immediately.
@@ -154,16 +156,23 @@ The tray's **Copy last transcript** item is disabled until transcription first
 succeeds. It copies the retained text even if active-field insertion failed and
 reports the clipboard outcome. CtrlSpeak retains exactly one result in memory;
 it does not persist transcript history, and the value disappears on exit.
+On Windows, this explicit recovery copy uses an owned, serialized Unicode
+clipboard transaction with bounded contention retries and read-back
+verification, so the tray reports success only when the staged value is
+actually available to paste.
 
 ### Correction submission
 
-**Submit correction…** opens one focused form. Enter the phrase
-CtrlSpeak currently produces and the replacement it should return. Submission
-uses the runtime-pinned gateway URL and bearer identity; the token is never
-shown in the form or logged. The default user-scoped rule affects only that
-identity. An administrator may opt into a global rule for all gateway users.
-The dialog validates empty and unchanged pairs, performs the network request in
-the background, and confirms whether the rule became active.
+**Submit correction…** opens one focused Midnight Signal form. Its body can
+scroll independently while the live status and **Hide** / **Submit correction**
+actions remain fixed and reachable on short or high-DPI work areas. Enter the
+phrase CtrlSpeak currently produces and the replacement it should return.
+Submission uses the runtime-pinned gateway URL and bearer identity; the token
+is never shown in the form or logged. The default user-scoped rule affects only
+that identity. An administrator may opt into a global rule for all gateway
+users. The dialog validates empty and unchanged pairs, performs the network
+request in the background, and confirms whether the rule became active. Escape
+hides it; Ctrl+Enter or Alt+S submits it.
 
 Embedded/local mode explains that a remote gateway must be selected instead of
 pretending to save a server correction locally.

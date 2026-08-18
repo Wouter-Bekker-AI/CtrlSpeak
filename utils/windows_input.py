@@ -10,6 +10,7 @@ from __future__ import annotations
 import sys
 import time
 import ctypes
+import threading
 import uuid
 from ctypes import wintypes
 from pathlib import Path
@@ -28,6 +29,7 @@ psapi = ctypes.windll.psapi if sys.platform.startswith("win") else None
 
 CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
+HWND_MESSAGE = -3
 EM_SETSEL = 0x00B1
 EM_REPLACESEL = 0x00C2
 
@@ -80,11 +82,58 @@ class INPUT(ctypes.Structure):
 
 
 if sys.platform.startswith("win"):
+    # ctypes otherwise assumes a 32-bit ``c_int`` return value. Clipboard and
+    # global-memory handles are pointer-sized on 64-bit Windows, so leaving
+    # these declarations implicit truncates valid HGLOBAL values and makes
+    # SetClipboardData fail even though allocation succeeded.
+    user32.OpenClipboard.argtypes = (wintypes.HWND,)
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.CloseClipboard.argtypes = ()
+    user32.CloseClipboard.restype = wintypes.BOOL
+    user32.EmptyClipboard.argtypes = ()
+    user32.EmptyClipboard.restype = wintypes.BOOL
+    user32.IsClipboardFormatAvailable.argtypes = (wintypes.UINT,)
+    user32.IsClipboardFormatAvailable.restype = wintypes.BOOL
+    user32.GetClipboardData.argtypes = (wintypes.UINT,)
+    user32.GetClipboardData.restype = wintypes.HANDLE
+    user32.SetClipboardData.argtypes = (wintypes.UINT, wintypes.HANDLE)
+    user32.SetClipboardData.restype = wintypes.HANDLE
+    user32.EnumClipboardFormats.argtypes = (wintypes.UINT,)
+    user32.EnumClipboardFormats.restype = wintypes.UINT
+    user32.CreateWindowExW.argtypes = (
+        wintypes.DWORD,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.HWND,
+        wintypes.HMENU,
+        wintypes.HINSTANCE,
+        wintypes.LPVOID,
+    )
+    user32.CreateWindowExW.restype = wintypes.HWND
+    user32.DestroyWindow.argtypes = (wintypes.HWND,)
+    user32.DestroyWindow.restype = wintypes.BOOL
+    kernel32.GlobalAlloc.argtypes = (wintypes.UINT, ctypes.c_size_t)
+    kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+    kernel32.GlobalLock.argtypes = (wintypes.HGLOBAL,)
+    kernel32.GlobalLock.restype = wintypes.LPVOID
+    kernel32.GlobalUnlock.argtypes = (wintypes.HGLOBAL,)
+    kernel32.GlobalUnlock.restype = wintypes.BOOL
+    kernel32.GlobalFree.argtypes = (wintypes.HGLOBAL,)
+    kernel32.GlobalFree.restype = wintypes.HGLOBAL
+
     _send_input = user32.SendInput
     _send_input.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
     _send_input.restype = wintypes.UINT
 
 _FORCE_SENDINPUT = False
+_CLIPBOARD_LOCK = threading.RLock()
+_CLIPBOARD_OPEN_ATTEMPTS = 16
+_CLIPBOARD_RETRY_SECONDS = 0.02
 
 
 def set_force_sendinput(flag: bool) -> None:
@@ -234,47 +283,77 @@ def is_anydesk_window(hwnd: int) -> bool:
     return False
 
 
-def open_clipboard() -> bool:
+def open_clipboard(owner_hwnd: int | None = None) -> bool:
     if not sys.platform.startswith("win"):
         return False
-    for _ in range(5):
-        if user32.OpenClipboard(None):
+    for attempt in range(_CLIPBOARD_OPEN_ATTEMPTS):
+        if user32.OpenClipboard(owner_hwnd):
             return True
-        time.sleep(0.01)
+        if attempt + 1 < _CLIPBOARD_OPEN_ATTEMPTS:
+            time.sleep(_CLIPBOARD_RETRY_SECONDS)
     return False
+
+
+def _create_clipboard_owner_window() -> int | None:
+    """Create a short-lived, process-owned HWND for EmptyClipboard.
+
+    Win32 requires a real owner window when EmptyClipboard is followed by
+    SetClipboardData. Opening with ``NULL`` makes EmptyClipboard assign no
+    owner and can make SetClipboardData fail. A message-only STATIC window is
+    invisible, belongs to this process/thread, and needs no long-lived UI.
+    """
+
+    if not sys.platform.startswith("win"):
+        return None
+    hwnd = user32.CreateWindowExW(
+        0,
+        "STATIC",
+        "CtrlSpeakClipboardOwner",
+        0,
+        0,
+        0,
+        0,
+        0,
+        wintypes.HWND(HWND_MESSAGE),
+        None,
+        None,
+        None,
+    )
+    return int(hwnd) if hwnd else None
 
 
 def get_clipboard_text() -> Optional[str]:
     if not sys.platform.startswith("win"):
         return None
-    if not open_clipboard():
-        return None
-    try:
-        if not user32.IsClipboardFormatAvailable(CF_UNICODETEXT):
-            return None
-        handle = user32.GetClipboardData(CF_UNICODETEXT)
-        if not handle:
-            return None
-        pointer = kernel32.GlobalLock(handle)
-        if not pointer:
+    with _CLIPBOARD_LOCK:
+        if not open_clipboard():
             return None
         try:
-            return ctypes.wstring_at(pointer)
+            if not user32.IsClipboardFormatAvailable(CF_UNICODETEXT):
+                return None
+            handle = user32.GetClipboardData(CF_UNICODETEXT)
+            if not handle:
+                return None
+            pointer = kernel32.GlobalLock(handle)
+            if not pointer:
+                return None
+            try:
+                return ctypes.wstring_at(pointer)
+            finally:
+                kernel32.GlobalUnlock(handle)
         finally:
-            kernel32.GlobalUnlock(handle)
-    finally:
-        user32.CloseClipboard()
+            user32.CloseClipboard()
 
 
 def set_clipboard_text(text: str) -> bool:
     if not sys.platform.startswith("win"):
         return False
-    if not open_clipboard():
-        return False
-    try:
-        user32.EmptyClipboard()
+    with _CLIPBOARD_LOCK:
+        # Prepare the movable block before clearing the clipboard.  If memory
+        # allocation fails, the user's existing clipboard contents remain
+        # untouched.
         data = ctypes.create_unicode_buffer(text)
-        size = ctypes.sizeof(ctypes.c_wchar) * len(data)
+        size = ctypes.sizeof(data)
         handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, size)
         if not handle:
             return False
@@ -282,40 +361,61 @@ def set_clipboard_text(text: str) -> bool:
         if not pointer:
             kernel32.GlobalFree(handle)
             return False
-        ctypes.memmove(pointer, ctypes.byref(data), size)
+        ctypes.memmove(pointer, ctypes.addressof(data), size)
         kernel32.GlobalUnlock(handle)
-        if not user32.SetClipboardData(CF_UNICODETEXT, handle):
+
+        owner_hwnd = _create_clipboard_owner_window()
+        if owner_hwnd is None:
             kernel32.GlobalFree(handle)
             return False
-        return True
-    finally:
-        user32.CloseClipboard()
+        try:
+            if not open_clipboard(owner_hwnd):
+                kernel32.GlobalFree(handle)
+                return False
+            try:
+                if not user32.EmptyClipboard():
+                    kernel32.GlobalFree(handle)
+                    return False
+                if not user32.SetClipboardData(CF_UNICODETEXT, handle):
+                    kernel32.GlobalFree(handle)
+                    return False
+                # SetClipboardData owns the HGLOBAL after success. It must not
+                # be freed; Windows keeps it pasteable after this function.
+                return True
+            finally:
+                user32.CloseClipboard()
+        finally:
+            user32.DestroyWindow(owner_hwnd)
 
 
 def restore_clipboard_text(previous: Optional[str]) -> None:
     if not sys.platform.startswith("win"):
         return
-    if previous is None:
-        if open_clipboard():
-            try:
-                user32.EmptyClipboard()
-            finally:
-                user32.CloseClipboard()
-        return
-    set_clipboard_text(previous)
+    with _CLIPBOARD_LOCK:
+        if previous is None:
+            if open_clipboard():
+                try:
+                    user32.EmptyClipboard()
+                finally:
+                    user32.CloseClipboard()
+            return
+        set_clipboard_text(previous)
 
 
 def clipboard_contains_non_text_data() -> bool:
     """Return True when capture would overwrite a non-text-only clipboard."""
-    if not sys.platform.startswith("win") or not open_clipboard():
+    if not sys.platform.startswith("win"):
         return False
-    try:
-        first_format = user32.EnumClipboardFormats(0)
-        return bool(first_format) and not bool(
-            user32.IsClipboardFormatAvailable(CF_UNICODETEXT)
-        )
-    finally:
-        user32.CloseClipboard()
+    with _CLIPBOARD_LOCK:
+        if not open_clipboard():
+            return False
+        try:
+            first_format = user32.EnumClipboardFormats(0)
+            return bool(first_format) and not bool(
+                user32.IsClipboardFormatAvailable(CF_UNICODETEXT)
+            )
+        finally:
+            user32.CloseClipboard()
 
 
 def snapshot_active_text_field(*, copy_wait_seconds: float = 0.08) -> Optional[str]:

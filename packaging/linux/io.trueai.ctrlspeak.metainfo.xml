@@ -22,6 +22,11 @@
     <category>Accessibility</category>
   </categories>
   <releases>
+    <release version="0.7.3" date="2026-08-18">
+      <description>
+        <p>Redesigns correction submission in Midnight Signal, restores the CtrlSpeak brand mark in recording and processing overlays, and repairs reliable Copy last transcript clipboard ownership on 64-bit Windows.</p>
+      </description>
+    </release>
     <release version="0.7.2" date="2026-08-18">
       <description>
         <p>Adds explicit, keyboard-accessible dismissal for the quick panel and control center, plus a truthful Show / hide quick-panel tray action.</p>

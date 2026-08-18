@@ -7,6 +7,7 @@ particular provider has already been selected.
 """
 from __future__ import annotations
 
+import logging
 import math
 import sys
 import time
@@ -15,6 +16,7 @@ from typing import Callable, Sequence
 
 import tkinter as tk
 
+from utils.config_paths import app_icon_path
 from utils.ui_state import UiPhase, UiSnapshot
 
 
@@ -29,6 +31,53 @@ MINT = "#71E6BA"
 AMBER = "#F5C56B"
 CORAL = "#FF7A79"
 WAVEFORM_BAR_COUNT = 10
+BRAND_MICROPHONE_LOGICAL_SIZE = 44.0
+
+
+logger = logging.getLogger("ctrlspeak.midnight_overlay")
+
+
+def brand_microphone_pixel_size(render_scale: float) -> int:
+    """Return the physical bitmap size for the DPI-scaled brand artwork.
+
+    Tk scales canvas coordinates but not the pixels inside ``create_image``.
+    Preparing the artwork at the physical render scale keeps the logo crisp on
+    100–200% displays (and on the supported outer scale limits) without
+    changing the capsule's logical layout.
+    """
+
+    scale = max(0.25, min(3.0, float(render_scale)))
+    return max(12, int(round(BRAND_MICROPHONE_LOGICAL_SIZE * scale)))
+
+
+def _load_brand_microphone_photo(
+    canvas: tk.Canvas,
+    *,
+    render_scale: float,
+) -> object | None:
+    """Load the packaged CtrlSpeak microphone as one transparent Tk image."""
+
+    try:
+        from PIL import Image, ImageTk
+
+        size = brand_microphone_pixel_size(render_scale)
+        with Image.open(app_icon_path()) as source:
+            artwork = source.convert("RGBA")
+            if artwork.size != (size, size):
+                artwork = artwork.resize(
+                    (size, size),
+                    resample=Image.Resampling.LANCZOS,
+                )
+        return ImageTk.PhotoImage(artwork, master=canvas)
+    except Exception:
+        # The status capsule must never be able to break dictation.  A compact
+        # brand-colour silhouette remains available if an unexpected Tk/Pillow
+        # or resource-loading failure occurs.
+        logger.warning(
+            "Unable to load packaged CtrlSpeak microphone artwork",
+            exc_info=True,
+        )
+        return None
 
 
 @dataclass(frozen=True)
@@ -193,7 +242,13 @@ def overlay_geometry(bounds: "MonitorBounds", scale: float) -> OverlayGeometry:
 
 
 def overlay_geometry_spec(geometry: OverlayGeometry) -> str:
-    """Format a Tk geometry safely for monitors with negative coordinates."""
+    """Format the initial Tk geometry request for the overlay.
+
+    Tk treats negative coordinates as offsets from the right or bottom edge,
+    rather than as absolute virtual-desktop positions.  The request is made
+    while the window is hidden and Windows receives the exact absolute point
+    through :func:`_place_windows_overlay_absolute` before it is mapped.
+    """
 
     return (
         f"{geometry.width}x{geometry.height}"
@@ -458,6 +513,62 @@ def _make_focus_safe(window: tk.Toplevel) -> int | None:
         return None
 
 
+def _place_windows_overlay_absolute(
+    window: tk.Toplevel,
+    x: int,
+    y: int,
+    *,
+    hwnd: int | None = None,
+    set_window_pos: Callable[..., object] | None = None,
+) -> bool:
+    """Place the hidden overlay at an absolute virtual-desktop coordinate.
+
+    ``SetWindowPos`` bypasses Tk's signed edge-offset grammar.  ``SWP_NOACTIVATE``
+    is mandatory here because the foreground application must retain the
+    insertion focus throughout dictation.
+    """
+
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        window.update_idletasks()
+        resolved_hwnd = int(hwnd or _resolve_windows_toplevel_hwnd(window))
+        if set_window_pos is None:
+            import ctypes
+            from ctypes import wintypes
+
+            native_set_window_pos = ctypes.windll.user32.SetWindowPos
+            native_set_window_pos.argtypes = (
+                wintypes.HWND,
+                wintypes.HWND,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                wintypes.UINT,
+            )
+            native_set_window_pos.restype = wintypes.BOOL
+            set_window_pos = native_set_window_pos
+        # SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+        if not set_window_pos(
+            resolved_hwnd,
+            0,
+            int(x),
+            int(y),
+            0,
+            0,
+            0x0015,
+        ):
+            raise OSError("SetWindowPos rejected the overlay placement")
+        return True
+    except Exception:
+        logger.debug(
+            "Unable to place the Midnight Signal overlay through Win32",
+            exc_info=True,
+        )
+        return False
+
+
 class MidnightSignalOverlay:
     """Render a compact, state-driven overlay on the active monitor."""
 
@@ -482,6 +593,7 @@ class MidnightSignalOverlay:
         self._render_scale = self.scale
         self.window: tk.Toplevel | None = None
         self.canvas: tk.Canvas | None = None
+        self._brand_microphone_photo: object | None = None
         self._job: str | None = None
         self._close_job: str | None = None
         self._started = time.monotonic()
@@ -535,12 +647,22 @@ class MidnightSignalOverlay:
         canvas.pack(fill=tk.BOTH, expand=True)
         self.window = window
         self.canvas = canvas
+        self._brand_microphone_photo = _load_brand_microphone_photo(
+            canvas,
+            render_scale=self._render_scale,
+        )
         self._closing = False
         self._started = time.monotonic()
         # The no-activate style must be on Tk's outer wrapper before the first
         # visible presentation.  Applying it after deiconify can momentarily
         # steal focus from the field that should receive the transcription.
-        _make_focus_safe(window)
+        focus_safe_hwnd = _make_focus_safe(window)
+        _place_windows_overlay_absolute(
+            window,
+            geometry.x,
+            geometry.y,
+            hwnd=focus_safe_hwnd,
+        )
         window.deiconify()
         self._tick()
 
@@ -581,6 +703,8 @@ class MidnightSignalOverlay:
                 canvas.after_cancel(job)
             except tk.TclError:
                 pass
+        # Release the canvas-owned Tk image while its interpreter is alive.
+        self._brand_microphone_photo = None
         if window is not None:
             try:
                 window.destroy()
@@ -643,17 +767,58 @@ class MidnightSignalOverlay:
         options.update(kwargs)
         return canvas.create_text(x, y, text=text, **options)
 
-    @staticmethod
-    def _draw_microphone(canvas: tk.Canvas, x: float, y: float) -> None:
-        """Draw the same restrained cyan microphone across capsule states."""
+    def _draw_microphone(self, canvas: tk.Canvas, x: float, y: float) -> None:
+        """Render the proper CtrlSpeak microphone in every active state."""
 
-        canvas.create_line(x, y - 11, x, y + 4, fill=CYAN, width=3, capstyle=tk.ROUND)
-        canvas.create_arc(
-            x - 8, y - 3, x + 8, y + 13,
-            start=180, extent=180, style=tk.ARC, outline=CYAN, width=2,
+        radius = BRAND_MICROPHONE_LOGICAL_SIZE / 2.0
+        canvas.create_oval(
+            x - radius,
+            y - radius,
+            x + radius,
+            y + radius,
+            fill=SURFACE_RAISED,
+            outline="#223541",
+            width=1,
+            tags=("brand-microphone-halo",),
         )
-        canvas.create_line(x, y + 12, x, y + 17, fill=CYAN, width=2)
-        canvas.create_line(x - 6, y + 17, x + 6, y + 17, fill=CYAN, width=2, capstyle=tk.ROUND)
+        artwork = getattr(self, "_brand_microphone_photo", None)
+        if artwork is not None:
+            canvas.create_image(
+                x,
+                y,
+                image=artwork,
+                anchor="center",
+                tags=("brand-microphone-artwork",),
+            )
+            return
+
+        # Failure-only fallback follows the logo's blue capsule and slate
+        # cradle instead of reverting to the old generic cyan line glyph.
+        canvas.create_line(
+            x, y - 11, x, y - 1,
+            fill="#1976D2", width=8, capstyle=tk.ROUND,
+            tags=("brand-microphone-fallback",),
+        )
+        canvas.create_line(
+            x, y - 1, x, y + 6,
+            fill="#0D47A1", width=8, capstyle=tk.ROUND,
+            tags=("brand-microphone-fallback",),
+        )
+        canvas.create_arc(
+            x - 10, y - 3, x + 10, y + 15,
+            start=180, extent=180, style=tk.ARC, outline="#607D8B", width=3,
+            tags=("brand-microphone-fallback",),
+        )
+        canvas.create_line(
+            x, y + 14, x, y + 19,
+            fill="#607D8B", width=3,
+            tags=("brand-microphone-fallback",),
+        )
+        canvas.create_line(
+            x - 6, y + 19, x + 6, y + 19,
+            fill="#607D8B", width=3, capstyle=tk.ROUND,
+            tags=("brand-microphone-fallback",),
+        )
 
     def _draw_recording(
         self, canvas: tk.Canvas, width: int, height: int, state: UiSnapshot
@@ -917,8 +1082,10 @@ __all__ = [
     "ProcessingCapsuleLayout",
     "RecordingCapsuleLayout",
     "ResultCapsuleLayout",
+    "BRAND_MICROPHONE_LOGICAL_SIZE",
     "WAVEFORM_BAR_COUNT",
     "active_monitor_bounds",
+    "brand_microphone_pixel_size",
     "display_scale",
     "fit_overlay_text",
     "flyout_geometry",

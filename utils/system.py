@@ -218,7 +218,7 @@ if TYPE_CHECKING:
 # Win32 text insertion / clipboard
 from utils.winio import (
     insert_text_into_focus, set_force_sendinput, is_console_window,
-    set_clipboard_text, snapshot_active_text_field,
+    get_clipboard_text, set_clipboard_text, snapshot_active_text_field,
 )
 
 # LAN discovery (single source of truth for ServerInfo)
@@ -484,6 +484,9 @@ def copy_to_clipboard(text: str) -> bool:
         if not set_clipboard_text(text):
             logger.warning("Failed to stage clipboard text")
             return False
+        if get_clipboard_text() != text:
+            logger.warning("Clipboard verification failed after staging text")
+            return False
         return True
     except Exception:
         logger.exception("Failed to copy text to clipboard")
@@ -530,6 +533,18 @@ def copy_last_transcript_from_tray(_icon=None, _item=None) -> bool:
         return False
     notify("Last transcript copied to the clipboard.", title="CtrlSpeak")
     return True
+
+
+def request_copy_last_transcript_from_tray(icon=None, item=None) -> None:
+    """Dispatch the clipboard write and notification onto CtrlSpeak's UI thread.
+
+    Native tray callbacks run on pystray's worker thread.  Keeping the complete
+    action on the management thread gives the temporary Win32 clipboard owner
+    a normal UI-thread lifetime and avoids touching Tk while pystray is inside
+    the operating-system menu callback.
+    """
+
+    enqueue_management_task(copy_last_transcript_from_tray, icon, item)
 
 
 def notify_error(context: str, details: str) -> None:
@@ -2104,7 +2119,7 @@ def run_tray():
         pystray.MenuItem("Submit correction…", submit_correction_from_tray),
         pystray.MenuItem(
             "Copy last transcript",
-            copy_last_transcript_from_tray,
+            request_copy_last_transcript_from_tray,
             enabled=has_last_transcript,
         ),
         pystray.MenuItem(

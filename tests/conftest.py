@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import sys
 import tempfile
 import types
@@ -13,9 +14,12 @@ import pytest
 # hermetic even when they exercise the real helpers.
 _TEST_CONFIG_ROOT = Path(tempfile.mkdtemp(prefix="ctrlspeak-tests-"))
 if sys.platform.startswith("win"):
-    os.environ.setdefault("APPDATA", str(_TEST_CONFIG_ROOT))
+    # Force isolation before collection imports configure CtrlSpeak's rotating
+    # file handler.  Using setdefault leaked test logs into the live user's
+    # APPDATA whenever Windows had already defined APPDATA (the normal case).
+    os.environ["APPDATA"] = str(_TEST_CONFIG_ROOT)
 else:
-    os.environ.setdefault("XDG_CONFIG_HOME", str(_TEST_CONFIG_ROOT))
+    os.environ["XDG_CONFIG_HOME"] = str(_TEST_CONFIG_ROOT)
 
 
 def _install_stub_module(name: str) -> types.ModuleType:
@@ -107,6 +111,19 @@ def reset_settings(tmp_path, monkeypatch):
     # directory for this specific test.
     import importlib
     from utils import config_paths
+
+    # Reloading config_paths resets its handler globals, but logging's root
+    # logger outlives the module.  Detach the previous test handler first or
+    # every test duplicates output and keeps old temporary log files open.
+    root_logger = logging.getLogger()
+    for handler_name in ("_LOG_HANDLER", "_CONSOLE_HANDLER"):
+        handler = getattr(config_paths, handler_name, None)
+        if handler is not None:
+            root_logger.removeHandler(handler)
+            try:
+                handler.close()
+            except Exception:
+                pass
 
     importlib.reload(config_paths)
 

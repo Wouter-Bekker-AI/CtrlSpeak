@@ -1,4 +1,4 @@
-# CtrlSpeak v0.7.2
+# CtrlSpeak v0.7.3
 
 CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into
@@ -54,8 +54,27 @@ labelled as server inference, and illustrative concept values never appear as
 live data. UI snapshots retain no transcript text, audio, bearer credentials,
 or OpenAI key. See `docs/V0.7_MIDNIGHT_SIGNAL_RELEASE.md` for the approved
 experience baseline, `docs/V0.7.1_HOTFIX_RELEASE.md` for the recording-safety
-hotfix, and `docs/V0.7.2_HOTFIX_RELEASE.md` for the current dismissal and tray
-visibility hotfix contract.
+hotfix, `docs/V0.7.2_HOTFIX_RELEASE.md` for dismissal and tray visibility, and
+`docs/V0.7.3_HOTFIX_RELEASE.md` for the current correction-dialog, overlay-brand,
+and Windows clipboard hotfix contract.
+
+## v0.7.3 desktop fidelity and clipboard hotfix
+
+v0.7.3 brings tray-launched correction submission into the Midnight Signal
+interface. Its responsive, scrollable body adapts to active-monitor work-area
+and display scaling while keeping status, **Hide**, and **Submit correction**
+actions outside the scrolling region. Keyboard users can dismiss with Escape
+and submit with Ctrl+Enter or Alt+S.
+
+The recording and processing capsules now use the packaged CtrlSpeak microphone
+artwork rather than a generic drawn symbol. The asset is selected through the
+same platform-aware packaging path used by the application icon and retained at
+the rendered size so it remains present throughout animation.
+
+On 64-bit Windows, **Copy last transcript** now opens the clipboard with a valid
+owner window and pointer-sized Win32 handle declarations, serializes and retries
+bounded clipboard access, and verifies the Unicode text after staging it. A
+failed write is reported as a failure instead of showing a false success.
 
 ## v0.7.2 quick-panel dismissal hotfix
 
@@ -324,7 +343,7 @@ is hardcoded. API mode calls:
 
 When output languages are configured, the request includes an ordered
 comma-separated `allowed_languages` multipart field such as `en` or `en,af`.
-The maintained v0.7.2 gateway validates a maximum of five codes, forces one of
+The maintained v0.7.3 gateway validates a maximum of five codes, forces one of
 them, uses the first as a fallback, and refuses to return a reported language
 outside the list. Omitting the field preserves automatic detection. The legacy
 single `language` field is still accepted by the server.
@@ -448,9 +467,11 @@ python -m pytest -m core_headless
 python -m pytest -q tests/core
 python -m pytest -q tests/core/test_update_manager.py tests/core/test_update_helper.py
 python -m pytest -q tests/core/test_ui_state.py tests/core/test_audio_cues.py
-python -m pytest -q server/whisper_transcription/tests
 python -m compileall .
 git diff --check
+cd server/whisper_transcription
+python -m pytest -q tests
+cd ../..
 ```
 
 The full embedded model/server integration remains opt-in because it downloads

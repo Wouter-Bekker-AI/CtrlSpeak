@@ -1,4 +1,4 @@
-# CtrlSpeak API v0.7.2
+# CtrlSpeak API v0.7.3
 
 The maintained implementation is in `server/whisper_transcription`. The v0.7
 contract preserves the three deployment roles introduced in v0.6 and adds safe,
@@ -11,9 +11,10 @@ measured routing telemetry for Midnight Signal. The roles are:
 - `standalone`: backward-compatible local model plus gateway API for
   development or a single trusted server.
 
-v0.7.2 synchronizes the service identity with the desktop dismissal hotfix. It
-does not change routes, schemas, authentication, provider routing, corrections,
-language enforcement, telemetry, or stored data.
+v0.7.3 synchronizes the service identity with the desktop correction-dialog,
+overlay-brand, and Windows clipboard hotfix. It does not change routes,
+schemas, authentication, provider routing, corrections, language enforcement,
+telemetry, or stored data.
 
 The intended production topology is the dedicated OpenStack `CtrlSpeak`
 instance in `gateway` mode. Its default `ubuntu-gpu-preferred` strategy orders
@@ -59,7 +60,7 @@ loaded model/runtime:
 ```json
 {
   "status": "ready",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "role": "worker",
   "model": "large-v3-turbo",
   "device": "cuda",
@@ -72,7 +73,7 @@ providers permitted for the caller:
 
 ```json
 {
-  "version": "0.7.2",
+  "version": "0.7.3",
   "role": "gateway",
   "accepts_client_transcriptions": true,
   "applies_corrections": true,
@@ -344,7 +345,7 @@ binds feedback to the original transcription ID, URL, and client bearer token.
   "rule_ids": [],
   "confirmed_text": "the user-confirmed final text",
   "capture_method": "active_field_on_enter",
-  "client_metadata": {"client": "CtrlSpeak", "version": "0.7.2"}
+  "client_metadata": {"client": "CtrlSpeak", "version": "0.7.3"}
 }
 ```
 

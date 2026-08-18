@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 import time
@@ -1505,6 +1506,114 @@ def _show_management_page(icon: pystray.Icon, page_name: str) -> None:
         notebook.select(page)
 
 
+def correction_dialog_geometry(
+    bounds: object,
+    scale: float,
+) -> tuple[int, int, int, int, int, int]:
+    """Return a centred, work-area-safe correction dialog geometry.
+
+    Values are ``x, y, width, height, minimum_width, minimum_height`` in
+    physical pixels.  On constrained displays the minimum collapses to the
+    available work area; the dialog's scrollable body then yields space to its
+    pinned footer.
+    """
+
+    scale = max(0.75, min(3.0, float(scale)))
+    bounds_width = max(1, int(getattr(bounds, "width")))
+    bounds_height = max(1, int(getattr(bounds, "height")))
+    bounds_left = int(getattr(bounds, "left"))
+    bounds_top = int(getattr(bounds, "top"))
+    horizontal_margin = min(
+        max(10, int(round(26 * scale))),
+        max(0, (bounds_width - 1) // 2),
+    )
+    vertical_margin = min(
+        max(10, int(round(20 * scale))),
+        max(0, (bounds_height - 1) // 2),
+    )
+    available_width = max(1, bounds_width - (2 * horizontal_margin))
+    available_height = max(1, bounds_height - (2 * vertical_margin))
+    width = min(max(1, int(round(680 * scale))), available_width)
+    height = min(max(1, int(round(600 * scale))), available_height)
+    x = bounds_left + max(0, (bounds_width - width) // 2)
+    y = bounds_top + max(0, (bounds_height - height) // 2)
+    minimum_width = min(width, max(1, int(round(460 * scale))))
+    minimum_height = min(height, max(1, int(round(390 * scale))))
+    return x, y, width, height, minimum_width, minimum_height
+
+
+def correction_dialog_geometry_spec(
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    *,
+    reference_right: int,
+    reference_bottom: int,
+) -> str:
+    """Format absolute desktop coordinates for Tk's signed-offset grammar.
+
+    Tk interprets ``-100`` as 100 pixels from its reference screen's right or
+    bottom edge, not as the absolute coordinate -100. Convert negative
+    coordinates to that edge-relative representation. On Windows, a final
+    ``SetWindowPos`` corrects for the native non-client frame after realization.
+    """
+
+    x = int(x)
+    y = int(y)
+    width = max(1, int(width))
+    height = max(1, int(height))
+    if x < 0:
+        horizontal = f"-{max(0, int(reference_right) - (x + width))}"
+    else:
+        horizontal = f"+{x}"
+    if y < 0:
+        vertical = f"-{max(0, int(reference_bottom) - (y + height))}"
+    else:
+        vertical = f"+{y}"
+    return f"{width}x{height}{horizontal}{vertical}"
+
+
+def _tk_geometry_reference_edges(window: tk.Misc) -> tuple[int, int]:
+    """Return the right/bottom edges Tk uses for negative geometry offsets."""
+
+    return int(window.winfo_screenwidth()), int(window.winfo_screenheight())
+
+
+def _place_windows_toplevel_absolute(window: tk.Toplevel, x: int, y: int) -> bool:
+    """Place the realized outer Win32 frame at an exact virtual-desktop point."""
+
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        from utils.midnight_overlay import _resolve_windows_toplevel_hwnd
+
+        user32 = ctypes.windll.user32
+        set_window_pos = user32.SetWindowPos
+        set_window_pos.argtypes = (
+            wintypes.HWND,
+            wintypes.HWND,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            wintypes.UINT,
+        )
+        set_window_pos.restype = wintypes.BOOL
+        window.update_idletasks()
+        hwnd = _resolve_windows_toplevel_hwnd(window)
+        # SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+        if not set_window_pos(hwnd, 0, int(x), int(y), 0, 0, 0x0015):
+            raise ctypes.WinError()
+        return True
+    except Exception:
+        logger.debug("Unable to place the correction dialog through Win32", exc_info=True)
+    return False
+
+
 def _show_tray_flyout(icon: pystray.Icon) -> None:
     global tray_flyout
     from utils.midnight_signal_ui import MidnightTrayFlyout
@@ -1531,10 +1640,6 @@ def _show_correction_submission_dialog(icon: pystray.Icon) -> None:
     """Open, or focus, the gateway correction submission dialog."""
     global correction_submission_dialog
 
-    if correction_submission_dialog and correction_submission_dialog.is_open():
-        correction_submission_dialog.bring_to_front()
-        return
-
     config = get_runtime_backend_config()
     if config.backend != "api":
         messagebox.showinfo(
@@ -1544,35 +1649,132 @@ def _show_correction_submission_dialog(icon: pystray.Icon) -> None:
             parent=tk_root,
         )
         return
+
+    if correction_submission_dialog and correction_submission_dialog.is_open():
+        correction_submission_dialog.set_config(config)
+        correction_submission_dialog.bring_to_front()
+        return
+
     correction_submission_dialog = CorrectionSubmissionDialog(icon, config)
 
 
 class CorrectionSubmissionDialog:
-    """Small tray-launched form for creating one authenticated correction rule."""
+    """Tray-launched Midnight Signal form for one authenticated correction rule.
+
+    The body is allowed to scroll, but the live status and actions are outside
+    that viewport.  That split keeps Submit and Hide reachable on short or
+    high-DPI work areas instead of relying on a fixed dialog height.
+    """
 
     def __init__(self, icon: pystray.Icon, config: BackendConfig) -> None:
         self._icon = icon
         self._config = config
+        self._pending_config: BackendConfig | None = None
         self._submitting = False
+        self._submission_generation = 0
+        self._status_kind = "ready"
         parent = (
             management_window.window
             if management_window is not None and management_window.is_open()
             else tk_root
         )
         self.window = tk.Toplevel(parent)
-        self.window.title(f"Submit CtrlSpeak correction · v{APP_VERSION}")
-        self.window.geometry("540x360")
-        self.window.minsize(500, 330)
-        self.window.resizable(True, False)
-        self.window.protocol("WM_DELETE_WINDOW", self.close)
-        self.window.bind("<Escape>", lambda _event: self.close())
-        self.window.bind("<Return>", lambda _event: self.submit())
+        self.window.title(f"CtrlSpeak {APP_VERSION} · Submit correction")
+        self.window.protocol("WM_DELETE_WINDOW", self.hide)
+        self.window.bind("<Escape>", self._hide_from_event)
+        self.window.bind("<Control-Return>", self._submit_from_event)
+        self.window.bind("<Alt-s>", self._submit_from_event)
+        self.window.bind("<Alt-h>", self._focus_source)
+        self.window.bind("<Alt-r>", self._focus_replacement)
+        self.window.bind("<Alt-g>", self._toggle_global_scope)
+        self.window.bind("<Prior>", lambda _event: self._scroll_body(-1, pages=True))
+        self.window.bind("<Next>", lambda _event: self._scroll_body(1, pages=True))
         if parent is not None:
             try:
-                self.window.transient(parent)
+                # A transient whose owner is CtrlSpeak's intentionally hidden
+                # root is itself forced into the withdrawn state by Tk/Win32.
+                # Use modality only when the visible control centre owns us.
+                if str(parent.state()) not in {"withdrawn", "iconic"}:
+                    self.window.transient(parent)
             except Exception:
                 logger.debug("Unable to make the correction dialog transient", exc_info=True)
-        apply_modern_theme(self.window)
+
+        from utils.midnight_overlay import active_monitor_bounds, display_scale
+        from utils.midnight_signal_ui import (
+            AMBER as MS_AMBER,
+            CORAL as MS_CORAL,
+            CARD_ALT as MS_CARD_ALT,
+            CYAN as MS_CYAN,
+            INK as MS_INK,
+            MINT as MS_MINT,
+            MUTED as MS_MUTED,
+            SURFACE as MS_SURFACE,
+            TEXT as MS_TEXT,
+            apply_midnight_signal_theme,
+        )
+
+        apply_midnight_signal_theme(self.window)
+        style = ttk.Style(self.window)
+        style.configure(
+            "MS.DialogEyebrow.TLabel",
+            background=MS_INK,
+            foreground=MS_CYAN,
+            font=("Segoe UI Semibold", 9),
+        )
+        style.configure(
+            "MS.DialogSubtitle.TLabel",
+            background=MS_INK,
+            foreground=MS_MUTED,
+            font=("Segoe UI", 9),
+        )
+        style.configure(
+            "MS.DialogSurfaceMuted.TLabel",
+            background=MS_SURFACE,
+            foreground=MS_MUTED,
+            font=("Segoe UI", 9),
+        )
+        for name, colour in (
+            ("Ready", MS_MUTED),
+            ("Busy", MS_AMBER),
+            ("Success", MS_MINT),
+            ("Error", MS_CORAL),
+        ):
+            style.configure(
+                f"MS.DialogStatus{name}.TLabel",
+                background=MS_INK,
+                foreground=colour,
+                font=("Segoe UI Semibold", 9),
+            )
+
+        scale = display_scale(self.window)
+        bounds = active_monitor_bounds(self.window)
+        (
+            x,
+            y,
+            width,
+            height,
+            minimum_width,
+            minimum_height,
+        ) = correction_dialog_geometry(bounds, scale)
+        self._compact_layout = (
+            width < int(round(680 * scale))
+            or height < int(round(600 * scale))
+        )
+        self._status_character_limit = 42 if self._compact_layout else 72
+        reference_right, reference_bottom = _tk_geometry_reference_edges(self.window)
+        self.window.geometry(
+            correction_dialog_geometry_spec(
+                x,
+                y,
+                width,
+                height,
+                reference_right=reference_right,
+                reference_bottom=reference_bottom,
+            )
+        )
+        self.window.minsize(minimum_width, minimum_height)
+        self.window.maxsize(width, height)
+        self.window.resizable(True, True)
         try:
             _set_window_icon(self.window)
         except Exception:
@@ -1583,72 +1785,248 @@ class CorrectionSubmissionDialog:
         self.global_scope_var = tk.BooleanVar(master=self.window, value=False)
         self.status_var = tk.StringVar(
             master=self.window,
-            value=f"Gateway: {config.api_url}",
+            value="Ready to submit a correction.",
         )
 
-        container = ttk.Frame(self.window, style="Modern.TFrame", padding=(24, 22))
-        container.pack(fill=tk.BOTH, expand=True)
-        card = ttk.Frame(container, style="ModernCard.TFrame", padding=(22, 20))
-        card.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(card, text="Submit known-word correction", style="Title.TLabel").pack(
-            anchor=tk.W
+        shell = ttk.Frame(self.window, style="MS.Root.TFrame")
+        shell.pack(fill=tk.BOTH, expand=True)
+        shell.rowconfigure(1, weight=1)
+        shell.columnconfigure(0, weight=1)
+
+        header_padding = (20, 11, 20, 9) if self._compact_layout else (26, 20, 26, 14)
+        header = ttk.Frame(shell, style="MS.Root.TFrame", padding=header_padding)
+        header.grid(row=0, column=0, sticky="ew")
+        eyebrow = ttk.Label(
+            header,
+            text="CTRLSPEAK  ·  CORRECTION",
+            style="MS.DialogEyebrow.TLabel",
         )
-        accent = ttk.Frame(card, style="AccentLine.TFrame")
-        accent.configure(height=2)
-        accent.pack(fill=tk.X, pady=(10, 14))
-
-        ttk.Label(card, text="When CtrlSpeak hears", style="Body.TLabel").pack(anchor=tk.W)
-        self.source_entry = ttk.Entry(card, textvariable=self.source_var)
-        self.source_entry.pack(fill=tk.X, pady=(4, 12))
-
-        ttk.Label(card, text="Replace it with", style="Body.TLabel").pack(anchor=tk.W)
-        self.replacement_entry = ttk.Entry(card, textvariable=self.replacement_var)
-        self.replacement_entry.pack(fill=tk.X, pady=(4, 10))
-
-        ttk.Checkbutton(
-            card,
-            text="Apply to every gateway user (administrator only)",
-            variable=self.global_scope_var,
-        ).pack(anchor=tk.W)
+        if not self._compact_layout:
+            eyebrow.pack(anchor=tk.W)
         ttk.Label(
+            header,
+            text=(
+                "Submit correction"
+                if self._compact_layout
+                else "Teach CtrlSpeak what you meant"
+            ),
+            style="MS.Title.TLabel",
+        ).pack(anchor=tk.W, pady=((0, 0) if self._compact_layout else (5, 3)))
+
+        viewport = ttk.Frame(shell, style="MS.Surface.TFrame")
+        viewport.grid(row=1, column=0, sticky="nsew")
+        viewport.rowconfigure(0, weight=1)
+        viewport.columnconfigure(0, weight=1)
+        self._body_canvas = tk.Canvas(
+            viewport,
+            background=MS_SURFACE,
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        body_scrollbar = ttk.Scrollbar(
+            viewport,
+            orient=tk.VERTICAL,
+            command=self._body_canvas.yview,
+        )
+        self._body_canvas.configure(yscrollcommand=body_scrollbar.set)
+        self._body_canvas.grid(row=0, column=0, sticky="nsew")
+        body_scrollbar.grid(row=0, column=1, sticky="ns")
+
+        body = ttk.Frame(
+            self._body_canvas,
+            style="MS.Surface.TFrame",
+            padding=((18, 12) if self._compact_layout else (26, 20)),
+        )
+        self._body_window_id = self._body_canvas.create_window(
+            (0, 0),
+            window=body,
+            anchor="nw",
+        )
+        body.bind("<Configure>", self._sync_body_scroll_region)
+        self._body_canvas.bind("<Configure>", self._sync_body_width)
+        self.window.bind("<MouseWheel>", self._scroll_body_wheel, add="+")
+        self.window.bind("<Button-4>", lambda _event: self._scroll_body(-3), add="+")
+        self.window.bind("<Button-5>", lambda _event: self._scroll_body(3), add="+")
+
+        self._subtitle_label = ttk.Label(
+            body,
+            text=(
+                "Add one exact phrase replacement. The gateway applies it after "
+                "transcription and makes it active immediately."
+            ),
+            style="MS.DialogSurfaceMuted.TLabel",
+            justify=tk.LEFT,
+        )
+        if not self._compact_layout:
+            self._subtitle_label.pack(anchor=tk.W, fill=tk.X, pady=(0, 12))
+
+        card = ttk.Frame(
+            body,
+            style="MS.OutlinedCard.TFrame",
+            padding=((18, 15) if self._compact_layout else (24, 22)),
+        )
+        card.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(
+            card,
+            text="01  ·  WHEN CTRLSPEAK HEARS",
+            style="MS.CompactMetric.TLabel",
+            underline=22,
+        ).pack(anchor=tk.W)
+        self._source_help_label = ttk.Label(
+            card,
+            text="The phrase currently returned by transcription",
+            style="MS.CardMuted.TLabel",
+            justify=tk.LEFT,
+        )
+        self._source_help_label.pack(anchor=tk.W, fill=tk.X, pady=(3, 8))
+        self.source_entry = ttk.Entry(
+            card,
+            textvariable=self.source_var,
+            style="MS.TEntry",
+            takefocus=True,
+        )
+        self.source_entry.pack(fill=tk.X)
+        self.source_entry.bind("<Return>", self._focus_replacement)
+
+        ttk.Label(
+            card,
+            text="02  ·  REPLACE IT WITH",
+            style="MS.CompactMetric.TLabel",
+            underline=7,
+        ).pack(anchor=tk.W, pady=(22, 0))
+        self._replacement_help_label = ttk.Label(
+            card,
+            text="The exact text CtrlSpeak should return instead",
+            style="MS.CardMuted.TLabel",
+            justify=tk.LEFT,
+        )
+        self._replacement_help_label.pack(anchor=tk.W, fill=tk.X, pady=(3, 8))
+        self.replacement_entry = ttk.Entry(
+            card,
+            textvariable=self.replacement_var,
+            style="MS.TEntry",
+            takefocus=True,
+        )
+        self.replacement_entry.pack(fill=tk.X)
+        self.replacement_entry.bind("<Return>", self._submit_from_event)
+
+        ttk.Separator(card, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(23, 18))
+        self.global_scope_check = ttk.Checkbutton(
+            card,
+            text="Global rule (administrator only)",
+            variable=self.global_scope_var,
+            style="MS.TCheckbutton",
+            underline=0,
+            takefocus=True,
+        )
+        self.global_scope_check.pack(anchor=tk.W)
+        self._scope_help_label = ttk.Label(
             card,
             text=(
-                "Unchecked rules belong to your authenticated gateway identity. "
-                "The correction becomes active immediately after submission."
+                "Leave this off to save the rule only for your authenticated gateway "
+                "identity. Global rules require gateway administrator permission."
             ),
-            style="Caption.TLabel",
-            wraplength=460,
+            style="MS.CardMuted.TLabel",
             justify=tk.LEFT,
-        ).pack(anchor=tk.W, fill=tk.X, pady=(5, 10))
+        )
+        self._scope_help_label.pack(anchor=tk.W, fill=tk.X, pady=(7, 18))
 
+        gateway = ttk.Frame(card, style="MS.CardAlt.TFrame", padding=(14, 11))
+        gateway.pack(fill=tk.X)
         ttk.Label(
-            card,
-            textvariable=self.status_var,
-            style="Caption.TLabel",
-            wraplength=460,
+            gateway,
+            text="GATEWAY",
+            background=MS_CARD_ALT,
+            foreground=MS_MUTED,
+            font=("Segoe UI Semibold", 8),
+        ).pack(anchor=tk.W)
+        self.gateway_var = tk.StringVar(master=self.window)
+        self._gateway_label = ttk.Label(
+            gateway,
+            textvariable=self.gateway_var,
+            background=MS_CARD_ALT,
+            foreground=MS_TEXT,
+            font=("Segoe UI", 9),
             justify=tk.LEFT,
-        ).pack(anchor=tk.W, fill=tk.X)
-        buttons = ttk.Frame(card, style="ModernCardInner.TFrame")
-        buttons.pack(fill=tk.X, pady=(12, 0))
-        ttk.Button(buttons, text="Cancel", style="Subtle.TButton", command=self.close).pack(
-            side=tk.RIGHT
+        )
+        self._gateway_label.pack(anchor=tk.W, fill=tk.X, pady=(2, 0))
+        self._keyboard_help_label = ttk.Label(
+            card,
+            text="Esc hides  ·  Ctrl+Enter submits",
+            style="MS.CardMuted.TLabel",
+            justify=tk.LEFT,
+        )
+        if not self._compact_layout:
+            self._keyboard_help_label.pack(anchor=tk.W, fill=tk.X, pady=(15, 0))
+
+        footer_padding = (20, 9, 20, 12) if self._compact_layout else (26, 14, 26, 20)
+        footer = ttk.Frame(shell, style="MS.Root.TFrame", padding=footer_padding)
+        footer.grid(row=2, column=0, sticky="ew")
+        status_row = ttk.Frame(footer, style="MS.Root.TFrame")
+        status_row.pack(fill=tk.X)
+        self._status_label = ttk.Label(
+            status_row,
+            textvariable=self.status_var,
+            style="MS.DialogStatusReady.TLabel",
+            justify=tk.LEFT,
+        )
+        self._status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._progress = ttk.Progressbar(
+            status_row,
+            mode="indeterminate",
+            length=max(80, int(round(110 * scale))),
+            style="MS.Horizontal.TProgressbar",
+        )
+
+        buttons = ttk.Frame(footer, style="MS.Root.TFrame")
+        buttons.pack(fill=tk.X, pady=((8, 0) if self._compact_layout else (13, 0)))
+        self.hide_button = ttk.Button(
+            buttons,
+            text="Hide window",
+            style="MS.TButton",
+            command=self.hide,
+            takefocus=True,
         )
         self.submit_button = ttk.Button(
             buttons,
             text="Submit correction",
-            style="Accent.TButton",
+            style="MS.Primary.TButton",
             command=self.submit,
+            takefocus=True,
+            underline=0,
         )
-        self.submit_button.pack(side=tk.RIGHT, padx=(0, 10))
+        self.submit_button.pack(side=tk.RIGHT)
+        self.hide_button.pack(side=tk.RIGHT, padx=(0, 10))
 
-        self.window.after(80, self.bring_to_front)
-        self.window.after(120, self.source_entry.focus_set)
+        self._form_controls = (
+            self.source_entry,
+            self.replacement_entry,
+            self.global_scope_check,
+        )
+        self.set_config(config)
+        self.source_var.trace_add("write", self._form_changed)
+        self.replacement_var.trace_add("write", self._form_changed)
+        self.window.bind("<Configure>", self._resize_wrapped_copy, add="+")
+
+        self.bring_to_front()
+        _place_windows_toplevel_absolute(self.window, x, y)
+        self.window.after_idle(self._focus_initial)
 
     def is_open(self) -> bool:
         try:
             return bool(self.window.winfo_exists())
         except Exception:
             return False
+
+    def is_visible(self) -> bool:
+        try:
+            return self.is_open() and self.window.state() not in {"withdrawn", "iconic"}
+        except tk.TclError:
+            return False
+
+    def _focus_initial(self) -> None:
+        if self.is_visible() and not self._submitting:
+            self.source_entry.focus_set()
 
     def bring_to_front(self) -> None:
         if not self.is_open():
@@ -1660,93 +2038,325 @@ class CorrectionSubmissionDialog:
         except Exception:
             logger.exception("Failed to focus the correction dialog")
 
+    def set_config(self, config: BackendConfig) -> None:
+        """Refresh the safe endpoint snapshot whenever the hidden form is reopened."""
+
+        if self._submitting:
+            # Keep only the latest observed settings. If the user changes A to
+            # B and back to A during the request, do not apply stale B after it
+            # completes.
+            self._pending_config = None if config == self._config else config
+            return
+        self._apply_config(config)
+
+    def _apply_config(self, config: BackendConfig) -> None:
+        self._config = config
+        self.gateway_var.set(str(config.api_url or "Configured CtrlSpeak gateway"))
+
+    def _resize_wrapped_copy(self, event) -> None:
+        if event.widget is not self.window:
+            return
+        wrap = max(220, int(event.width) - 90)
+        self._subtitle_label.configure(wraplength=wrap)
+        self._source_help_label.configure(wraplength=max(180, wrap - 48))
+        self._replacement_help_label.configure(wraplength=max(180, wrap - 48))
+        self._scope_help_label.configure(wraplength=max(180, wrap - 48))
+        self._gateway_label.configure(wraplength=max(180, wrap - 48))
+        self._keyboard_help_label.configure(wraplength=max(180, wrap - 48))
+        self._status_label.configure(wraplength=wrap)
+
+    def _sync_body_scroll_region(self, _event=None) -> None:
+        if self.is_open():
+            self._body_canvas.configure(scrollregion=self._body_canvas.bbox("all"))
+
+    def _sync_body_width(self, event) -> None:
+        if self.is_open():
+            self._body_canvas.itemconfigure(
+                self._body_window_id,
+                width=max(1, int(event.width)),
+            )
+
+    def _scroll_body_wheel(self, event) -> str | None:
+        try:
+            delta = int(event.delta)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if delta:
+            self._body_canvas.yview_scroll(-3 if delta > 0 else 3, "units")
+            return "break"
+        return None
+
+    def _scroll_body(self, amount: int, *, pages: bool = False) -> str:
+        self._body_canvas.yview_scroll(int(amount), "pages" if pages else "units")
+        return "break"
+
+    def _focus_source(self, _event=None) -> str:
+        if not self._submitting:
+            self.source_entry.focus_set()
+        return "break"
+
+    def _focus_replacement(self, _event=None) -> str:
+        if not self._submitting:
+            self.replacement_entry.focus_set()
+        return "break"
+
+    def _toggle_global_scope(self, _event=None) -> str:
+        if not self._submitting:
+            self.global_scope_check.invoke()
+        return "break"
+
+    def _submit_from_event(self, _event=None) -> str:
+        self.submit()
+        return "break"
+
+    def _hide_from_event(self, _event=None) -> str:
+        self.hide()
+        return "break"
+
+    def _form_changed(self, *_args) -> None:
+        if not self._submitting and self._status_kind in {"error", "success"}:
+            self._set_status("ready", "Ready to submit a correction.")
+
+    def _set_form_enabled(self, enabled: bool) -> None:
+        state = "!disabled" if enabled else "disabled"
+        for widget in self._form_controls:
+            try:
+                widget.state([state])
+            except tk.TclError:
+                logger.debug("Correction form control disappeared during state update")
+        self.submit_button.state([state])
+
+    def _set_status(self, kind: str, text: str) -> None:
+        self._status_kind = kind if kind in {"ready", "busy", "success", "error"} else "ready"
+        title = self._status_kind.title()
+        normalized = " ".join(str(text or "").split())
+        limit = max(24, int(getattr(self, "_status_character_limit", 72)))
+        if len(normalized) > limit:
+            normalized = normalized[: limit - 1].rstrip() + "…"
+        marker = {
+            "ready": "●",
+            "busy": "◌",
+            "success": "✓",
+            "error": "!",
+        }[self._status_kind]
+        self.status_var.set(f"{marker}  {normalized}")
+        self._status_label.configure(style=f"MS.DialogStatus{title}.TLabel")
+        if self._status_kind == "busy":
+            if not self._progress.winfo_ismapped():
+                self._progress.pack(side="right", padx=(14, 0))
+            self._progress.start(12)
+            self.window.configure(cursor="watch")
+        else:
+            self._progress.stop()
+            self._progress.pack_forget()
+            self.window.configure(cursor="")
+
+    @staticmethod
+    def _safe_error_summary(error: object) -> str:
+        """Map untrusted transport details to fixed, non-sensitive UI copy."""
+
+        detail = " ".join(str(error or "").casefold().split())
+        if detail in {
+            "gateway authentication failed. check the saved gateway token.",
+            "gateway rejected the correction. shorten both phrases and try again.",
+            "the gateway rejected a duplicate or conflicting correction.",
+            "could not reach the gateway. check its connection and try again.",
+            "the gateway could not save this correction. see the log for its error category.",
+        }:
+            return str(error)
+        status_match = re.search(r"\bhttp\s+(\d{3})\b", detail[:120])
+        if status_match:
+            status = int(status_match.group(1))
+            if status == 422:
+                return "Gateway rejected the correction. Shorten both phrases and try again."
+            if status in {401, 403}:
+                return "Gateway authentication failed. Check the saved gateway token."
+            if status == 409:
+                return "The gateway rejected a duplicate or conflicting correction."
+            return "The gateway could not save this correction. See the log for its error category."
+        if detail.startswith(("validationerror", "valueerror", "validation failed")):
+            return "Gateway rejected the correction. Shorten both phrases and try again."
+        if detail.startswith(("authentication failed", "authorization failed")):
+            return "Gateway authentication failed. Check the saved gateway token."
+        if detail.startswith(("duplicate correction", "conflicting correction")):
+            return "The gateway rejected a duplicate or conflicting correction."
+        if detail.startswith(("could not reach", "connectionerror", "timeouterror")):
+            return "Could not reach the gateway. Check its connection and try again."
+        return "The gateway could not save this correction. See the log for its error category."
+
+    def _error_status_text(self, error: object) -> str:
+        safe = self._safe_error_summary(error)
+        if not getattr(self, "_compact_layout", False):
+            return safe
+        compact = {
+            "Gateway authentication failed. Check the saved gateway token.": (
+                "Not saved · Check gateway token"
+            ),
+            "Gateway rejected the correction. Shorten both phrases and try again.": (
+                "Not saved · Shorten both phrases"
+            ),
+            "The gateway rejected a duplicate or conflicting correction.": (
+                "Not saved · Duplicate or conflict"
+            ),
+            "Could not reach the gateway. Check its connection and try again.": (
+                "Not saved · Gateway unreachable"
+            ),
+        }
+        return compact.get(safe, "Not saved · See CtrlSpeak log")
+
     def submit(self) -> None:
         if self._submitting or not self.is_open():
             return
         source = self.source_var.get().strip()
         replacement = self.replacement_var.get().strip()
         if not source:
-            messagebox.showwarning(
-                "Correction required",
-                "Enter the phrase CtrlSpeak currently produces.",
-                parent=self.window,
-            )
+            self._set_status("error", "Enter the phrase CtrlSpeak currently produces.")
+            self.window.bell()
             self.source_entry.focus_set()
             return
         if not replacement:
-            messagebox.showwarning(
-                "Replacement required",
-                "Enter the phrase CtrlSpeak should return instead.",
-                parent=self.window,
-            )
+            self._set_status("error", "Enter the phrase CtrlSpeak should return instead.")
+            self.window.bell()
             self.replacement_entry.focus_set()
             return
         if source == replacement:
-            messagebox.showwarning(
-                "No change",
-                "The replacement must differ from the phrase being corrected.",
-                parent=self.window,
-            )
+            self._set_status("error", "The replacement must differ from the phrase being corrected.")
+            self.window.bell()
             self.replacement_entry.focus_set()
             return
 
         scope = "global" if self.global_scope_var.get() else "user"
         self._submitting = True
-        self.submit_button.state(["disabled"])
-        self.status_var.set("Submitting correction…")
+        self._submission_generation += 1
+        request_generation = self._submission_generation
+        request_config = self._config
+        self._set_form_enabled(False)
+        self._set_status("busy", "Submitting securely to the CtrlSpeak gateway…")
 
         def worker() -> None:
+            error_category: str | None = None
+            safe_error: str | None = None
             try:
                 rule = ApiTranscriptionClient(
-                    self._config,
+                    request_config,
                     timeout_seconds=20.0,
                 ).create_correction(source, replacement, scope=scope)
             except Exception as exc:
-                enqueue_management_task(self._finish_submission, None, str(exc))
+                # Reduce untrusted HTTP details while the exception is in
+                # scope. Logging outside this except block also prevents a
+                # failing log handler from printing the raw exception context.
+                error_category = exc.__class__.__name__
+                safe_error = self._safe_error_summary(exc)
+            else:
+                enqueue_management_task(
+                    self._finish_submission,
+                    request_generation,
+                    rule,
+                    None,
+                )
                 return
-            enqueue_management_task(self._finish_submission, rule, None)
+            logger.warning(
+                "CtrlSpeak correction submission failed category=%s",
+                error_category or "unexpected",
+            )
+            enqueue_management_task(
+                self._finish_submission,
+                request_generation,
+                None,
+                safe_error or self._safe_error_summary(None),
+            )
 
-        threading.Thread(
-            target=worker,
-            name="ctrlspeak-correction-submit",
-            daemon=True,
-        ).start()
+        start_failure: tuple[str, str] | None = None
+        try:
+            thread = threading.Thread(
+                target=worker,
+                name="ctrlspeak-correction-submit",
+                daemon=True,
+            )
+            thread.start()
+        except Exception as exc:
+            start_failure = (exc.__class__.__name__, self._safe_error_summary(exc))
+        if start_failure is not None:
+            logger.error(
+                "Failed to start correction submission worker category=%s",
+                start_failure[0],
+            )
+            self._finish_submission(
+                request_generation,
+                None,
+                start_failure[1],
+            )
 
     def _finish_submission(
         self,
+        request_generation: int,
         rule: dict[str, object] | None,
         error: str | None,
     ) -> None:
-        if not self.is_open():
+        if (
+            not self.is_open()
+            or request_generation != self._submission_generation
+        ):
             return
         self._submitting = False
-        self.submit_button.state(["!disabled"])
+        self._set_form_enabled(True)
+        pending_config = self._pending_config
+        self._pending_config = None
         if error:
-            self.status_var.set("Correction was not saved.")
-            messagebox.showerror(
-                "Correction submission failed",
-                error,
-                parent=self.window,
+            logger.warning("CtrlSpeak correction submission did not complete")
+            if pending_config is not None:
+                self._apply_config(pending_config)
+            self._set_status(
+                "error",
+                (
+                    (
+                        "Previous failed · New gateway ready"
+                        if self._compact_layout
+                        else "Previous gateway request failed · New gateway ready for the next submission."
+                    )
+                    if pending_config is not None
+                    else self._error_status_text(error)
+                ),
             )
+            if self.is_visible():
+                self.window.bell()
+                self.replacement_entry.focus_set()
             return
 
         rule_id = str((rule or {}).get("id") or "")
-        self.status_var.set("Correction saved and active on the gateway.")
         logger.info("Submitted CtrlSpeak correction rule id=%s", rule_id)
-        messagebox.showinfo(
-            "Correction saved",
-            "The known-word correction is active on the CtrlSpeak gateway.",
-            parent=self.window,
-        )
         self.source_var.set("")
         self.replacement_var.set("")
-        self.source_entry.focus_set()
+        self.global_scope_var.set(False)
+        if pending_config is not None:
+            self._apply_config(pending_config)
+        self._set_status(
+            "success",
+            (
+                (
+                    "Saved previously · New gateway ready"
+                    if self._compact_layout
+                    else "Correction saved on the previous gateway · New gateway ready."
+                )
+                if pending_config is not None
+                else "Correction saved and active on the gateway."
+            ),
+        )
+        if self.is_visible():
+            self.source_entry.focus_set()
 
-    def close(self) -> None:
-        global correction_submission_dialog
-        if self.is_open():
-            self.window.destroy()
-        correction_submission_dialog = None
+    def hide(self) -> None:
+        """Hide without cancelling or duplicating an in-flight submission."""
+
+        if not self.is_open():
+            return
+        try:
+            self.window.withdraw()
+        except tk.TclError:
+            logger.debug("Correction dialog was already unavailable while hiding")
+
+    # Compatibility for callers that treated the former window as disposable.
+    close = hide
 
 class _LegacyManagementWindow:
     def __init__(self, icon: pystray.Icon):

@@ -4,6 +4,27 @@ CtrlSpeak follows semantic versioning. Published binaries are immutable; a
 consumed release is corrected by a newer patch rather than by moving its tag or
 replacing its assets.
 
+## 0.7.3 — 2026-08-18
+
+### Fixed
+
+- Replace the legacy correction-submission popup with a responsive Midnight
+  Signal surface whose form body can scroll while status and actions remain
+  visible at supported display scales and on short work areas.
+- Use the real CtrlSpeak microphone artwork in both recording and processing
+  overlays, preserving the same brand identity across capture phases.
+- Repair **Copy last transcript** on 64-bit Windows by declaring pointer-sized
+  Win32 clipboard APIs, providing a valid clipboard owner, serializing access,
+  retrying bounded contention, and verifying the staged Unicode text.
+
+### Release engineering
+
+- Synchronize desktop, service, Windows PE, AppStream, API documentation, and
+  signed-release version gates at 0.7.3.
+- Add regression coverage for correction-dialog reachability, packaged brand
+  artwork, tray-thread clipboard dispatch, clipboard ownership, and read-back
+  failure reporting.
+
 ## 0.7.2 — 2026-08-18
 
 ### Fixed
@@ -57,4 +78,5 @@ replacing its assets.
 Detailed release contracts are in
 `docs/V0.7_MIDNIGHT_SIGNAL_RELEASE.md` and
 `docs/V0.7.1_HOTFIX_RELEASE.md`, with the current dismissal hotfix in
-`docs/V0.7.2_HOTFIX_RELEASE.md`.
+`docs/V0.7.2_HOTFIX_RELEASE.md` and the current desktop-fidelity hotfix in
+`docs/V0.7.3_HOTFIX_RELEASE.md`.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass
 import sys
 
@@ -369,6 +370,7 @@ def test_copy_last_transcript_is_memory_only_and_reports_outcome(monkeypatch) ->
     monkeypatch.setattr(system, "_last_transcript", None)
     monkeypatch.setattr(system, "_tray_icon", tray_icon)
     monkeypatch.setattr(system, "set_clipboard_text", lambda text: copied.append(text) is None)
+    monkeypatch.setattr(system, "get_clipboard_text", lambda: copied[-1] if copied else None)
     monkeypatch.setattr(
         system,
         "notify",
@@ -388,6 +390,207 @@ def test_copy_last_transcript_is_memory_only_and_reports_outcome(monkeypatch) ->
         ("CtrlSpeak", "No successful transcription is available yet."),
         ("CtrlSpeak", "Last transcript copied to the clipboard."),
     ]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("win"), reason="Win32 clipboard contract")
+def test_windows_clipboard_write_uses_owned_window_and_pointer_sized_handle(
+    monkeypatch,
+) -> None:
+    from utils import windows_input
+
+    calls: list[tuple[object, ...]] = []
+    allocated_handle = 0x1_0000_1234
+    owner_handle = 0x1_0000_5678
+    allocation: ctypes.Array[ctypes.c_char] | None = None
+
+    class FakeKernel32:
+        def GlobalAlloc(self, _flags, size):
+            nonlocal allocation
+            calls.append(("alloc", int(size)))
+            allocation = ctypes.create_string_buffer(int(size))
+            return allocated_handle
+
+        def GlobalLock(self, handle):
+            calls.append(("lock", handle))
+            assert handle == allocated_handle
+            assert allocation is not None
+            return ctypes.addressof(allocation)
+
+        def GlobalUnlock(self, handle):
+            calls.append(("unlock", handle))
+            return 1
+
+        def GlobalFree(self, handle):
+            calls.append(("free", handle))
+            return 0
+
+    class FakeUser32:
+        def CreateWindowExW(self, *_args):
+            calls.append(("create-owner",))
+            return owner_handle
+
+        def OpenClipboard(self, owner):
+            calls.append(("open", owner))
+            return 1
+
+        def EmptyClipboard(self):
+            calls.append(("empty",))
+            return 1
+
+        def SetClipboardData(self, fmt, handle):
+            calls.append(("set", fmt, handle))
+            return handle
+
+        def CloseClipboard(self):
+            calls.append(("close",))
+            return 1
+
+        def DestroyWindow(self, owner):
+            calls.append(("destroy-owner", owner))
+            return 1
+
+    monkeypatch.setattr(windows_input, "kernel32", FakeKernel32())
+    monkeypatch.setattr(windows_input, "user32", FakeUser32())
+    monkeypatch.setattr(windows_input, "_CLIPBOARD_OPEN_ATTEMPTS", 1)
+
+    text = "CtrlSpeak clipboard ✓"
+    assert windows_input.set_clipboard_text(text) is True
+
+    assert ("open", owner_handle) in calls
+    assert ("set", windows_input.CF_UNICODETEXT, allocated_handle) in calls
+    assert ("destroy-owner", owner_handle) in calls
+    assert not any(call[0] == "free" for call in calls)
+    expected_size = ctypes.sizeof(ctypes.create_unicode_buffer(text))
+    assert calls.index(("alloc", expected_size)) < calls.index(("empty",))
+    assert allocation is not None
+    assert ctypes.wstring_at(ctypes.addressof(allocation)) == text
+
+
+@pytest.mark.skipif(not sys.platform.startswith("win"), reason="Win32 clipboard contract")
+def test_windows_clipboard_allocation_failure_preserves_existing_clipboard(
+    monkeypatch,
+) -> None:
+    from utils import windows_input
+
+    emptied: list[bool] = []
+
+    class FailingKernel32:
+        @staticmethod
+        def GlobalAlloc(_flags, _size):
+            return 0
+
+    class FakeUser32:
+        @staticmethod
+        def EmptyClipboard():
+            emptied.append(True)
+            return 1
+
+    monkeypatch.setattr(windows_input, "kernel32", FailingKernel32())
+    monkeypatch.setattr(windows_input, "user32", FakeUser32())
+
+    assert windows_input.set_clipboard_text("new value") is False
+    assert emptied == []
+
+
+@pytest.mark.skipif(not sys.platform.startswith("win"), reason="Win32 clipboard contract")
+@pytest.mark.parametrize("failure_stage", ["open", "set"])
+def test_windows_clipboard_failures_release_only_untransferred_memory(
+    monkeypatch,
+    failure_stage: str,
+) -> None:
+    from utils import windows_input
+
+    calls: list[tuple[object, ...]] = []
+    handle = 0x1_0000_2200
+    owner = 0x1_0000_3300
+    allocation: ctypes.Array[ctypes.c_char] | None = None
+
+    class FakeKernel32:
+        def GlobalAlloc(self, _flags, size):
+            nonlocal allocation
+            allocation = ctypes.create_string_buffer(int(size))
+            calls.append(("alloc",))
+            return handle
+
+        def GlobalLock(self, supplied):
+            assert supplied == handle and allocation is not None
+            calls.append(("lock",))
+            return ctypes.addressof(allocation)
+
+        def GlobalUnlock(self, supplied):
+            assert supplied == handle
+            calls.append(("unlock",))
+            return 1
+
+        def GlobalFree(self, supplied):
+            calls.append(("free", supplied))
+            return 0
+
+    class FakeUser32:
+        def CreateWindowExW(self, *_args):
+            calls.append(("create",))
+            return owner
+
+        def OpenClipboard(self, supplied):
+            calls.append(("open", supplied))
+            return int(failure_stage != "open")
+
+        def EmptyClipboard(self):
+            calls.append(("empty",))
+            return 1
+
+        def SetClipboardData(self, _fmt, supplied):
+            calls.append(("set", supplied))
+            return 0 if failure_stage == "set" else supplied
+
+        def CloseClipboard(self):
+            calls.append(("close",))
+            return 1
+
+        def DestroyWindow(self, supplied):
+            calls.append(("destroy", supplied))
+            return 1
+
+    monkeypatch.setattr(windows_input, "kernel32", FakeKernel32())
+    monkeypatch.setattr(windows_input, "user32", FakeUser32())
+    monkeypatch.setattr(windows_input, "_CLIPBOARD_OPEN_ATTEMPTS", 1)
+
+    assert windows_input.set_clipboard_text("untransferred") is False
+    assert calls.count(("free", handle)) == 1
+    assert calls.count(("destroy", owner)) == 1
+    if failure_stage == "open":
+        assert not any(call[0] in {"empty", "set", "close"} for call in calls)
+    else:
+        assert calls.count(("empty",)) == 1
+        assert calls.count(("set", handle)) == 1
+        assert calls.count(("close",)) == 1
+
+
+def test_copy_to_clipboard_rejects_failed_readback(monkeypatch) -> None:
+    monkeypatch.setattr(system, "set_clipboard_text", lambda _text: True)
+    monkeypatch.setattr(system, "get_clipboard_text", lambda: "different text")
+
+    assert system.copy_to_clipboard("expected text") is False
+
+
+def test_tray_copy_action_only_queues_clipboard_work(monkeypatch) -> None:
+    queued: list[tuple[object, tuple[object, ...]]] = []
+    icon = object()
+    item = object()
+    monkeypatch.setattr(
+        system,
+        "enqueue_management_task",
+        lambda callback, *args, **_kwargs: queued.append((callback, args)),
+    )
+    monkeypatch.setattr(
+        system,
+        "copy_to_clipboard",
+        lambda _text: pytest.fail("tray thread must not touch the clipboard"),
+    )
+
+    system.request_copy_last_transcript_from_tray(icon, item)
+
+    assert queued == [(system.copy_last_transcript_from_tray, (icon, item))]
 
 
 def test_empty_transcript_never_replaces_last_recoverable_text(monkeypatch) -> None:
