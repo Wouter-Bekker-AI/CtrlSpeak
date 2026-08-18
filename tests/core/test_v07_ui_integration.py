@@ -1633,6 +1633,7 @@ def test_overlay_monitor_follows_foreground_window_before_cursor(monkeypatch) ->
         ctypes,
         "windll",
         SimpleNamespace(user32=FakeUser32()),
+        raising=False,
     )
 
     assert midnight_overlay.active_monitor_bounds(FakeRoot()) == (
