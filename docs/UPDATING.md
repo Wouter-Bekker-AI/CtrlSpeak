@@ -221,8 +221,11 @@ stable tag is published:
 4. For v0.7.3, deploy the mechanically version-synchronized gateway and verify
    authenticated health/capabilities report `0.7.3`, with unchanged correction
    inventory, telemetry flags, private listener, and a real restricted-language
-   route. The Ubuntu GPU worker requires no source/configuration change; record
-   its existing version and verify its worker role and API compatibility.
+   route. The Ubuntu GPU worker requires no configuration change for protocol
+   compatibility. If synchronizing its release identity and worker-side timing
+   telemetry, deploy the same maintained v0.7.3 service source while preserving
+   its CUDA model cache, virtual environment, token, data, unit, and drop-ins.
+   Production was synchronized this way on 2026-08-19.
 5. Verify GPU-worker-offline fast failover without weakening the 350 ms connect,
    500 ms probe, cache, or circuit-break limits. Roll back source and database
    together if schema or startup acceptance fails.
