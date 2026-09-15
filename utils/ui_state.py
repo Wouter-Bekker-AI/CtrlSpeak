@@ -546,6 +546,7 @@ class TranscriptionUiSession:
         self._degraded = False
         self._error_category: str | None = None
         self._final_elapsed_ms: float | None = None
+        self._cleanup_label = ""
 
     @property
     def phase(self) -> UiPhase:
@@ -570,6 +571,7 @@ class TranscriptionUiSession:
             self._degraded = False
             self._error_category = None
             self._final_elapsed_ms = None
+            self._cleanup_label = ""
 
     def begin_processing(self) -> None:
         with self._lock:
@@ -607,6 +609,7 @@ class TranscriptionUiSession:
             self._provider = provider_from_result_metadata(metadata, latency_ms=measured)
             self._attempts = normalize_attempts(metadata.get("attempts") if metadata else None)
             self._degraded = bool(metadata.get("degraded")) if metadata else False
+            self._cleanup_label = cleanup_result_label(metadata)
             self._error_category = None
 
     def fail(self, category: object = None, *, elapsed_ms: object | None = None) -> None:
@@ -681,6 +684,8 @@ class TranscriptionUiSession:
         if self._phase is UiPhase.SUCCESS:
             if self._provider:
                 route = self._provider.display_name
+                if self._cleanup_label:
+                    route += f" · {self._cleanup_label}"
                 if self._degraded:
                     return "Transcription ready", f"Completed via fallback · {route}"
                 return "Transcription ready", f"Completed with {route}"
@@ -698,3 +703,22 @@ def active_route_label(attempts: Iterable[ProviderAttempt]) -> str:
         if not names or names[-1] != attempt.display_name:
             names.append(attempt.display_name)
     return " → ".join(names) if names else "—"
+
+
+def cleanup_result_label(metadata: Mapping[str, Any] | None) -> str:
+    """Display only known outcomes, never server-provided free text."""
+    if not metadata or "client_cleanup_requested" not in metadata:
+        return ""
+    if metadata.get("client_cleanup_requested") is not True:
+        return "Cleanup off"
+    if metadata.get("client_cleanup_applied") is True:
+        return "S1 GPU cleanup applied"
+    info = metadata.get("normalization")
+    status = info.get("status") if isinstance(info, dict) else None
+    return {
+        "unchanged": "S1: no changes needed",
+        "timeout": "Cleanup timed out; transcript preserved",
+        "input_too_long": "Cleanup skipped: long transcript",
+        "non_english": "Cleanup skipped: English only",
+        "exact_override": "Confirmed correction preserved",
+    }.get(status if isinstance(status, str) else None, "Cleanup unavailable; transcript preserved")

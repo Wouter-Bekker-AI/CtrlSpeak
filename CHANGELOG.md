@@ -4,6 +4,16 @@ CtrlSpeak follows semantic versioning. Published binaries are immutable; a
 consumed release is corrected by a newer patch rather than by moving its tag or
 replacing its assets.
 
+## 0.7.4 — 2026-09-15
+
+- Add opt-in S1-mini by Superwhisper cleanup to the Ubuntu CUDA worker, with a
+  saved desktop checkbox, explicit `cleanup` API field and validated selection.
+- Remove gateway CPU cleanup and its delay for clients that do not use it.
+- Preserve ASR on cleanup failure: bounded input/output, hard total deadline,
+  no waiting queue and a cooldown. OpenAI/Tiny bypass cleanup entirely.
+- Reconcile correction-preview handling into versioned source; preserve raw and
+  ordinary corrected fields, exact overrides, identities and legacy clients.
+
 ## 0.7.3 — 2026-08-18
 
 ### Fixed

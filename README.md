@@ -1,4 +1,4 @@
-# CtrlSpeak v0.7.3
+# CtrlSpeak v0.7.4
 
 CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into
@@ -21,6 +21,25 @@ timings, and configurable peak-bounded feedback sounds.
 The legacy **Client + Server** and **Client Only** roles remain inside the
 embedded/local backend. Remote API mode is independent of those roles and does
 not start discovery, a local server, or a model download.
+
+## v0.7.4 optional GPU cleanup
+
+In backend settings, enable **Use S1 Mini cleanup when using the Ubuntu GPU**,
+save and restart. The preference survives an offline worker. A successful Ubuntu
+CUDA Whisper transcription can be cleaned by **S1-mini by Superwhisper** on that
+same GPU; the gateway applies known-word rules and the desktop inserts the
+cleaned variant. Default is off; API callers explicitly send `cleanup=true`.
+
+OpenAI and gateway Tiny never perform S1 cleanup. Turning cleanup off skips the
+work entirely. Failed, busy, non-English, oversized or timed-out cleanup keeps
+the successful ordinary corrected transcript. The gateway no longer runs CPU
+cleanup. S1 has a three-second total default deadline and a failure cooldown.
+The existing worker-offline fast failover remains unchanged.
+
+Hermes must request GPU-preferred routing and cleanup to benefit; it should
+consume validated `normalized_text` only when metadata confirms applied GPU
+cleanup, otherwise `text`. See [API](docs/API.md) and
+[release/deployment record](docs/V0.7.4_GPU_CLEANUP_RELEASE.md).
 
 ## v0.7 Midnight Signal interface
 

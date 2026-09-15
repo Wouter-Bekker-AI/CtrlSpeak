@@ -32,3 +32,4 @@ temp*.wav
 
 # Misc
 Thumbs.db
+.codex-temp/

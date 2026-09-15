@@ -339,6 +339,7 @@ class CorrectionStore:
         *,
         principal_id: str = "legacy",
         language: str | None = None,
+        update_usage: bool = True,
     ) -> tuple[str, list[str]]:
         corpus = f"{context or ''}\n{raw_text}".casefold()
         candidates = []
@@ -368,13 +369,19 @@ class CorrectionStore:
                 return str(rule["replacement_phrase"])
 
             corrected = pattern.sub(replace, raw_text)
-        if applied:
+        if applied and update_usage:
             with self._connection() as conn:
                 conn.executemany(
                     "UPDATE correction_rules SET use_count = use_count + 1, updated_at = ? WHERE id = ?",
                     [(_now(), rule_id) for rule_id in applied],
                 )
         return corrected, applied
+
+    def preview_apply(self, raw_text: str, context: str | None = None, *,
+                      principal_id: str = "legacy", language: str | None = None):
+        """Build the optional cleaned variant without double-counting usage."""
+        return self.apply(raw_text, context, principal_id=principal_id,
+                          language=language, update_usage=False)
 
     def apply_with_metadata(
         self,

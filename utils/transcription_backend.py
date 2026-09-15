@@ -54,6 +54,7 @@ class BackendConfig:
     feedback_capture_method: str
     allowed_output_languages: tuple[str, ...] = ()
     provider_strategy: str = "server-default"
+    gpu_cleanup_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -224,6 +225,7 @@ def get_backend_config(environ: Mapping[str, str] | None = None) -> BackendConfi
         feedback_capture_method,
         allowed_output_languages,
         provider_strategy,
+        saved.get("gpu_cleanup_enabled") is True,
     )
 
 
@@ -247,6 +249,7 @@ def save_backend_config(
     feedback_capture_method: str,
     allowed_output_languages: object | None = None,
     provider_strategy: str = "server-default",
+    gpu_cleanup_enabled: bool | None = None,
 ) -> BackendConfig:
     normalized_backend = _validated_backend_choice(backend, source="backend")
     normalized_capture = _normalized_choice(
@@ -262,6 +265,10 @@ def save_backend_config(
     normalized_url = normalize_api_url(api_url)
     with config_paths.settings_lock:
         current_languages = config_paths.settings.get("allowed_output_languages", [])
+        current_cleanup = config_paths.settings.get("gpu_cleanup_enabled", False)
+    cleanup = current_cleanup if gpu_cleanup_enabled is None else gpu_cleanup_enabled
+    if not isinstance(cleanup, bool):
+        raise ValueError("GPU cleanup must be true or false")
     normalized_languages = normalize_allowed_output_languages(
         current_languages if allowed_output_languages is None else allowed_output_languages,
         source="allowed output languages",
@@ -278,6 +285,7 @@ def save_backend_config(
             feedback_capture_method=normalized_capture,
             allowed_output_languages=list(normalized_languages),
             provider_strategy=normalized_strategy,
+            gpu_cleanup_enabled=cleanup,
         )
     if not config_paths.save_settings():
         with config_paths.settings_lock:
@@ -294,6 +302,7 @@ def save_backend_config(
         normalized_capture,
         normalized_languages,
         normalized_strategy,
+        cleanup,
     )
 
 
@@ -663,6 +672,8 @@ class ApiTranscriptionClient:
                     "files": {"audio": (path.name, audio_file, "audio/wav")},
                 }
                 request_data: dict[str, str] = {}
+                if self.config.gpu_cleanup_enabled:
+                    request_data["cleanup"] = "true"
                 if self.config.allowed_output_languages:
                     request_data.update({
                         "allowed_languages": ",".join(self.config.allowed_output_languages),
@@ -703,12 +714,31 @@ class ApiTranscriptionClient:
             raise ApiBackendError(
                 "Whisper API returned a language outside the configured output-language allowlist"
             )
+        selected_text = text
+        cleanup_applied = False
+        normalization = payload.get("normalization")
+        if (self.config.gpu_cleanup_enabled and isinstance(normalization, dict)
+                and normalization.get("requested") is True
+                and normalization.get("applied") is True
+                and normalization.get("status") == "applied"
+                and normalization.get("device") == "cuda"
+                and normalization.get("location") == "ubuntu-worker"
+                and normalization.get("model") == "S1-mini by Superwhisper"
+                and payload.get("provider_used") == "ubuntu-gpu-large-v3-turbo"
+                and response_language == "en"):
+            cleaned = payload.get("normalized_text")
+            if isinstance(cleaned, str) and cleaned.strip() and len(cleaned) <= 12_000:
+                selected_text = cleaned
+                cleanup_applied = True
+        result_metadata = dict(payload)
+        result_metadata["client_cleanup_requested"] = self.config.gpu_cleanup_enabled
+        result_metadata["client_cleanup_applied"] = cleanup_applied
         return TranscriptionResult(
-            text=text,
+            text=selected_text,
             transcription_id=transcription_id,
             raw_text=raw_text,
             corrected_text=text,
-            metadata=dict(payload),
+            metadata=result_metadata,
             feedback_target=FeedbackTarget(
                 backend="api",
                 api_url=self.config.api_url,

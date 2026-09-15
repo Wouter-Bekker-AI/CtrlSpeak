@@ -1,0 +1,20 @@
+[Unit]
+Description=CtrlSpeak S1-mini by Superwhisper CUDA cleanup
+After=network.target
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/docker run --rm --name ctrlspeak-s1-mini --gpus device=0 --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 --pids-limit 128 --memory 2g --cpus 2 --tmpfs /tmp:rw,noexec,nosuid,size=64m -p 127.0.0.1:8081:8081 -v %h/.config/CtrlSpeak/cuda/s1-mini-b10985:/runtime:ro -v %h/.config/CtrlSpeak/models/s1-mini:/model:ro ctrlspeak-s1-runtime:0.7.4 -m /model/s1-mini-q4_k_m.gguf --alias s1-mini --host 0.0.0.0 --port 8081 --device CUDA0 --n-gpu-layers 99 --ctx-size 2048 --parallel 1 --threads 2 --jinja --temp 0 --timeout 5 --no-webui
+ExecStop=/usr/bin/docker stop --time 5 ctrlspeak-s1-mini
+ExecStopPost=-/usr/bin/docker rm -f ctrlspeak-s1-mini
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+KillMode=control-group
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

@@ -1,4 +1,4 @@
-# CtrlSpeak API v0.7.3
+# CtrlSpeak API v0.7.4
 
 The maintained implementation is in `server/whisper_transcription`. The v0.7
 contract preserves the three deployment roles introduced in v0.6 and adds safe,
@@ -23,6 +23,60 @@ instance in `gateway` mode. Its default `ubuntu-gpu-preferred` strategy orders
 last identifier is retained for API compatibility, but that CPU fallback runs
 on `CtrlSpeak`, not Nova. The Ubuntu GPU machine is a `worker`; Nova is only
 the WireGuard transport hub.
+
+## Optional GPU cleanup (0.7.4)
+
+Both transcription endpoints accept multipart `cleanup` (boolean, default
+`false`). Only `ubuntu-gpu-large-v3-turbo` can perform cleanup, on the Ubuntu
+CUDA worker after Whisper in the same request. OpenAI, gateway Tiny and
+standalone inference never invoke S1. The gateway never runs a normalizer.
+
+Gateway capabilities include `text_normalization.mode=optional-worker-gpu`,
+`request_field=cleanup`, `default=false`, `eligible_providers`, `device=cuda`,
+`location=ubuntu-worker`, `language=en`, and `gateway_cpu_cleanup=false`. Worker
+capabilities state whether its normalizer is configured; that does not promise
+cleanup availability for every request.
+
+Response additions (illustrative timing):
+
+```json
+{
+  "raw_text": "hello acme",
+  "text": "hello ACME",
+  "normalized_text": "Hello ACME.",
+  "normalized_applied_correction_rule_ids": ["rule-id"],
+  "normalization": {
+    "requested": true, "enabled": true, "applied": true, "status": "applied",
+    "model": "S1-mini by Superwhisper", "language": "en",
+    "location": "ubuntu-worker", "device": "cuda", "fail_open": true,
+    "duration_ms": 180.0
+  }
+}
+```
+
+`enabled` records request opt-in. `applied` records the actual outcome.
+`normalized_text` is null when cleanup was not applied; `text` remains the
+ordinary deterministic-correction variant. Rules also apply to cleaned text
+without double-counting usage. Exact user-confirmed overrides take precedence.
+
+Select normalized text only when the caller requested cleanup, provider is
+`ubuntu-gpu-large-v3-turbo`, metadata has `requested=true`, `applied=true`,
+`status=applied`, `device=cuda`, `location=ubuntu-worker`, the expected model
+attribution, and non-empty normalized text. Otherwise use `text`. Keep
+`raw_text` and the transcription ID for corrections/feedback; never concatenate
+both variants into an agent instruction.
+
+Statuses are `disabled`, `applied`, `unchanged`, `unavailable`, `non_english`,
+`empty_input`, `input_too_long`, `timeout`, `runtime_error`, `unsafe_output`,
+and gateway `exact_override`. Unknown/malformed metadata falls back to `text`.
+Cleanup failures never retry transcription or turn successful ASR into an error.
+Default bounds: three seconds total, 4,000 input characters, bounded output,
+no waiting queue and a 15-second failure cooldown. Timings contain no transcript.
+
+Hermes/Nova: send `strategy=ubuntu-gpu-preferred` and `cleanup=true`; do not also
+send `provider`. Supply the caller's OpenAI key so fallback works when Ubuntu
+is offline. Display two transcript echoes only when cleanup actually changed
+the selected text; otherwise display one.
 
 ## Authentication and identity
 
@@ -60,7 +114,7 @@ loaded model/runtime:
 ```json
 {
   "status": "ready",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "role": "worker",
   "model": "large-v3-turbo",
   "device": "cuda",
@@ -73,7 +127,7 @@ providers permitted for the caller:
 
 ```json
 {
-  "version": "0.7.3",
+  "version": "0.7.4",
   "role": "gateway",
   "accepts_client_transcriptions": true,
   "applies_corrections": true,
@@ -345,7 +399,7 @@ binds feedback to the original transcription ID, URL, and client bearer token.
   "rule_ids": [],
   "confirmed_text": "the user-confirmed final text",
   "capture_method": "active_field_on_enter",
-  "client_metadata": {"client": "CtrlSpeak", "version": "0.7.3"}
+  "client_metadata": {"client": "CtrlSpeak", "version": "0.7.4"}
 }
 ```
 

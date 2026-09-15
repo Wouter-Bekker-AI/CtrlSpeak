@@ -19,6 +19,10 @@ from pydantic import BaseModel, Field
 from app.auth import Authenticator, Principal
 from app.corrections import CorrectionStore
 from app.languages import choose_allowed_language, normalize_language_policy
+from app.normalization import (
+    MODEL_ATTRIBUTION, S1MiniNormalizer, build_worker_normalizer,
+    metadata as cleanup_metadata, safe_worker_result,
+)
 from app.providers import (
     LocalWhisperProvider,
     OpenAITranscriptionProvider,
@@ -29,7 +33,7 @@ from app.providers import (
 )
 
 
-SERVICE_VERSION = "0.7.3"
+SERVICE_VERSION = "0.7.4"
 LOGGER = logging.getLogger("ctrlspeak_whisper_transcription")
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = Path(os.environ.get("WHISPER_DATA_DIR", ROOT / "data"))
@@ -368,12 +372,17 @@ def create_app(
     worker_token: str | None = None,
     service_role: str | None = None,
     environ: Mapping[str, str] | None = None,
+    normalizer: S1MiniNormalizer | None = None,
 ) -> FastAPI:
     environ = os.environ if environ is None else environ
     role = _service_role(service_role or environ.get("CTRLSPEAK_SERVICE_ROLE"))
     data_dir = Path(environ.get("WHISPER_DATA_DIR", str(DEFAULT_DATA_DIR)))
     store = None if role == "worker" else (store or CorrectionStore(data_dir / "corrections.sqlite3"))
     backend = backend or _build_default_backend(role, data_dir)
+    # Even stale gateway CPU-normalization configuration cannot enable cleanup here.
+    normalizer = (normalizer or build_worker_normalizer(
+        environ, role=role, device=getattr(backend, "device", "unknown"),
+    )) if role == "worker" and getattr(backend, "device", "unknown") == "cuda" else None
     temp_dir = temp_dir or data_dir / "uploads"
     clients_json = clients_json if clients_json is not None else environ.get("CTRLSPEAK_CLIENTS_JSON")
     worker_token = worker_token if worker_token is not None else environ.get("CTRLSPEAK_WORKER_TOKEN")
@@ -404,13 +413,15 @@ def create_app(
             raise
         finally:
             app.state.ready = False
+            if normalizer is not None:
+                await normalizer.close()
 
     app = FastAPI(
         title="CtrlSpeak Transcription API",
         version=SERVICE_VERSION,
         description=(
             "Role-aware CtrlSpeak transcription service. Gateways route requests and apply "
-            "identity-scoped corrections; workers return raw model output only."
+            "identity-scoped corrections; workers return raw output and optional GPU cleanup."
         ),
         lifespan=lifespan,
     )
@@ -490,6 +501,11 @@ def create_app(
                 "role": role,
                 "accepts_client_transcriptions": False,
                 "applies_corrections": False,
+                "text_normalization": {
+                    "enabled": normalizer is not None, "model": MODEL_ATTRIBUTION,
+                    "request_field": "cleanup", "default": False, "device": "cuda",
+                    "location": "ubuntu-worker", "language": "en", "fail_open": True,
+                },
                 "telemetry": {
                     "inference_duration_ms": True,
                 },
@@ -514,6 +530,13 @@ def create_app(
             "accepts_client_transcriptions": True,
             "applies_corrections": True,
             "openai_key_storage": "request_only",
+            "text_normalization": {
+                "mode": "optional-worker-gpu", "model": MODEL_ATTRIBUTION,
+                "request_field": "cleanup", "default": False, "language": "en",
+                "eligible_providers": ["ubuntu-gpu-large-v3-turbo"],
+                "location": "ubuntu-worker", "device": "cuda", "fail_open": True,
+                "gateway_cpu_cleanup": False,
+            },
             "telemetry": {
                 "attempt_duration_ms": True,
                 "routing_duration_ms": True,
@@ -552,6 +575,7 @@ def create_app(
             initial_prompt: str | None = Form(None),
             keywords: str | None = Form(None),
             word_timestamps: bool = Form(False),
+            cleanup: bool = Form(False),
         ) -> dict[str, Any]:
             if not app.state.ready:
                 raise HTTPException(503, "worker model is not ready")
@@ -595,6 +619,20 @@ def create_app(
             result["provider"] = "ubuntu-gpu-large-v3-turbo"
             result["inference_duration_ms"] = inference_duration_ms
             result["corrected"] = False
+            result["normalized_text"] = None
+            result["normalization"] = cleanup_metadata(cleanup, "unavailable" if cleanup else "disabled")
+            if cleanup and normalizer is not None:
+                try:
+                    cleaned = await normalizer.normalize(
+                        str(result.get("raw_text") or ""),
+                        language=str(result.get("language") or "").casefold(),
+                    )
+                    result["normalized_text"] = cleaned.text
+                    result["normalization"] = cleaned.info
+                except Exception:
+                    # Keep ASR on unexpected cleanup errors, without sensitive diagnostics.
+                    LOGGER.warning("worker cleanup failed; preserving transcription")
+                    result["normalization"] = cleanup_metadata(True, "runtime_error")
             return result
 
     else:
@@ -694,6 +732,7 @@ def create_app(
             word_timestamps: bool = Form(False),
             strategy: str | None = Form(None),
             provider: str | None = Form(None),
+            cleanup: bool = Form(False),
         ) -> dict[str, Any]:
             if not app.state.ready:
                 raise HTTPException(503, "service is not ready")
@@ -715,6 +754,7 @@ def create_app(
                 keywords=keywords,
                 word_timestamps=word_timestamps,
                 openai_api_key=request.headers.get("x-ctrlspeak-openai-key") or None,
+                cleanup=cleanup,
             )
             temp_path = await receive_audio(audio)
             try:
@@ -760,6 +800,18 @@ def create_app(
                 principal_id=principal.id,
                 language=result_language or rule_language,
             )
+            normalized_text, normalization = safe_worker_result(
+                result, requested=cleanup, provider=routed.provider_id, language=result_language,
+            )
+            normalized_ids = []
+            if exact_override_id is not None:
+                normalized_text = None
+                normalization = cleanup_metadata(cleanup, "exact_override" if cleanup else "disabled")
+            elif normalized_text is not None:
+                normalized_text, normalized_ids = store.preview_apply(
+                    normalized_text, context, principal_id=principal.id,
+                    language=result_language or rule_language,
+                )
             transcription_id = store.create_transcription(
                 raw_text=raw_text,
                 corrected_text=corrected_text,
@@ -783,12 +835,16 @@ def create_app(
                     "degraded": routed.degraded,
                     "routing_duration_ms": routed.routing_duration_ms,
                     "usage": result.get("usage"),
+                    "normalization": normalization,
                 },
             )
             return {
                 "id": transcription_id,
                 "raw_text": raw_text,
                 "text": corrected_text,
+                "normalized_text": normalized_text,
+                "normalization": normalization,
+                "normalized_applied_correction_rule_ids": normalized_ids,
                 "language": result_language,
                 "detected_language": result.get("detected_language"),
                 "detected_languages": detected_languages,

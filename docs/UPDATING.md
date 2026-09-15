@@ -1,4 +1,4 @@
-# CtrlSpeak v0.7.3 update and release guide
+# CtrlSpeak v0.7.4 update and release guide
 
 ## End-user update flow
 
@@ -106,6 +106,13 @@ CtrlSpeak microphone artwork to recording and processing overlays, and repairs
 versions are synchronized with the desktop release. See
 `docs/V0.7.3_HOTFIX_RELEASE.md` for its acceptance gates.
 
+v0.7.4 adds optional Ubuntu-GPU S1 cleanup, a saved desktop checkbox and truthful
+cleaned-text selection. Deploy the worker and its CUDA S1 runtime first, then
+the gateway, then publish the signed desktop release. Preserve source, SQLite,
+configuration and model rollback copies. Disable gateway CPU S1 only after
+replacement verification. See `docs/V0.7.4_GPU_CLEANUP_RELEASE.md`; historical
+version-specific paragraphs above retain their original meaning.
+
 ## Trust and safety model
 
 The standard client hard-codes:
@@ -165,7 +172,7 @@ For each release:
    v0.7.3, synchronize the gateway's release identity and verify the unchanged
    worker protocol. The desktop updater does not deploy servers.
 5. Commit and push the reviewed `v0.7` branch.
-6. Create the immutable annotated tag `v0.7.3` at that commit and push it.
+6. Create the immutable annotated tag `v0.7.4` at that commit and push it.
 7. Observe `.github/workflows/release.yml` through all three stages:
 
    - clean Windows/Linux tests and native one-file builds;
@@ -175,7 +182,7 @@ For each release:
 8. Independently download the five release assets and run:
 
    ```text
-   python scripts/release.py verify --directory <asset-directory> --tag v0.7.3
+   python scripts/release.py verify --directory <asset-directory> --tag v0.7.4
    ```
 
 9. Test the update from the immediately previous stable version on both

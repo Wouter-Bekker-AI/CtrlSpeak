@@ -1500,7 +1500,7 @@ def _show_management_page(icon: pystray.Icon, page_name: str) -> None:
     if active is None or not active.is_open():
         return
     notebook = getattr(active, "ms_notebook", None)
-    pages = getattr(active, "ms_pages", {})
+    pages = getattr(active, "ms_page_tabs", {})
     page = pages.get(page_name) if isinstance(pages, dict) else None
     if notebook is not None and page is not None:
         notebook.select(page)
@@ -2455,6 +2455,7 @@ class _LegacyManagementWindow:
         self.api_token_var = tk.StringVar(value=str(saved_token) if saved_token else "")
         self.feedback_capture_var = tk.StringVar(value=active_backend.feedback_capture_method)
         self.provider_strategy_var = tk.StringVar(value=active_backend.provider_strategy)
+        self.gpu_cleanup_var = tk.BooleanVar(value=active_backend.gpu_cleanup_enabled)
         self.openai_api_key_var = tk.StringVar(value=get_session_openai_api_key() or "")
         self._secure_key_storage_available = secure_storage_available()
         self.remember_openai_key_var = tk.BooleanVar(
@@ -2553,6 +2554,16 @@ class _LegacyManagementWindow:
             command=self._refresh_gateway_capabilities,
         )
         self.capabilities_button.pack(side=tk.LEFT, padx=(12, 0))
+
+        ttk.Checkbutton(
+            backend_card, text="Use S1 Mini cleanup when using the Ubuntu GPU",
+            variable=self.gpu_cleanup_var,
+        ).pack(anchor=tk.W, pady=(8, 4))
+        ttk.Label(
+            backend_card, style="Caption.TLabel", wraplength=520,
+            text="English GPU transcripts only. OpenAI, Tiny and unavailable cleanup return "
+                 "ordinary corrected text. Off skips cleanup entirely. Save and restart to apply.",
+        ).pack(anchor=tk.W, pady=(0, 8))
 
         openai_row = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
         openai_row.pack(fill=tk.X, pady=6)
@@ -3355,6 +3366,7 @@ class _LegacyManagementWindow:
                 feedback_capture_method=capture_method,
                 allowed_output_languages=allowed_output_languages,
                 provider_strategy=provider_strategy,
+                gpu_cleanup_enabled=self.gpu_cleanup_var.get(),
             )
         except ValueError as exc:
             messagebox.showerror("Invalid backend settings", str(exc), parent=self.window)

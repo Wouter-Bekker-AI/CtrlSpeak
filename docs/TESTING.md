@@ -1,8 +1,23 @@
-# CtrlSpeak v0.7.3 Midnight Signal testing playbook
+# CtrlSpeak v0.7.4 Midnight Signal testing playbook
 
 Run commands from the v0.7 repository root in a project-compatible Python
 environment. The required fast suite is GUI-free and performs no model
 download, desktop installation, service operation, or firewall change.
+
+## 0.7.4 cleanup acceptance
+
+Run `tests/core/test_gpu_cleanup.py` and service `tests/test_gpu_cleanup.py`,
+plus the complete core and Linux service suites. On Windows, use a fresh
+project-local `--basetemp` if the legacy OS pytest directory is inaccessible.
+
+Cover opt-in/default-off, preference persistence, forwarding, worker auth and
+no OpenAI-key forwarding, corrections, strict metadata, invalid/truncated
+output, timeout/cooldown, queue bypass and preservation of successful ASR.
+Linux shell-runtime tests must run on Linux. Use actual CUDA inference for
+GPU cleanup on/off, OpenAI/Tiny bypass, worker-offline fallback, and S1 failure.
+Verify the correction inventory, actual offload, saved checkbox, installed
+signed update and absence of gateway CPU S1. Retain the native audio,
+clipboard and dismissal regression obligations below.
 
 ## Required headless checks
 

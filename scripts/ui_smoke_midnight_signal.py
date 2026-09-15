@@ -46,7 +46,7 @@ def main() -> int:
     gui.ensure_management_ui_thread()
     gui._show_management_window(_SmokeIcon())
     if gui.management_window is not None:
-        pages = getattr(gui.management_window, "ms_pages", {})
+        pages = getattr(gui.management_window, "ms_page_tabs", {})
         page = pages.get(args.page)
         if page is not None:
             gui.management_window.ms_notebook.select(page)

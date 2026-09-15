@@ -1,0 +1,7 @@
+# Host Ubuntu 22.04 remains unchanged; the pinned upstream llama.cpp binaries
+# require newer glibc/libstdc++. Runtime and model are mounted read-only.
+FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libcurl4t64 libssl3t64 && rm -rf /var/lib/apt/lists/*
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV LD_LIBRARY_PATH=/runtime/llama-b10985:/runtime/cudart-llama-b10985-bin-ubuntu-cuda-12.8-x64
+ENTRYPOINT ["/runtime/llama-b10985/llama-server"]

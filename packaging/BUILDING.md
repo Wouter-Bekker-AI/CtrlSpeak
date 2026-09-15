@@ -148,7 +148,7 @@ actionable message if the system runtime is not usable.
 
 On Windows the same v0.7 specification produces `CtrlSpeak.exe` with
 `console=False`; the executable does not have a console window. Windows version
-resources identify product/file version 0.7.3. The historical v0.2-v0.6
+resources identify product/file version 0.7.4. The historical v0.2-v0.6
 specs remain in the repository for reproducibility but are no longer selected
 by the standard build helper. The Watcher option remains Windows-only and does
 not use the standard CtrlSpeak updater identity.

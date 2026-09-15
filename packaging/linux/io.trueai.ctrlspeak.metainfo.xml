@@ -22,6 +22,11 @@
     <category>Accessibility</category>
   </categories>
   <releases>
+    <release version="0.7.4" date="2026-09-15">
+      <description>
+        <p>Optional S1-mini cleanup on the Ubuntu GPU, a saved cleanup preference, truthful fallback status, and no CPU cleanup delay on the gateway.</p>
+      </description>
+    </release>
     <release version="0.7.3" date="2026-08-18">
       <description>
         <p>Redesigns correction submission in Midnight Signal, restores the CtrlSpeak brand mark in recording and processing overlays, and repairs reliable Copy last transcript clipboard ownership on 64-bit Windows.</p>

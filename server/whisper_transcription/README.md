@@ -1,4 +1,4 @@
-# CtrlSpeak transcription service v0.7.3
+# CtrlSpeak transcription service v0.7.4
 
 This directory contains both CtrlSpeak server roles:
 
@@ -16,6 +16,34 @@ v0.7.3 synchronizes the service identity with the desktop correction-dialog,
 overlay-brand, and Windows clipboard hotfix. The server roles, API schema,
 provider cascade, authentication, correction store, language policy, and
 deployment configuration are unchanged.
+
+## 0.7.4 worker-side S1 cleanup
+
+Only a CUDA worker can enable S1. Requests must send `cleanup=true`; omission
+and false skip it. The gateway validates the optional cleaned result and applies
+its correction rules. OpenAI/Tiny return no cleaned variant, and stale gateway
+CPU-normalization settings cannot enable cleanup there.
+
+Stage verified assets with repository-root `scripts/stage_s1_gpu.py` on Ubuntu.
+Build `docker build -f Dockerfile.s1-runtime -t ctrlspeak-s1-runtime:0.7.4 .`
+with the host's existing NVIDIA Container Toolkit, then install the user unit
+`systemd/ctrlspeak-s1-mini.service`. The pinned Ubuntu 24.04 container supplies
+the upstream binary's required glibc/libstdc++ without changing Ubuntu 22.04
+host libraries. Model/runtime mounts are read-only; only host loopback 8081 is
+published. Adjust the unit's numeric user/group if not 1000. Model/runtime stay
+outside source deployments. Verify `--list-devices` reports the intended GPU.
+Worker-only environment additions:
+
+```ini
+Environment=CTRLSPEAK_NORMALIZATION_ENABLED=true
+Environment=CTRLSPEAK_NORMALIZATION_URL=http://127.0.0.1:8081/v1/chat/completions
+Environment=CTRLSPEAK_NORMALIZATION_TIMEOUT_SECONDS=3
+```
+
+Verify actual CUDA layer offload before enabling cleanup. Keep S1 warm; its
+failure must not stop Whisper. After verifying replacement, disable the old
+gateway S1 CPU service and its health timer; retain source/configuration/model
+rollback copies. See the repository API and 0.7.4 release record for acceptance.
 
 ## Install profiles
 

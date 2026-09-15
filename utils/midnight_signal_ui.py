@@ -560,6 +560,15 @@ class MidnightSignalManagementMixin:
         self.ms_strategy_combo = ttk.Combobox(top, textvariable=self.ms_strategy_display_var, values=tuple(STRATEGY_IDS), state="readonly", style="MS.TCombobox", width=24)
         self.ms_strategy_combo.grid(row=2, column=1, sticky="ew", padx=(0, 12))
         ttk.Button(top, text="Save preferences", style="MS.Primary.TButton", command=self._save_backend_midnight).grid(row=2, column=2, sticky="ew")
+        ttk.Checkbutton(
+            top, text="Use S1 Mini cleanup when using the Ubuntu GPU",
+            variable=self.gpu_cleanup_var, style="MS.TCheckbutton",
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(18, 4))
+        _label(
+            top, "English GPU transcripts only. Off skips cleanup; OpenAI, Tiny or unavailable "
+                 "cleanup return ordinary corrected text. Save and restart to apply.",
+            muted=True, wraplength=810, justify=tk.LEFT,
+        ).grid(row=4, column=0, columnspan=3, sticky="w")
         top.columnconfigure(0, weight=1)
         top.columnconfigure(1, weight=1)
 
@@ -592,7 +601,7 @@ class MidnightSignalManagementMixin:
         _label(behaviour, "Automatic edit feedback", muted=True).pack(anchor=tk.W, pady=(18, 5))
         ttk.Combobox(behaviour, textvariable=self.feedback_capture_var, values=("active_field_on_enter", "disabled"), state="readonly", style="MS.TCombobox").pack(fill=tk.X)
         _label(behaviour, "After insertion, bare Enter can submit confirmed edits without retaining transcript history on the desktop.", muted=True, wraplength=410, justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 16))
-        ttk.Button(behaviour, text="Open corrections", style="MS.Primary.TButton", command=lambda: self.ms_notebook.select(self.ms_pages["Corrections"])).pack(anchor=tk.W)
+        ttk.Button(behaviour, text="Open corrections", style="MS.Primary.TButton", command=lambda: self.ms_notebook.select(self.ms_page_tabs["Corrections"])).pack(anchor=tk.W)
         self.ms_backend_status_var = tk.StringVar(value=self.backend_status_var.get())
         ttk.Label(behaviour, textvariable=self.ms_backend_status_var, style="MS.CardMuted.TLabel", wraplength=410, justify=tk.LEFT).pack(anchor=tk.W, pady=(18, 0))
 
@@ -681,7 +690,7 @@ class MidnightSignalManagementMixin:
         correction_header = ttk.Frame(corrections, style="MS.Card.TFrame")
         correction_header.pack(fill=tk.X)
         ttk.Label(correction_header, text="Corrections", style="MS.Section.TLabel").pack(side=tk.LEFT)
-        ttk.Button(correction_header, text="＋ Add", style="MS.Compact.TButton", command=lambda: self.ms_notebook.select(self.ms_pages["Corrections"])).pack(side=tk.RIGHT)
+        ttk.Button(correction_header, text="＋ Add", style="MS.Compact.TButton", command=lambda: self.ms_notebook.select(self.ms_page_tabs["Corrections"])).pack(side=tk.RIGHT)
         self.ms_route_correction_preview_var = tk.StringVar(value="Loading known-word rules…")
         ttk.Label(corrections, textvariable=self.ms_route_correction_preview_var, style="MS.CardMuted.TLabel", wraplength=330, justify=tk.LEFT).pack(anchor=tk.W, pady=(7, 0))
 
@@ -1356,7 +1365,7 @@ class MidnightSignalManagementMixin:
             self.ms_last_provider_var.set(f"{provider.display_name} · {provider.latency_label}")
             route = active_route_label(snapshot.attempts)
             self.ms_last_route_var.set(f"{route}{' · fallback used' if snapshot.degraded else ''}")
-            self.ms_routing_result_var.set(f"{provider.display_name} · {provider.latency_label}")
+            self.ms_routing_result_var.set(f"{snapshot.detail}\n{provider.latency_label}")
             attempt_text = "  ·  ".join(f"{attempt.display_name}: {attempt.duration_label} ({attempt.outcome.value})" for attempt in snapshot.attempts)
             self.ms_attempts_var.set(attempt_text or "No per-provider attempts were reported.")
             for attempt in snapshot.attempts:

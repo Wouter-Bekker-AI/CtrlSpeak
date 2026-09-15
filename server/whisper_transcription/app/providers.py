@@ -72,6 +72,7 @@ class ProviderContext:
     keywords: tuple[str, ...]
     word_timestamps: bool
     openai_api_key: str | None
+    cleanup: bool = False
 
 
 class Provider(Protocol):
@@ -316,6 +317,7 @@ class RemoteWorkerProvider:
             "allowed_languages": ",".join(context.allowed_languages),
             "word_timestamps": str(context.word_timestamps).lower(),
             "keywords": json.dumps(context.keywords),
+            "cleanup": str(context.cleanup).lower(),
         }
         if context.initial_prompt:
             data["initial_prompt"] = context.initial_prompt

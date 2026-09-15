@@ -1,4 +1,4 @@
-# CtrlSpeak v0.7.3 Midnight Signal user flow
+# CtrlSpeak v0.7.4 Midnight Signal user flow
 
 ## 1. Launch and platform readiness
 
@@ -81,6 +81,14 @@ accepts detection only inside that ordered allowlist and otherwise forces its
 first entry. A model-reported language outside the policy is refused.
 
 ### API result
+
+The Transcription page has a persistent **Use S1 Mini cleanup when using the
+Ubuntu GPU** checkbox. Save and restart applies this preference. When enabled,
+requests opt into the Ubuntu CUDA worker's optional English S1-mini pass. Only
+a validated, actually applied GPU cleanup is selected for insertion; otherwise
+the ordinary corrected transcription is used. OpenAI and gateway-tiny never
+receive S1 cleanup. The completion status says whether cleanup was applied,
+off, unchanged, unavailable, or skipped after a bounded failure.
 
 CtrlSpeak uploads multipart WAV audio to `<base-url>/v1/transcribe`. The result
 retains `id`, `raw_text`, corrected `text`, and all response metadata. HTTP,
