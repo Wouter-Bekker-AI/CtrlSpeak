@@ -237,11 +237,16 @@ stable tag is published:
    500 ms probe, cache, or circuit-break limits. Roll back source and database
    together if schema or startup acceptance fails.
 
-The Hermes `telegrampersonal` command adapter requires no update for v0.7 when
-the existing `/v1/transcribe` contract and authentication remain compatible.
+The Hermes `telegrampersonal` command adapter required no update for v0.7.0–0.7.3
+because the existing `/v1/transcribe` contract and authentication remained compatible.
 Do not overwrite its host-specific adapter with a generic repository copy: the
 deployed Nova adapter forwards its request-scoped provider and OpenAI credential
 without persisting either at the gateway.
+
+For 0.7.4 it remains compatible without changes, but must explicitly request
+cleanup and use the GPU-preferred cascade to receive the new cleaned variant.
+See `docs/NOVA_CTRLSPEAK_0.7.4_HANDOFF.md`; the old forced-OpenAI adapter will
+receive ordinary corrected text with no S1 cleanup.
 
 For a package smoke test, use a writable temporary output path:
 
