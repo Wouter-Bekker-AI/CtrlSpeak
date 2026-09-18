@@ -146,7 +146,7 @@ loaded model/runtime:
 ```json
 {
   "status": "ready",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "role": "worker",
   "model": "large-v3-turbo",
   "device": "cuda",
@@ -159,7 +159,7 @@ providers permitted for the caller:
 
 ```json
 {
-  "version": "0.7.4",
+  "version": "0.7.5",
   "role": "gateway",
   "accepts_client_transcriptions": true,
   "applies_corrections": true,
@@ -431,7 +431,7 @@ binds feedback to the original transcription ID, URL, and client bearer token.
   "rule_ids": [],
   "confirmed_text": "the user-confirmed final text",
   "capture_method": "active_field_on_enter",
-  "client_metadata": {"client": "CtrlSpeak", "version": "0.7.4"}
+  "client_metadata": {"client": "CtrlSpeak", "version": "0.7.5"}
 }
 ```
 

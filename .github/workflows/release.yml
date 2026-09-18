@@ -221,7 +221,9 @@ jobs:
           from pathlib import Path
           os.umask(0o077)
           root = Path.home()/'.ssh'; root.mkdir(exist_ok=True)
-          (root/'ctrlspeak-deploy').write_text(os.environ['CI_SSH_KEY'])
+          # gh secret set trims stdin's final LF; OpenSSH requires it. Also
+          # normalize credentials uploaded from a Windows administration host.
+          (root/'ctrlspeak-deploy').write_text(os.environ['CI_SSH_KEY'].replace('\r\n', '\n').rstrip()+'\n')
           (root/'known_hosts').write_text(os.environ['CI_KNOWN_HOSTS'])
           Path(os.environ['RUNNER_TEMP']+'/ci.conf').write_text(os.environ['CI_WIREGUARD'])
           PY
