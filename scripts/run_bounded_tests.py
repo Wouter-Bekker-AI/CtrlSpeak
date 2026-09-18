@@ -9,6 +9,9 @@ import uuid
 
 
 def main():
+    def interrupted(_signum, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser()
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--cwd", default=".")
@@ -25,6 +28,8 @@ def main():
     except subprocess.TimeoutExpired:
         print("Test deadline reached; terminating and reaping this test process tree.", flush=True)
         return 124
+    except KeyboardInterrupt:
+        return 130
     finally:
         if process.poll() is None:
             if os.name == "nt":

@@ -38,6 +38,9 @@ def transaction(call):
 
 
 def main():
+    def interrupted(_signum, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser()
     parser.add_argument('--directory', default='release')
     parser.add_argument('--desktop-only', action='store_true')

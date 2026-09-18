@@ -69,3 +69,46 @@ def test_atomic_replacement(tmp_path):
     atomic(target, b'new')
     assert target.read_bytes() == b'new'
     assert not list(tmp_path.glob('.selector*'))
+
+
+def test_helper_selector_is_atomic_repeatable_and_recoverable(tmp_path, monkeypatch):
+    request, public = signed_request()
+    selector = tmp_path / 'hermes-stt-api'
+    selector.write_bytes(b'original external wrapper')
+    config = {'role': 'helper', 'releases': str(tmp_path / 'releases'),
+              'state': str(tmp_path / 'state'), 'selector': str(selector)}
+    host = Host(config, verify_request(request, public))
+    monkeypatch.setattr(host, 'verify', lambda: {'verified': True})
+    host.record('staged')
+    assert host.activate()['verified']
+    assert host.revision in selector.read_text()
+    before = (host.transaction / 'selector-before.json').read_bytes()
+    assert host.activate()['verified']  # Does not overwrite original preimage.
+    assert (host.transaction / 'selector-before.json').read_bytes() == before
+    host.rollback()
+    assert selector.read_bytes() == b'original external wrapper'
+    host.rollback()
+    assert selector.read_bytes() == b'original external wrapper'
+
+
+def test_canary_failure_rolls_back_all_roles():
+    calls = []
+    def call(role, action):
+        calls.append((role, action))
+        if action == 'canary':
+            raise RuntimeError('provider failed')
+    with pytest.raises(RuntimeError):
+        transaction(call)
+    assert calls[-3:] == [(r, 'rollback') for r in ('helper', 'gateway', 'worker')]
+
+
+def test_rollback_failure_is_visible_and_other_hosts_still_recover(capsys):
+    calls = []
+    def call(role, action):
+        calls.append((role, action))
+        if action == 'canary' or (role == 'helper' and action == 'rollback'):
+            raise RuntimeError('offline')
+    with pytest.raises(RuntimeError):
+        transaction(call)
+    assert calls[-1] == ('worker', 'rollback')
+    assert 'ROLLBACK REQUIRES ATTENTION: helper' in capsys.readouterr().err

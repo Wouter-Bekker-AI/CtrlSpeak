@@ -263,6 +263,10 @@ class Host:
 
 def main():
     import fcntl
+    def interrupted(_signum, _frame):
+        raise InterruptedError('deployment interrupted; reconcile receipt')
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGHUP, interrupted)
     os.umask(0o077)
     config = json.loads(Path(sys.argv[1]).read_text())
     state = Path(config['state']); state.mkdir(parents=True, exist_ok=True)
