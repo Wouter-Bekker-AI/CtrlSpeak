@@ -4,6 +4,24 @@ CtrlSpeak follows semantic versioning. Published binaries are immutable; a
 consumed release is corrected by a newer patch rather than by moving its tag or
 replacing its assets.
 
+## 0.7.6 — 2026-09-19
+
+- Separate S1 cleanup from desktop formatting: optional paragraph checkbox,
+  visible only with cleanup enabled, safe single-line default and immediate
+  saved formatting policy at injection. No API/Telegram formatting change.
+- Block command control characters, normalize whitespace, prevent trailing
+  submit characters, and encode non-BMP Windows input as proper UTF-16 pairs.
+- Retain S1 and final normalized text in gateway audit records; add a bounded,
+  escaped private desktop audit of selected and insertion text and outcomes.
+- Coordinate gateway, Ubuntu worker/desktop and external Nova helper through
+  the signed release pipeline; Windows clients update through the GUI.
+
+## 0.7.5 — 2026-09-18
+
+- Add lossless FLAC transport, compressed pass-through and bounded decoding.
+- Add signed, staged fleet deployment with rollback and live canaries before
+  publishing the Windows/Linux update. Keep Hermes independent of its helper.
+
 ## 0.7.4 — 2026-09-15
 
 - Add opt-in S1-mini by Superwhisper cleanup to the Ubuntu CUDA worker, with a

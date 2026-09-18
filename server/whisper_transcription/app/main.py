@@ -34,7 +34,7 @@ from app.providers import (
 )
 
 
-SERVICE_VERSION = "0.7.5"
+SERVICE_VERSION = "0.7.6"
 LOGGER = logging.getLogger("ctrlspeak_whisper_transcription")
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = Path(os.environ.get("WHISPER_DATA_DIR", ROOT / "data"))
@@ -810,6 +810,7 @@ def create_app(
             normalized_text, normalization = safe_worker_result(
                 result, requested=cleanup, provider=routed.provider_id, language=result_language,
             )
+            s1_cleaned_text = normalized_text
             normalized_ids = []
             if exact_override_id is not None:
                 normalized_text = None
@@ -822,6 +823,8 @@ def create_app(
             transcription_id = store.create_transcription(
                 raw_text=raw_text,
                 corrected_text=corrected_text,
+                s1_cleaned_text=s1_cleaned_text,
+                normalized_text=normalized_text,
                 language=result_language,
                 segments=list(result.get("segments") or []),
                 applied_rule_ids=applied_ids,
@@ -843,6 +846,7 @@ def create_app(
                     "routing_duration_ms": routed.routing_duration_ms,
                     "usage": result.get("usage"),
                     "normalization": normalization,
+                    "normalized_applied_correction_rule_ids": normalized_ids,
                 },
             )
             return {
@@ -850,6 +854,7 @@ def create_app(
                 "raw_text": raw_text,
                 "text": corrected_text,
                 "normalized_text": normalized_text,
+                "s1_cleaned_text": s1_cleaned_text,
                 "normalization": normalization,
                 "normalized_applied_correction_rule_ids": normalized_ids,
                 "language": result_language,

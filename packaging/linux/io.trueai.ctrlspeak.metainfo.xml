@@ -22,6 +22,11 @@
     <category>Accessibility</category>
   </categories>
   <releases>
+    <release version="0.7.6" date="2026-09-19">
+      <description>
+        <p>Safe single-line dictation, optional S1 paragraph formatting and complete private transcription auditing.</p>
+      </description>
+    </release>
     <release version="0.7.5" date="2026-09-18">
       <description>
         <p>Lossless FLAC uploads, unchanged compressed forwarding, an isolated Nova helper, and coordinated signed backend deployment.</p>

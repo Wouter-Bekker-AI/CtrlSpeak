@@ -17,6 +17,7 @@ import uuid
 from typing import Any, Optional
 
 from utils.config_paths import get_logger
+from utils.dictation_text import prepare_dictation_text
 from utils.hotkeys import DesktopSessionError, ensure_desktop_automation_supported
 
 
@@ -342,7 +343,8 @@ def _insert_text_with_tk_fallback(text: str) -> None:
             clipboard.wait_with_events(_TK_EVENT_POLL_SECONDS)
 
 
-def insert_text_into_focus(text: str) -> None:
+def insert_text_into_focus(text: str, *, preserve_formatting: bool = False) -> None:
+    text = prepare_dictation_text(text, preserve_formatting=preserve_formatting)
     if not text:
         return
     ensure_desktop_automation_supported()

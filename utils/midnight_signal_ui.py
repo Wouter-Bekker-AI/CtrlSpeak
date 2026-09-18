@@ -569,6 +569,26 @@ class MidnightSignalManagementMixin:
                  "cleanup return ordinary corrected text. Save and restart to apply.",
             muted=True, wraplength=810, justify=tk.LEFT,
         ).grid(row=4, column=0, columnspan=3, sticky="w")
+        formatting_options = ttk.Frame(top, style="MS.Card.TFrame")
+        formatting_options.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        ttk.Checkbutton(
+            formatting_options, text="Preserve paragraphs and line breaks",
+            variable=self.gpu_formatting_var, style="MS.TCheckbutton",
+        ).pack(anchor=tk.W, padx=(20, 0))
+        _label(
+            formatting_options,
+            "Off: one safe line for AnyDesk / terminals. On: paragraphs for documents; "
+            "line breaks can submit in a terminal. Tabs and command controls are always blocked. "
+            "Formatting changes apply immediately after Save.",
+            muted=True, wraplength=790, justify=tk.LEFT,
+        ).pack(anchor=tk.W, padx=(20, 0), pady=(4, 0))
+        def update_formatting_visibility(*_args):
+            if self.gpu_cleanup_var.get():
+                formatting_options.grid()
+            else:
+                formatting_options.grid_remove()
+        self.gpu_cleanup_var.trace_add("write", update_formatting_visibility)
+        update_formatting_visibility()
         top.columnconfigure(0, weight=1)
         top.columnconfigure(1, weight=1)
 
@@ -600,7 +620,7 @@ class MidnightSignalManagementMixin:
         ttk.Label(behaviour, text="Text and corrections", style="MS.Section.TLabel").pack(anchor=tk.W)
         _label(behaviour, "Automatic edit feedback", muted=True).pack(anchor=tk.W, pady=(18, 5))
         ttk.Combobox(behaviour, textvariable=self.feedback_capture_var, values=("active_field_on_enter", "disabled"), state="readonly", style="MS.TCombobox").pack(fill=tk.X)
-        _label(behaviour, "After insertion, bare Enter can submit confirmed edits without retaining transcript history on the desktop.", muted=True, wraplength=410, justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 16))
+        _label(behaviour, "Bare Enter can submit confirmed edits. A bounded local dictation audit retains raw, cleaned and insertion text (up to about 6 MiB); keep these logs private.", muted=True, wraplength=410, justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 16))
         ttk.Button(behaviour, text="Open corrections", style="MS.Primary.TButton", command=lambda: self.ms_notebook.select(self.ms_page_tabs["Corrections"])).pack(anchor=tk.W)
         self.ms_backend_status_var = tk.StringVar(value=self.backend_status_var.get())
         ttk.Label(behaviour, textvariable=self.ms_backend_status_var, style="MS.CardMuted.TLabel", wraplength=410, justify=tk.LEFT).pack(anchor=tk.W, pady=(18, 0))

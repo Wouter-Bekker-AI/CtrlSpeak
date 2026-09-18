@@ -229,7 +229,7 @@ def test_linux_injection_uses_hidden_tk_fallback_for_unicode_and_multiline(
     )
     monkeypatch.setattr(linux_input.time, "sleep", lambda _seconds: None)
 
-    linux_input.insert_text_into_focus(transcript)
+    linux_input.insert_text_into_focus(transcript, preserve_formatting=True)
 
     assert pasted == [transcript]
     assert root.text == previous

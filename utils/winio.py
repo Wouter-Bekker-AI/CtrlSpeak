@@ -68,5 +68,5 @@ def snapshot_active_text_field(*, copy_wait_seconds: float = 0.08) -> Optional[s
     return _adapter().snapshot_active_text_field(copy_wait_seconds=copy_wait_seconds)
 
 
-def insert_text_into_focus(text: str) -> None:
-    _adapter().insert_text_into_focus(text)
+def insert_text_into_focus(text: str, *, preserve_formatting: bool = False) -> None:
+    _adapter().insert_text_into_focus(text, preserve_formatting=preserve_formatting)

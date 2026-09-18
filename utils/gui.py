@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 import re
 import sys
 import threading
@@ -2456,6 +2457,7 @@ class _LegacyManagementWindow:
         self.feedback_capture_var = tk.StringVar(value=active_backend.feedback_capture_method)
         self.provider_strategy_var = tk.StringVar(value=active_backend.provider_strategy)
         self.gpu_cleanup_var = tk.BooleanVar(value=active_backend.gpu_cleanup_enabled)
+        self.gpu_formatting_var = tk.BooleanVar(value=active_backend.gpu_cleanup_preserve_formatting)
         self.openai_api_key_var = tk.StringVar(value=get_session_openai_api_key() or "")
         self._secure_key_storage_available = secure_storage_available()
         self.remember_openai_key_var = tk.BooleanVar(
@@ -2559,6 +2561,19 @@ class _LegacyManagementWindow:
             backend_card, text="Use S1 Mini cleanup when using the Ubuntu GPU",
             variable=self.gpu_cleanup_var,
         ).pack(anchor=tk.W, pady=(8, 4))
+        formatting_options = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
+        formatting_options.pack(anchor=tk.W, fill=tk.X)
+        formatting_toggle = ttk.Checkbutton(
+            formatting_options, text="Preserve paragraphs and line breaks",
+            variable=self.gpu_formatting_var,
+        )
+        def update_formatting_visibility(*_args):
+            if self.gpu_cleanup_var.get():
+                formatting_toggle.pack(anchor=tk.W, padx=(20, 0), pady=4)
+            else:
+                formatting_toggle.pack_forget()
+        self.gpu_cleanup_var.trace_add("write", update_formatting_visibility)
+        update_formatting_visibility()
         ttk.Label(
             backend_card, style="Caption.TLabel", wraplength=520,
             text="English GPU transcripts only. OpenAI, Tiny and unavailable cleanup return "
@@ -3367,6 +3382,7 @@ class _LegacyManagementWindow:
                 allowed_output_languages=allowed_output_languages,
                 provider_strategy=provider_strategy,
                 gpu_cleanup_enabled=self.gpu_cleanup_var.get(),
+                gpu_cleanup_preserve_formatting=self.gpu_formatting_var.get(),
             )
         except ValueError as exc:
             messagebox.showerror("Invalid backend settings", str(exc), parent=self.window)
@@ -3387,7 +3403,11 @@ class _LegacyManagementWindow:
         active = get_runtime_backend_config()
         effective = get_backend_config()
         self.refresh_status()
-        restart_required = effective != active
+        # Formatting is an edge-only live preference; don't demand a restart
+        # when it is the only change the user saved.
+        restart_required = replace(
+            effective, gpu_cleanup_preserve_formatting=active.gpu_cleanup_preserve_formatting,
+        ) != active
         if restart_required:
             self.backend_status_var.set(
                 f"Active until restart: {get_backend_status(active)}\n"
@@ -3399,6 +3419,7 @@ class _LegacyManagementWindow:
             message = "Backend settings are saved and already match the active runtime."
         if effective != saved:
             message += " Environment variables currently override one or more saved values."
+        message += "\nThe formatting safety preference applies immediately. Leave it off for AnyDesk and terminals."
         messagebox.showinfo("Backend settings saved", message, parent=self.window)
 
     def _forget_openai_key(self) -> None:

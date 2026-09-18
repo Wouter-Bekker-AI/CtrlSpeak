@@ -1,4 +1,4 @@
-# CtrlSpeak v0.7.5
+# CtrlSpeak v0.7.6
 
 CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into
@@ -21,6 +21,24 @@ timings, and configurable peak-bounded feedback sounds.
 The legacy **Client + Server** and **Client Only** roles remain inside the
 embedded/local backend. Remote API mode is independent of those roles and does
 not start discovery, a local server, or a model download.
+
+## v0.7.6 safe dictation and optional S1 formatting
+
+Enable **Use S1 Mini cleanup when using the Ubuntu GPU** to reveal **Preserve
+paragraphs and line breaks**. Formatting defaults **off**: AnyDesk and terminal
+dictation becomes one continuous line, without generated Enter/Tab/control
+actions. Turn formatting on only for document editors that should receive
+paragraphs. Save applies the formatting safety choice immediately. S1/backend
+changes still use the existing save/restart workflow.
+
+Gateway/API and Nova/Telegram formatting remain intact. The gateway now retains
+validated S1 and final cleaned text alongside raw/corrected text. The desktop
+keeps an escaped, bounded local insertion audit (about 6 MiB maximum) containing
+private transcript text, never credentials. See the
+[0.7.6 behaviour, privacy and release guide](docs/V0.7.6_RELEASE.md).
+
+Update each Windows desktop/laptop with **Check for updates** to obtain the
+client-side protection; a gateway update alone cannot protect an older client.
 
 ## v0.7.5 lossless audio transport
 
@@ -213,9 +231,9 @@ The tray now includes **Copy last transcript**. CtrlSpeak keeps exactly one
 successful transcription in memory, records it before attempting active-field
 insertion, and can therefore recover the text when focus changed or a target
 application rejected the paste. The item is disabled until a result exists;
-copying gives explicit success or failure feedback. Transcript content is never
-written to settings, logs, the correction database, or any other persistent
-history, and is discarded when CtrlSpeak exits.
+copying gives explicit success or failure feedback. In 0.7.6 this cache holds
+the sanitized insertion text. Unlike the historical memory-only behaviour,
+0.7.6 also retains a bounded private dictation audit, as described above.
 
 The looping processing chime now has a transparent -6 dBFS peak ceiling. The
 bundled WAV previously reached almost full scale during its opening attack;

@@ -19,6 +19,7 @@ from typing import Optional
 import pyautogui
 
 from utils.config_paths import get_logger
+from utils.dictation_text import prepare_dictation_text
 
 logger = get_logger(__name__)
 
@@ -482,13 +483,17 @@ def ensure_foreground(hwnd: int) -> None:
         logger.exception("Failed to bring window %s to foreground", hwnd)
 
 
-def send_unicode_input(text: str) -> bool:
+def send_unicode_input(text: str, *, preserve_formatting: bool = False) -> bool:
     if not sys.platform.startswith("win"):
         return False
     hwnd = get_focused_control()
     ensure_foreground(hwnd)
-    for ch in text.replace("\n", "\r"):
-        code = ord(ch)
+    text = prepare_dictation_text(text, preserve_formatting=preserve_formatting)
+    # SendInput wScan is a UTF-16 WORD, not a Unicode codepoint. Truncating a
+    # supplementary character can turn its low bits into CR/ESC/another control.
+    encoded = text.replace("\n", "\r").encode("utf-16-le")
+    for offset in range(0, len(encoded), 2):
+        code = int.from_bytes(encoded[offset:offset + 2], "little")
         union = _INPUTUNION()
         union.ki = KEYBDINPUT(wVk=0, wScan=code, dwFlags=KEYEVENTF_UNICODE, time=0, dwExtraInfo=0)
         inp = INPUT(type=INPUT_KEYBOARD, union=union)
@@ -556,7 +561,8 @@ def try_direct_text_insert(text: str, hwnd: Optional[int] = None) -> bool:
     return False
 
 
-def insert_text_into_focus(text: str) -> None:
+def insert_text_into_focus(text: str, *, preserve_formatting: bool = False) -> None:
+    text = prepare_dictation_text(text, preserve_formatting=preserve_formatting)
     if not text:
         return
     if not sys.platform.startswith("win"):
@@ -570,7 +576,7 @@ def insert_text_into_focus(text: str) -> None:
 
     # Prefer SendInput for consoles/WSL, AnyDesk (explicit), and remote-hosted windows, or when forced by CLI
     if hwnd and (_FORCE_SENDINPUT or anydesk_window or console_window or hosted_remote):
-        if send_unicode_input(text):
+        if send_unicode_input(text, preserve_formatting=preserve_formatting):
             return
         if try_sendinput_paste(text):
             return
@@ -581,7 +587,7 @@ def insert_text_into_focus(text: str) -> None:
 
     # If forced or remote-hosted / AnyDesk (but not console), try SendInput again
     if (_FORCE_SENDINPUT or anydesk_window or hosted_remote) and not console_window:
-        if send_unicode_input(text):
+        if send_unicode_input(text, preserve_formatting=preserve_formatting):
             return
 
     # Fallbacks

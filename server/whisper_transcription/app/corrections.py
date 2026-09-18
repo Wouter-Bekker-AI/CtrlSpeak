@@ -148,6 +148,9 @@ class CorrectionStore:
             conn.execute("ALTER TABLE transcriptions ADD COLUMN context TEXT")
         if "metadata" not in columns:
             conn.execute("ALTER TABLE transcriptions ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
+        for name in ("s1_cleaned_text", "normalized_text"):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE transcriptions ADD COLUMN {name} TEXT")
 
     @staticmethod
     def _migrate_feedback_rule_cascade(conn: sqlite3.Connection) -> None:
@@ -444,14 +447,16 @@ class CorrectionStore:
         context: str | None = None,
         metadata: dict[str, Any] | None = None,
         principal_id: str = "legacy",
+        s1_cleaned_text: str | None = None,
+        normalized_text: str | None = None,
     ) -> str:
         transcription_id, now = str(uuid.uuid4()), _now()
         with self._connection() as conn:
             conn.execute(
                 """INSERT INTO transcriptions
                    (id,raw_text,corrected_text,language,segments,applied_rule_ids,created_at,context,
-                    metadata,principal_id)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    metadata,principal_id,s1_cleaned_text,normalized_text)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     transcription_id,
                     raw_text,
@@ -463,6 +468,8 @@ class CorrectionStore:
                     context,
                     json.dumps(metadata or {}),
                     principal_id,
+                    s1_cleaned_text,
+                    normalized_text,
                 ),
             )
         return transcription_id

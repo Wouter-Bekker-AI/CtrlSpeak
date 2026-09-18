@@ -1,4 +1,10 @@
-# CtrlSpeak transcription service v0.7.5
+# CtrlSpeak transcription service v0.7.6
+
+0.7.6 adds nullable `s1_cleaned_text` and `normalized_text` gateway audit columns
+and the additive `s1_cleaned_text` diagnostic response field. Formatted API text,
+worker S1 behaviour and Nova/Telegram output are unchanged. Single-line versus
+paragraph insertion is a desktop-only safety choice. See
+[0.7.6 release notes](../../docs/V0.7.6_RELEASE.md).
 
 0.7.5 adds lossless FLAC transport, compressed-byte forwarding and bounded
 local inference decoding. Existing WAV callers, routing and optional CUDA S1

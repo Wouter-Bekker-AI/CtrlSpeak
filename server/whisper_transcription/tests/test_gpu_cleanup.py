@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+import sqlite3
 from pathlib import Path
 
 import httpx
@@ -109,6 +110,10 @@ def test_gateway_selects_only_gpu_cleanup_and_preserves_corrections(tmp_path, pr
     assert result['text'] == 'hello ACME'
     assert result['normalized_text'] == ('Hello ACME.' if applied else None)
     assert result['normalization']['applied'] is applied
+    audit = store.get_transcription(result['id'])
+    assert audit['normalized_text'] == result['normalized_text']
+    assert audit['s1_cleaned_text'] == ('Hello acme.' if applied else None)
+    assert result['s1_cleaned_text'] == audit['s1_cleaned_text']
     assert p.calls[0].cleanup is requested
     assert n.calls == 0
     assert store.get_rule(rule['id'])['use_count'] == 1
@@ -259,3 +264,42 @@ def test_old_worker_is_backward_compatible():
                                    provider='ubuntu-gpu-large-v3-turbo', language='en')
     assert text is None
     assert info['status'] == 'unavailable'
+
+
+def test_gateway_preserves_and_audits_paragraphs_without_sanitizing(tmp_path):
+    class Provider:
+        id = 'ubuntu-gpu-large-v3-turbo'
+        def describe(self):
+            return {'id': self.id, 'status': 'ready'}
+        def transcribe(self, path, context):
+            return {'raw_text': 'hello acme second paragraph', 'language': 'en', 'segments': [],
+                    'normalized_text': 'Hello acme.\n\nSecond paragraph.',
+                    'normalization': metadata(True, 'applied')}
+    store = CorrectionStore(tmp_path/'rules.sqlite3')
+    store.create_rule(source_phrase='acme', replacement_phrase='ACME', scope='global')
+    app = create_app(backend=Backend(), store=store, service_role='gateway', environ={},
+        temp_dir=tmp_path/'uploads', router=ProviderRouter([Provider()], {'route': (Provider.id,)}, default_strategy='route'))
+    with TestClient(app, client=('127.0.0.1', 123)) as client:
+        result = client.post('/v1/transcribe', **upload(cleanup='true')).json()
+    saved = store.get_transcription(result['id'])
+    assert result['normalized_text'] == saved['normalized_text'] == 'Hello ACME.\n\nSecond paragraph.'
+    assert result['s1_cleaned_text'] == saved['s1_cleaned_text'] == 'Hello acme.\n\nSecond paragraph.'
+    assert saved['raw_text'] == 'hello acme second paragraph'
+
+
+def test_additive_audit_migration_preserves_old_transcripts_and_rules(tmp_path):
+    path = tmp_path/'rules.sqlite3'
+    store = CorrectionStore(path)
+    rule = store.create_rule(source_phrase='acme', replacement_phrase='ACME')
+    tx = store.create_transcription(raw_text='old', corrected_text='Old', language='en',
+                                    segments=[], applied_rule_ids=[])
+    with sqlite3.connect(path) as connection:
+        connection.execute('ALTER TABLE transcriptions DROP COLUMN s1_cleaned_text')
+        connection.execute('ALTER TABLE transcriptions DROP COLUMN normalized_text')
+    migrated = CorrectionStore(path)
+    old = migrated.get_transcription(tx)
+    assert old['raw_text'] == 'old' and old['corrected_text'] == 'Old'
+    assert old['s1_cleaned_text'] is None and old['normalized_text'] is None
+    assert migrated.get_rule(rule['id']) == store.get_rule(rule['id'])
+    # Reopening the same schema is idempotent.
+    assert CorrectionStore(path).get_transcription(tx) == old

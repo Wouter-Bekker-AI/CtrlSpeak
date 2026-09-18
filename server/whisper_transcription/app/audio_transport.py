@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterator
 
-RELEASE_VERSION = "0.7.5"
+RELEASE_VERSION = "0.7.6"
 TRANSPORT_PROTOCOL = 1
 MAX_AUDIO_BYTES = 100 * 1024 * 1024
 MAX_AUDIO_SECONDS = 1800

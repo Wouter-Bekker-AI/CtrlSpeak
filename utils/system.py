@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from dataclasses import replace
 
 import atexit
 import argparse
@@ -44,6 +45,8 @@ from utils.hotkeys import (
     key_name as hotkey_key_name,
 )
 from utils.version import APP_VERSION
+from utils.dictation_text import prepare_dictation_text
+from utils.transcript_audit import record_injection
 from utils.audio_cues import CueKind, CuePlayer, Pcm16Cue, cue_to_wav_bytes
 from utils.ui_state import TranscriptionUiSession, UiPhase
 
@@ -356,9 +359,32 @@ def track_feedback_injection(result) -> None:
 
 def inject_transcription_result(result) -> None:
     """Retain the result, insert once, then make a successful injection eligible for feedback."""
-    remember_last_transcript(result.text)
-    insert_text_into_focus(result.text)
-    track_feedback_injection(result)
+    # Read this desktop-only choice at insertion time: saving the safety switch
+    # takes effect immediately, including for a request already in flight.
+    with settings_lock:
+        preserve = (settings.get("gpu_cleanup_enabled") is True
+                    and settings.get("gpu_cleanup_preserve_formatting") is True
+                    and (result.metadata or {}).get("client_cleanup_applied") is True)
+    text = prepare_dictation_text(result.text, preserve_formatting=preserve)
+    attempt_id = str(uuid.uuid4())
+    def audit(outcome):
+        record_injection(result, text, preserve_formatting=preserve,
+                         attempt_id=attempt_id, outcome=outcome)
+    audit("attempted")
+    remember_last_transcript(text)
+    if not text:
+        audit("skipped_empty")
+        return
+    try:
+        if preserve:
+            insert_text_into_focus(text, preserve_formatting=True)
+        else:
+            insert_text_into_focus(text)
+    except Exception:
+        audit("failed_or_partial")
+        raise
+    audit("adapter_returned")
+    track_feedback_injection(replace(result, text=text))
 
 
 def _pynput_key_name(key) -> str:

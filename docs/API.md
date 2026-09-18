@@ -1,4 +1,25 @@
-# CtrlSpeak API v0.7.5
+# CtrlSpeak API v0.7.6
+
+## Formatted text and audit (0.7.6)
+
+The gateway preserves formatted API text; desktop injection safety is an edge
+preference, not a gateway transformation. New additive response field
+`s1_cleaned_text` contains validated S1 output before dictionary rules (or null).
+`normalized_text` remains the final optional cleaned variant, with paragraphs
+intact. Consumers must continue selecting it only with the existing provenance
+checks. `s1_cleaned_text` is diagnostic, not a new selection field: an exact
+override can suppress `normalized_text` while retaining S1 evidence.
+
+Both values are now retained with raw/corrected text in the protected gateway
+audit database. Historical rows have null new fields. Authorization and API
+routes are unchanged; no public transcript-history endpoint is introduced.
+Do not include transcript contents in ordinary operational log exports.
+
+Windows/Linux desktop clients default to single-line safe insertion. Their
+optional **Preserve paragraphs and line breaks** checkbox is only shown with
+S1 cleanup enabled, and only takes effect for actually applied S1 results.
+Nova's external helper and Telegram formatting remain unchanged. See
+[0.7.6 release/privacy guide](V0.7.6_RELEASE.md).
 
 ## Lossless transport (0.7.5)
 
@@ -76,6 +97,7 @@ Response additions (illustrative timing):
   "raw_text": "hello acme",
   "text": "hello ACME",
   "normalized_text": "Hello ACME.",
+  "s1_cleaned_text": "Hello acme.",
   "normalized_applied_correction_rule_ids": ["rule-id"],
   "normalization": {
     "requested": true, "enabled": true, "applied": true, "status": "applied",

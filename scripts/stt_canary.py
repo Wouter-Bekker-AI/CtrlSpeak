@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Non-personal release canaries, run only on Nova using its protected env."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -45,9 +46,16 @@ def main():
                 assert payload['provider_used'] == provider and payload['text'].strip()
                 assert payload['language'] == 'en'
                 normalization = payload.get('normalization', {})
+                assert 's1_cleaned_text' in payload, 'gateway audit response field missing'
+                if normalization.get('applied'):
+                    assert isinstance(payload['s1_cleaned_text'], str) and payload['s1_cleaned_text']
+                    assert isinstance(payload.get('normalized_text'), str) and payload['normalized_text']
                 if provider != 'ubuntu-gpu-large-v3-turbo':
                     assert not normalization.get('applied')
                 evidence.append({'provider': provider, 'format': audio.suffix,
+                    'transcription_id': payload['id'],
+                    's1_sha256': hashlib.sha256(payload['s1_cleaned_text'].encode()).hexdigest() if payload.get('s1_cleaned_text') is not None else None,
+                    'normalized_sha256': hashlib.sha256(payload['normalized_text'].encode()).hexdigest() if payload.get('normalized_text') is not None else None,
                     'seconds': round(time.monotonic() - started, 2),
                     'cleanup_status': normalization.get('status'), 'text_present': True})
             selected = temp / 'result.txt'

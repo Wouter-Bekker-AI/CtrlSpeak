@@ -57,6 +57,7 @@ class BackendConfig:
     allowed_output_languages: tuple[str, ...] = ()
     provider_strategy: str = "server-default"
     gpu_cleanup_enabled: bool = False
+    gpu_cleanup_preserve_formatting: bool = False
 
 
 @dataclass(frozen=True)
@@ -228,6 +229,7 @@ def get_backend_config(environ: Mapping[str, str] | None = None) -> BackendConfi
         allowed_output_languages,
         provider_strategy,
         saved.get("gpu_cleanup_enabled") is True,
+        saved.get("gpu_cleanup_preserve_formatting") is True,
     )
 
 
@@ -252,6 +254,7 @@ def save_backend_config(
     allowed_output_languages: object | None = None,
     provider_strategy: str = "server-default",
     gpu_cleanup_enabled: bool | None = None,
+    gpu_cleanup_preserve_formatting: bool | None = None,
 ) -> BackendConfig:
     normalized_backend = _validated_backend_choice(backend, source="backend")
     normalized_capture = _normalized_choice(
@@ -268,9 +271,13 @@ def save_backend_config(
     with config_paths.settings_lock:
         current_languages = config_paths.settings.get("allowed_output_languages", [])
         current_cleanup = config_paths.settings.get("gpu_cleanup_enabled", False)
+        current_formatting = config_paths.settings.get("gpu_cleanup_preserve_formatting", False)
     cleanup = current_cleanup if gpu_cleanup_enabled is None else gpu_cleanup_enabled
     if not isinstance(cleanup, bool):
         raise ValueError("GPU cleanup must be true or false")
+    formatting = current_formatting if gpu_cleanup_preserve_formatting is None else gpu_cleanup_preserve_formatting
+    if not isinstance(formatting, bool):
+        raise ValueError("Preserve formatting must be true or false")
     normalized_languages = normalize_allowed_output_languages(
         current_languages if allowed_output_languages is None else allowed_output_languages,
         source="allowed output languages",
@@ -288,6 +295,7 @@ def save_backend_config(
             allowed_output_languages=list(normalized_languages),
             provider_strategy=normalized_strategy,
             gpu_cleanup_enabled=cleanup,
+            gpu_cleanup_preserve_formatting=formatting,
         )
     if not config_paths.save_settings():
         with config_paths.settings_lock:
@@ -305,6 +313,7 @@ def save_backend_config(
         normalized_languages,
         normalized_strategy,
         cleanup,
+        formatting,
     )
 
 

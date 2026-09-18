@@ -62,5 +62,9 @@ def test_ui_status_and_checkbox_contract():
     visible=(Path(__file__).parents[2]/'utils/midnight_signal_ui.py').read_text('utf-8')
     assert 'Use S1 Mini cleanup when using the Ubuntu GPU' in visible
     assert 'variable=self.gpu_cleanup_var' in visible
+    assert 'variable=self.gpu_formatting_var' in visible
+    assert 'Preserve paragraphs and line breaks' in visible
+    assert 'formatting_options.grid_remove()' in visible
+    assert 'gpu_cleanup_preserve_formatting=self.gpu_formatting_var.get()' in source
     assert 'ms_notebook.select(self.ms_pages[' not in visible
     assert 'getattr(active, "ms_page_tabs", {})' in source
