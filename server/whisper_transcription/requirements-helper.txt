@@ -1,0 +1,4 @@
+# Isolated Nova command helper: intentionally no Hermes, Whisper, CUDA or models.
+av==18.0.0
+numpy==2.2.6
+requests==2.32.5

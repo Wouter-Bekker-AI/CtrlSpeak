@@ -68,6 +68,9 @@ def read_server_versions() -> tuple[str, str]:
 
 def check_version(tag: str) -> str:
     version = read_app_version()
+    from server.whisper_transcription.app.audio_transport import RELEASE_VERSION
+    if RELEASE_VERSION != version:
+        raise SystemExit("transport/helper release version does not match desktop")
     server_package_version, server_runtime_version = read_server_versions()
     if (server_package_version, server_runtime_version) != (version, version):
         raise SystemExit(
@@ -138,6 +141,15 @@ def generate(args: argparse.Namespace) -> None:
             _asset_entry(linux_path, "linux", args.tag),
         ],
     }
+    revision = os.environ.get("GITHUB_SHA")
+    if revision:
+        if not re.fullmatch("[0-9a-f]{40}", revision):
+            raise SystemExit("invalid release revision")
+        # An additive signed section keeps the five-asset / schema-1 updater
+        # contract understood by 0.7.4 while binding backend roles to this build.
+        payload["deployment"] = {"schema": 1, "revision": revision,
+            "transport_protocol": 1,
+            "roles": {role: version for role in ("worker", "gateway", "helper")}}
     manifest_bytes = canonical_manifest_bytes(payload)
     signature_bytes = base64.b64encode(_load_private_key().sign(manifest_bytes)) + b"\n"
     manifest_path = output_dir / MANIFEST_ASSET_NAME

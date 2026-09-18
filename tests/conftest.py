@@ -9,6 +9,7 @@ import types
 from pathlib import Path
 
 import pytest
+import numpy  # noqa: F401 -- codec tests must exercise real sample arrays, not stubs.
 
 # Ensure configuration paths stay inside a temporary directory so tests remain
 # hermetic even when they exercise the real helpers.

@@ -1,4 +1,4 @@
-# CtrlSpeak v0.7.4
+# CtrlSpeak v0.7.5
 
 CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into
@@ -21,6 +21,24 @@ timings, and configurable peak-bounded feedback sounds.
 The legacy **Client + Server** and **Client Only** roles remain inside the
 embedded/local backend. Remote API mode is independent of those roles and does
 not start discovery, a local server, or a model download.
+
+## v0.7.5 lossless audio transport
+
+Remote recordings are now encoded as **FLAC without changing any PCM samples**
+before upload. The gateway forwards those compressed bytes unchanged to the
+Ubuntu GPU or OpenAI; decoding happens at inference, not between network hops.
+Already-compressed Telegram Ogg/Opus recordings pass through byte-for-byte.
+No new lossy compression is introduced. Compression ratio depends on the audio;
+if encoding fails or produces a larger file, CtrlSpeak retains the original WAV.
+
+Provider preferences, API keys, known-word corrections and optional S1 cleanup
+are unchanged. Update through **Check for updates**; the installed filename stays
+`CtrlSpeak.exe`. Offline laptops can update when they next connect.
+
+Releases now stage and verify the GPU worker, gateway and external Nova helper
+before publishing the signed desktop update. The helper is independent of Hermes
+and is replaced without restarting Nova. See the
+[0.7.5 release and operations guide](docs/V0.7.5_RELEASE.md).
 
 ## v0.7.4 optional GPU cleanup
 

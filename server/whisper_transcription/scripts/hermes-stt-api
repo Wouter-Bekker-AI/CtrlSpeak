@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Hermes command-provider adapter for a client-facing CtrlSpeak gateway.
-# Usage: hermes-stt-api INPUT_AUDIO LANGUAGE OUTPUT_TEXT
+# External command-provider adapter; resolve one immutable release per invocation.
 set -euo pipefail
-
-input_path=${1:?missing input audio path}
-language=${2:-en}
-output_path=${3:?missing output text path}
+umask 077
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+service_root=$(dirname -- "${script_dir}")
+helper_python=${CTRLSPEAK_HELPER_PYTHON:-"${service_root}/.helper-venv/bin/python"}
+export PYTHONPATH="${service_root}"
+if [[ ${1:-} == --version || ${1:-} == --self-test ]]; then
+  exec "${helper_python}" -m app.stt_client "$@"
+fi
 
 # The user-service drop-in is the source of truth for LAN bind/auth. Explicit
 # environment variables remain useful for tests or a differently hosted API.
@@ -24,46 +27,13 @@ if [[ -r "${service_override}" ]]; then
     esac
   done < "${service_override}"
 fi
-api_base_url=${CTRLSPEAK_GATEWAY_URL:-${WHISPER_API_URL:-"http://${api_host}:8765"}}
-api_token=${CTRLSPEAK_CLIENT_TOKEN:-${api_token}}
-api_url="${api_base_url%/}/v1/transcribe"
-
-if [[ ! -r "${input_path}" ]]; then
-  printf 'Input audio is not readable: %s\n' "${input_path}" >&2
-  exit 2
+profile_env=${HERMES_HOME:-${HOME}/.hermes}/.env
+if [[ -r "${profile_env}" ]]; then
+  set -a
+  # Existing protected profile contract; never print or copy this environment.
+  source "${profile_env}"
+  set +a
 fi
-
-curl_args=(
-  --fail
-  --silent
-  --show-error
-  --max-time 300
-  --request POST
-  "${api_url}"
-  --form "audio=@${input_path}"
-)
-if [[ -n "${api_token}" ]]; then
-  curl_args+=(--header "Authorization: Bearer ${api_token}")
-fi
-if [[ -n "${language}" ]]; then
-  curl_args+=(--form "allowed_languages=${language}")
-fi
-
-curl "${curl_args[@]}" | /usr/bin/python3 -c '
-import json
-import re
-import sys
-
-output_path = sys.argv[1]
-payload = json.load(sys.stdin)
-text = payload.get("text", "").strip()
-
-# Preserve the established downstream canonical spellings at the STT boundary.
-text = re.sub(r"\bYuri\b", "Jurie", text, flags=re.IGNORECASE)
-text = re.sub(r"\b(?:Vuyada|Voyada)\b", "Wojada", text, flags=re.IGNORECASE)
-
-if not text:
-    raise SystemExit("Whisper API returned an empty corrected transcript")
-with open(output_path, "w", encoding="utf-8") as output_file:
-    output_file.write(text + "\n")
-' "${output_path}"
+export CTRLSPEAK_GATEWAY_URL=${CTRLSPEAK_GATEWAY_URL:-${WHISPER_API_URL:-"http://${api_host}:8765"}}
+export CTRLSPEAK_CLIENT_TOKEN=${CTRLSPEAK_CLIENT_TOKEN:-${api_token}}
+exec "${helper_python}" -m app.stt_client "$@"

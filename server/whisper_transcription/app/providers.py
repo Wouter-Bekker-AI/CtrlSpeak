@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import mimetypes
 import threading
 import time
 from contextlib import nullcontext
@@ -11,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 import httpx
+from app.audio_transport import audio_format, AudioLimitError
 
 
 LOGGER = logging.getLogger("ctrlspeak_whisper_transcription.providers")
@@ -121,6 +121,10 @@ class LocalWhisperProvider:
                 context.initial_prompt,
                 context.word_timestamps,
             )
+        except AudioLimitError as exc:
+            raise ProviderFailure("audio is invalid or exceeds decoding limits",
+                                  category="invalid_audio", retryable=False,
+                                  status_code=422) from exc
         except Exception as exc:
             raise ProviderFailure(
                 "local transcription provider failed",
@@ -321,14 +325,14 @@ class RemoteWorkerProvider:
         }
         if context.initial_prompt:
             data["initial_prompt"] = context.initial_prompt
-        content_type = mimetypes.guess_type(audio_path.name)[0] or "application/octet-stream"
+        extension, content_type = audio_format(audio_path)
         try:
             with audio_path.open("rb") as handle, self._client_context() as client:
                 response = client.post(
                     f"{self.base_url}/v1/worker/transcribe",
                     headers={"Authorization": f"Bearer {self._token}"},
                     data=data,
-                    files={"audio": (audio_path.name, handle, content_type)},
+                    files={"audio": ("recording" + extension, handle, content_type)},
                     timeout=httpx.Timeout(
                         self.timeout_seconds,
                         connect=self.connect_timeout_seconds,
@@ -346,9 +350,9 @@ class RemoteWorkerProvider:
                 self._mark_unavailable()
             raise ProviderFailure(
                 "GPU worker rejected the transcription request",
-                category="worker_error",
+                category="invalid_audio" if response.status_code == 422 else "worker_error",
                 retryable=response.status_code >= 500,
-                status_code=502,
+                status_code=422 if response.status_code == 422 else 502,
             )
         try:
             result = dict(response.json())
@@ -448,7 +452,7 @@ class OpenAITranscriptionProvider:
             form["keywords[]"] = list(context.keywords)
         if context.initial_prompt:
             form["prompt"] = context.initial_prompt
-        content_type = mimetypes.guess_type(audio_path.name)[0] or "application/octet-stream"
+        extension, content_type = audio_format(audio_path)
         try:
             client_context = (
                 nullcontext(self._client)
@@ -460,7 +464,7 @@ class OpenAITranscriptionProvider:
                     f"{self.base_url}/audio/transcriptions",
                     headers={"Authorization": f"Bearer {context.openai_api_key}"},
                     data=form,
-                    files={"file": (audio_path.name, handle, content_type)},
+                    files={"file": ("recording" + extension, handle, content_type)},
                     timeout=self.timeout_seconds,
                 )
         except httpx.RequestError as exc:

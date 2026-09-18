@@ -1,4 +1,36 @@
-# CtrlSpeak API v0.7.4
+# CtrlSpeak API v0.7.5
+
+## Lossless transport (0.7.5)
+
+The multipart `audio` field accepts WAV and FLAC, plus existing Ogg/Opus, MP3,
+M4A and WebM containers supported by the inference decoder. Send a matching
+filename extension and MIME type (`recording.flac`, `audio/flac`, or
+`recording.ogg`, `audio/ogg`). Do not put a compression layer around the whole
+multipart body. Existing WAV callers remain compatible.
+
+CtrlSpeak senders encode PCM16 mono/stereo WAV to FLAC preserving sample rate,
+channel count, sample count and every integer sample. Already-compressed input
+is never transcoded. The gateway forwards the original compressed file on both
+the GPU-worker and OpenAI routes, including fallback attempts. Only the selected
+local inference backend decodes/resamples for Whisper. OpenAI accepts FLAC/Ogg
+directly ([official reference](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create)).
+
+`/health` and `/v1/capabilities` add `revision` (deployed Git commit, or `source`)
+and `audio_transport`: protocol `1`, lossless encoding `flac`, accepted formats,
+compressed pass-through, upload limit 100 MiB, decoded PCM16-equivalent limit
+100 MiB and maximum duration 1,800 seconds. Local decoders enforce actual sample
+limits and a cooperative 20-second decode deadline. Invalid or excessive local
+audio returns HTTP 422 and is not retried against a paid provider. OpenAI's own
+upload/format limits also apply; these capability fields do not raise them.
+
+The desktop records preparation time, original/upload byte counts and outcome
+in diagnostic metadata, without audio content, file paths or credentials.
+No extra capability request is added to each transcription. 0.7.4 inference
+endpoints already support FLAC via PyAV, allowing a compatible rolling update.
+
+The external Nova command helper is versioned with CtrlSpeak, not Hermes.
+It retains one selected transcript and the existing schema-2 `.ctrlspeak.json`
+feedback sidecar. See [Nova integration](NOVA_CTRLSPEAK_0.7.5_HANDOFF.md).
 
 The maintained implementation is in `server/whisper_transcription`. The v0.7
 contract preserves the three deployment roles introduced in v0.6 and adds safe,

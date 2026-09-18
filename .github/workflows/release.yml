@@ -8,8 +8,25 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ctrlspeak-release
+  cancel-in-progress: false
+
 jobs:
+  service-tests:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install fastapi==0.139.0 httpx==0.28.1 python-multipart==0.0.32 pytest==8.4.2 av==18.0.0 numpy==2.2.6 requests==2.32.5
+      - run: python -m pip install -e server/whisper_transcription --no-deps
+      - run: python scripts/run_bounded_tests.py --timeout 180 --cwd server/whisper_transcription -q
+
   build:
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -44,7 +61,7 @@ jobs:
         run: python scripts/release.py check-version --tag "${{ github.ref_name }}"
 
       - name: Run required tests
-        run: python -m pytest -m core_headless
+        run: python scripts/run_bounded_tests.py --timeout 180 -m core_headless
 
       - name: Build one-file application
         run: python -m utils.build_exe
@@ -54,13 +71,18 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path release -Force | Out-Null
-          $process = Start-Process -FilePath .\dist\CtrlSpeak.exe `
+          $process = Start-Process -WindowStyle Hidden -FilePath .\dist\CtrlSpeak.exe `
             -ArgumentList @('--health-check-file', "$env:RUNNER_TEMP\ctrlspeak-health.json") `
-            -Wait -PassThru
+            -PassThru
+          if (-not $process.WaitForExit(90000)) {
+            taskkill /PID $process.Id /T /F | Out-Null
+            throw "Packaged health check exceeded 90 seconds"
+          }
           if ($process.ExitCode -ne 0) { throw "CtrlSpeak.exe health check failed" }
           $health = Get-Content -Raw "$env:RUNNER_TEMP\ctrlspeak-health.json" | ConvertFrom-Json
           $expectedVersion = ('${{ github.ref_name }}').Substring(1)
           if ($health.product -ne 'ctrlspeak' -or $health.version -ne $expectedVersion -or -not $health.frozen) { throw "Invalid packaged health metadata" }
+          if (-not $health.audio_transport.bit_perfect) { throw "Packaged FLAC codec failed" }
           $versionInfo = (Get-Item -LiteralPath .\dist\CtrlSpeak.exe).VersionInfo
           if ($versionInfo.FileVersion -ne $expectedVersion -or $versionInfo.ProductVersion -ne $expectedVersion) { throw "Invalid packaged Windows version resource" }
           Copy-Item -LiteralPath .\dist\CtrlSpeak.exe -Destination .\release\CtrlSpeak-windows-x86_64.exe
@@ -72,8 +94,9 @@ jobs:
           set -euo pipefail
           mkdir -p release
           chmod +x dist/CtrlSpeak
-          dist/CtrlSpeak --health-check-file "$RUNNER_TEMP/ctrlspeak-health.json"
+          timeout 90 dist/CtrlSpeak --health-check-file "$RUNNER_TEMP/ctrlspeak-health.json"
           python -c "import json,os; p=json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json')); assert p['product']=='ctrlspeak' and p['version']=='${GITHUB_REF_NAME#v}' and p['frozen'] is True"
+          python -c "import json,os; assert json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json'))['audio_transport']['bit_perfect'] is True"
           cp dist/CtrlSpeak release/CtrlSpeak-linux-x86_64
           chmod 755 release/CtrlSpeak-linux-x86_64
 
@@ -94,7 +117,7 @@ jobs:
           retention-days: 14
 
   manifest:
-    needs: build
+    needs: [build, service-tests]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -140,6 +163,8 @@ jobs:
   publish:
     needs: manifest
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    environment: ctrlspeak-production
     permissions:
       contents: write
     steps:
@@ -163,13 +188,14 @@ jobs:
           chmod +x release/CtrlSpeak-linux-x86_64
           python scripts/release.py verify --directory release --tag "${{ github.ref_name }}"
 
-      - name: Create draft release with exactly five public assets
+      - name: Create or reconcile immutable draft release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "$GITHUB_REF_NAME" \
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --draft \
@@ -180,6 +206,52 @@ jobs:
             release/update-manifest.json \
             release/update-manifest.sig \
             release/SHA256SUMS
+          fi
+
+      - name: Join private deployment network
+        env:
+          CI_WIREGUARD: ${{ secrets.CTRLSPEAK_CI_WIREGUARD }}
+          CI_SSH_KEY: ${{ secrets.CTRLSPEAK_CI_SSH_KEY }}
+          CI_KNOWN_HOSTS: ${{ secrets.CTRLSPEAK_CI_KNOWN_HOSTS }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wireguard-tools
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          os.umask(0o077)
+          root = Path.home()/'.ssh'; root.mkdir(exist_ok=True)
+          (root/'ctrlspeak-deploy').write_text(os.environ['CI_SSH_KEY'])
+          (root/'known_hosts').write_text(os.environ['CI_KNOWN_HOSTS'])
+          Path(os.environ['RUNNER_TEMP']+'/ci.conf').write_text(os.environ['CI_WIREGUARD'])
+          PY
+          sudo install -m 600 "$RUNNER_TEMP/ci.conf" /etc/wireguard/ci.conf
+          sudo wg-quick up ci
+          echo "CTRLSPEAK_DEPLOY_KEY=$HOME/.ssh/ctrlspeak-deploy" >> "$GITHUB_ENV"
+
+      - name: Independently audit uploaded candidate before activation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir audit
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir audit
+          test "$(find audit -maxdepth 1 -type f | wc -l)" -eq 5
+          chmod +x audit/CtrlSpeak-linux-x86_64
+          python scripts/release.py verify --directory audit --tag "$GITHUB_REF_NAME"
+          cmp release/update-manifest.json audit/update-manifest.json
+          cmp release/update-manifest.sig audit/update-manifest.sig
+
+      - name: Stage, deploy and verify required backend fleet
+        env:
+          CTRLSPEAK_DEPLOY_HOSTS: ${{ secrets.CTRLSPEAK_DEPLOY_HOSTS }}
+        run: python scripts/deploy_fleet.py --directory release
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deployment-receipt
+          path: release/deployment-receipt.json
+          if-no-files-found: warn
 
       - name: Download and audit draft assets, then publish stable release
         env:
@@ -187,10 +259,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "true"
-          mkdir audit
-          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir audit
-          test "$(find audit -maxdepth 1 -type f | wc -l)" -eq 5
-          chmod +x audit/CtrlSpeak-linux-x86_64
-          python scripts/release.py verify --directory audit --tag "$GITHUB_REF_NAME"
-          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          if [ "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "true" ]; then
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          fi
+
+      - name: Reconcile installed Ubuntu desktop companion
+        env:
+          CTRLSPEAK_DEPLOY_HOSTS: ${{ secrets.CTRLSPEAK_DEPLOY_HOSTS }}
+        run: python scripts/deploy_fleet.py --directory release --desktop-only
+
+      - name: Leave private deployment network
+        if: always()
+        run: |
+          sudo wg-quick down ci || true
+          sudo rm -f /etc/wireguard/ci.conf
+          rm -f "$RUNNER_TEMP/ci.conf" "$HOME/.ssh/ctrlspeak-deploy"

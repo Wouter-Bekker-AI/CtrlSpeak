@@ -33,3 +33,5 @@ temp*.wav
 # Misc
 Thumbs.db
 .codex-temp/
+# Isolated, bounded test state (never production configuration).
+.pytest-isolated/

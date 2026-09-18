@@ -2,7 +2,7 @@ name: CtrlSpeak tests
 
 on:
   push:
-    branches: [v0.7]
+    branches: [v0.7, 'codex/lossless-transport-*']
   pull_request:
     branches: [v0.7]
 
@@ -36,7 +36,7 @@ jobs:
           python -m pip install -r requirements.txt
 
       - name: Run core headless tests
-        run: python -m pytest -m core_headless
+        run: python scripts/run_bounded_tests.py --timeout 180 -m core_headless
 
       - name: Compile Python sources
         run: python -m compileall main.py utils scripts tests
@@ -67,11 +67,11 @@ jobs:
             fastapi==0.139.0 \
             httpx==0.28.1 \
             python-multipart==0.0.32 \
-            pytest==8.4.2
+            pytest==8.4.2 av==18.0.0 numpy==2.2.6 requests==2.32.5
           python -m pip install -e . --no-deps
 
       - name: Run API tests
-        run: python -m pytest -q
+        run: python ../../scripts/run_bounded_tests.py --timeout 180 --cwd . -q
 
       - name: Compile API sources
         run: python -m compileall app tests

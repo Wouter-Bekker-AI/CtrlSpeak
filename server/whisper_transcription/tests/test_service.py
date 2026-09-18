@@ -78,11 +78,13 @@ def test_health_and_openapi_report_current_language_contract(tmp_path: Path) -> 
         "status": "ready",
         "version": SERVICE_VERSION,
         "role": "standalone",
+        "revision": "source",
+        "audio_transport": __import__("app.audio_transport", fromlist=["capabilities"]).capabilities(),
         "model": "fake-whisper",
         "device": "fake-cuda",
         "compute_type": "fake-float16",
     }
-    assert SERVICE_VERSION == "0.7.4"
+    assert SERVICE_VERSION == "0.7.5"
     rendered = str(document)
     assert "allowed_languages" in rendered
     assert "server-enforced" in rendered
@@ -227,7 +229,8 @@ def test_correction_and_confirmed_text_routes_remain_operational(tmp_path: Path)
     assert feedback.json()["override_id"]
 
 
-def test_faster_whisper_backend_forces_selected_language_and_transcribe_task(tmp_path: Path) -> None:
+def test_faster_whisper_backend_forces_selected_language_and_transcribe_task(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("app.main.decode_bounded", lambda _path: [0.0])
     class FakeModel:
         def __init__(self) -> None:
             self.calls: list[dict[str, Any]] = []

@@ -22,6 +22,11 @@
     <category>Accessibility</category>
   </categories>
   <releases>
+    <release version="0.7.5" date="2026-09-18">
+      <description>
+        <p>Lossless FLAC uploads, unchanged compressed forwarding, an isolated Nova helper, and coordinated signed backend deployment.</p>
+      </description>
+    </release>
     <release version="0.7.4" date="2026-09-15">
       <description>
         <p>Optional S1-mini cleanup on the Ubuntu GPU, a saved cleanup preference, truthful fallback status, and no CPU cleanup delay on the gateway.</p>

@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.auth import Authenticator, Principal
+from app.audio_transport import AudioLimitError, capabilities as audio_capabilities, decode_bounded
 from app.corrections import CorrectionStore
 from app.languages import choose_allowed_language, normalize_language_policy
 from app.normalization import (
@@ -33,7 +34,7 @@ from app.providers import (
 )
 
 
-SERVICE_VERSION = "0.7.4"
+SERVICE_VERSION = "0.7.5"
 LOGGER = logging.getLogger("ctrlspeak_whisper_transcription")
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = Path(os.environ.get("WHISPER_DATA_DIR", ROOT / "data"))
@@ -129,13 +130,10 @@ class FasterWhisperBackend:
                 "Automatic device or compute-type fallback is intentionally disabled."
             ) from exc
 
-    def _detect_language(self, audio_path: Path) -> str | None:
+    def _detect_language(self, audio) -> str | None:
         if self.model is None:
             raise RuntimeError("model is not loaded")
         try:
-            from faster_whisper.audio import decode_audio
-
-            audio = decode_audio(str(audio_path))
             detected, _probability, _all_probabilities = self.model.detect_language(
                 audio=audio,
                 vad_filter=True,
@@ -157,10 +155,11 @@ class FasterWhisperBackend:
     ) -> dict[str, Any]:
         if self.model is None:
             raise RuntimeError("model is not loaded")
-        detected_language = self._detect_language(audio_path) if len(allowed_languages) > 1 else None
+        audio = decode_bounded(audio_path)
+        detected_language = self._detect_language(audio) if len(allowed_languages) > 1 else None
         selected_language = choose_allowed_language(allowed_languages, detected_language)
         segments, info = self.model.transcribe(
-            str(audio_path),
+            audio,
             language=selected_language,
             task="transcribe",
             initial_prompt=initial_prompt,
@@ -480,6 +479,8 @@ def create_app(
             "status": "ready",
             "version": SERVICE_VERSION,
             "role": role,
+            "revision": os.environ.get("CTRLSPEAK_RELEASE_REVISION", "source"),
+            "audio_transport": audio_capabilities(),
         }
         if role in {"worker", "standalone"}:
             payload.update(
@@ -499,6 +500,8 @@ def create_app(
             return {
                 "version": SERVICE_VERSION,
                 "role": role,
+                "revision": os.environ.get("CTRLSPEAK_RELEASE_REVISION", "source"),
+                "audio_transport": audio_capabilities(),
                 "accepts_client_transcriptions": False,
                 "applies_corrections": False,
                 "text_normalization": {
@@ -527,6 +530,8 @@ def create_app(
         return {
             "version": SERVICE_VERSION,
             "role": role,
+            "revision": os.environ.get("CTRLSPEAK_RELEASE_REVISION", "source"),
+            "audio_transport": audio_capabilities(),
             "accepts_client_transcriptions": True,
             "applies_corrections": True,
             "openai_key_storage": "request_only",
@@ -610,6 +615,8 @@ def create_app(
                     max(0.0, time.monotonic() - inference_started_at) * 1000.0,
                     3,
                 )
+            except AudioLimitError as exc:
+                raise HTTPException(422, "audio is invalid or exceeds decoding limits") from exc
             except Exception as exc:
                 LOGGER.exception("worker transcription failed")
                 raise HTTPException(500, "worker transcription failed") from exc

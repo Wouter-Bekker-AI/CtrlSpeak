@@ -1,4 +1,15 @@
-# CtrlSpeak transcription service v0.7.4
+# CtrlSpeak transcription service v0.7.5
+
+0.7.5 adds lossless FLAC transport, compressed-byte forwarding and bounded
+local inference decoding. Existing WAV callers, routing and optional CUDA S1
+cleanup are preserved. The external Hermes command adapter now uses the shared
+transport library in an isolated `.helper-venv`; it does not require changes or
+dependencies inside Hermes. Install it with `requirements-helper.txt` and test
+`scripts/hermes-stt-api --self-test` before selecting its release.
+
+The signed release pipeline coordinates immutable worker/gateway/helper Git
+checkouts, staged codec tests, rollback selectors and live canaries before the
+desktop update is published. See [release operations](../../docs/V0.7.5_RELEASE.md).
 
 This directory contains both CtrlSpeak server roles:
 

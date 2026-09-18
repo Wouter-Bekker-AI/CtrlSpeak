@@ -67,6 +67,8 @@ def main(argv: list[str]) -> int:
     if args.health_check_file:
         target = Path(args.health_check_file).expanduser().resolve()
         try:
+            from server.whisper_transcription.app.audio_transport import self_test
+            audio_transport = self_test()
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(
                 json.dumps(
@@ -75,6 +77,7 @@ def main(argv: list[str]) -> int:
                         "version": APP_VERSION,
                         "executable": str(Path(sys.executable).resolve()),
                         "frozen": bool(getattr(sys, "frozen", False)),
+                        "audio_transport": audio_transport,
                     },
                     sort_keys=True,
                 )

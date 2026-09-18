@@ -38,5 +38,6 @@ exec "${VENV_DIR}/bin/python" -m uvicorn app.main:app \
   --host "${BIND_HOST}" \
   --port "${WHISPER_PORT:-8765}" \
   --workers 1 \
+  --timeout-graceful-shutdown 300 \
   --no-proxy-headers \
   --log-level "${WHISPER_LOG_LEVEL:-info}"

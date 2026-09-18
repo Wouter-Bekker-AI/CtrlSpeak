@@ -68,11 +68,13 @@ asset_datas = [
 datas = _dedupe(third_party_datas + asset_datas)
 
 third_party_binaries = []
-for pkg in ('ctranslate2', 'ffpyplayer', 'faster_whisper', 'cryptography'):
+for pkg in ('ctranslate2', 'ffpyplayer', 'faster_whisper', 'cryptography', 'av'):
     third_party_binaries.extend(_collect_or_empty(collect_dynamic_libs, pkg))
 binaries = _dedupe(third_party_binaries)
 
 common_hiddenimports = [
+    'av',
+    'server.whisper_transcription.app.audio_transport',
     'cryptography',
     'cryptography.hazmat.primitives.asymmetric.ed25519',
     'ffpyplayer.player',

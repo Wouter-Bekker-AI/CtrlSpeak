@@ -275,7 +275,7 @@ def test_api_transcription_uploads_audio_and_retains_audit_metadata(tmp_path: Pa
     assert result.transcription_id == "tx-123"
     assert result.raw_text == "raw words"
     assert result.corrected_text == "corrected words"
-    assert result.metadata == {**response_payload, "client_cleanup_requested": False,
+    assert {k: v for k, v in result.metadata.items() if k != "client_audio_transport"} == {**response_payload, "client_cleanup_requested": False,
                                "client_cleanup_applied": False}
     assert result.feedback_target is not None
     assert result.feedback_target.backend == "api"

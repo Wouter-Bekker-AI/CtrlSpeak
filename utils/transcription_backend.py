@@ -6,6 +6,7 @@ status text, and HTTP behavior remain straightforward to test headlessly.
 from __future__ import annotations
 
 import os
+import logging
 from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -20,6 +21,7 @@ from utils.credential_store import (
     secure_storage_available,
 )
 from utils.languages import language_policy_display, normalize_allowed_output_languages
+from server.whisper_transcription.app.audio_transport import prepare_audio
 
 
 DEFAULT_API_URL = "http://127.0.0.1:8765"
@@ -667,9 +669,11 @@ class ApiTranscriptionClient:
     def transcribe(self, audio_path: Path) -> TranscriptionResult:
         path = Path(audio_path)
         try:
-            with path.open("rb") as audio_file:
+            with prepare_audio(path) as prepared, prepared.path.open("rb") as audio_file:
+                transport_metadata = prepared.telemetry()
+                logging.getLogger(__name__).info("Audio transport: %s", transport_metadata)
                 request: dict[str, Any] = {
-                    "files": {"audio": (path.name, audio_file, "audio/wav")},
+                    "files": {"audio": (prepared.filename, audio_file, prepared.content_type)},
                 }
                 request_data: dict[str, str] = {}
                 if self.config.gpu_cleanup_enabled:
@@ -694,7 +698,7 @@ class ApiTranscriptionClient:
                 )
         except ApiBackendError:
             raise
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             raise ApiBackendError(f"Unable to read audio file {path}: {exc}") from exc
 
         text = payload.get("text")
@@ -731,6 +735,7 @@ class ApiTranscriptionClient:
                 selected_text = cleaned
                 cleanup_applied = True
         result_metadata = dict(payload)
+        result_metadata["client_audio_transport"] = transport_metadata
         result_metadata["client_cleanup_requested"] = self.config.gpu_cleanup_enabled
         result_metadata["client_cleanup_applied"] = cleanup_applied
         return TranscriptionResult(
