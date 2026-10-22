@@ -84,6 +84,7 @@ jobs:
           if ($health.product -ne 'ctrlspeak' -or $health.version -ne $expectedVersion -or -not $health.frozen) { throw "Invalid packaged health metadata" }
           if (-not $health.audio_transport.bit_perfect) { throw "Packaged FLAC codec failed" }
           if (-not $health.request_transport.ok -or -not $health.request_transport.async_dns) { throw "Packaged cancellable HTTP/DNS runtime failed" }
+          if ($health.request_transport.event_loop -ne 'ProactorEventLoop') { throw "Windows packaged HTTP runtime must use its native network event loop" }
           $versionInfo = (Get-Item -LiteralPath .\dist\CtrlSpeak.exe).VersionInfo
           if ($versionInfo.FileVersion -ne $expectedVersion -or $versionInfo.ProductVersion -ne $expectedVersion) { throw "Invalid packaged Windows version resource" }
           Copy-Item -LiteralPath .\dist\CtrlSpeak.exe -Destination .\release\CtrlSpeak-windows-x86_64.exe

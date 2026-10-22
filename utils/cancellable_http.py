@@ -9,7 +9,6 @@ import asyncio
 import json
 import ipaddress
 from pathlib import Path
-import sys
 import time
 from typing import Callable, Mapping
 from urllib.parse import urlsplit
@@ -126,9 +125,12 @@ async def upload_audio(
 
 
 def _run_owned_loop(operation):
-    # aiodns needs a selector on Windows. A private loop avoids changing the
-    # process policy, the GUI loop, or another request's cancellation state.
-    loop = asyncio.SelectorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
+    # Keep the native Windows Proactor transport. Forcing Selector here caused
+    # malformed multipart writes on the deployed WireGuard route under actual
+    # network backpressure, despite passing loopback-only async tests. Current
+    # aiodns + thread-safe c-ares support Proactor without a getaddrinfo executor.
+    # A private loop leaves process policy and other requests unchanged.
+    loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(operation)
     finally:
@@ -155,7 +157,8 @@ def request_transport_self_test() -> dict:
                 assert form().content_type.startswith("multipart/form-data;")
                 assert not session.closed
             return {"ok": True, "cancellable_http": True, "async_dns": True,
-                    "aiohttp_version": aiohttp.__version__}
+                    "aiohttp_version": aiohttp.__version__,
+                    "event_loop": type(asyncio.get_running_loop()).__name__}
         finally:
             await resolver.close()
     return _run_owned_loop(check())

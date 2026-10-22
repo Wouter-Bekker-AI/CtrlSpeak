@@ -4,10 +4,11 @@ import asyncio
 from pathlib import Path
 import threading
 import time
+import sys
 
 import pytest
 
-from utils.cancellable_http import TransportFailure, upload_audio
+from utils.cancellable_http import TransportFailure, upload_audio, post_audio
 from utils.recording_recovery import RecordingRecovery
 from utils.request_control import current_request_control, request_control
 from utils.transcription_backend import _transcription_http_error
@@ -211,9 +212,14 @@ def test_hostname_dns_timeout_closes_owned_resolver(monkeypatch, tmp_path):
 def test_http_streams_lossless_body_and_reports_actual_stages(tmp_path):
     from aiohttp import web
     path = tmp_path / "audio.flac"
-    original = b"fLaC" + b"lossless-audio" * 100
+    original = b"fLaC" + b"lossless-audio" * 100000
     path.write_bytes(original)
     stages = []
+    client_loops = []
+
+    def progress(stage):
+        stages.append(stage)
+        client_loops.append(type(asyncio.get_running_loop()).__name__)
 
     async def scenario():
         async def handle(request):
@@ -223,7 +229,7 @@ def test_http_streams_lossless_body_and_reports_actual_stages(tmp_path):
             assert request.headers["X-CtrlSpeak-Request-ID"] == "safe-request-id"
             return web.json_response({"text": "worked", "id": "tx", "raw_text": "worked"})
 
-        app = web.Application()
+        app = web.Application(client_max_size=4 * 1024 * 1024)
         app.router.add_post("/v1/transcribe", handle)
         runner = web.AppRunner(app)
         await runner.setup()
@@ -231,14 +237,20 @@ def test_http_streams_lossless_body_and_reports_actual_stages(tmp_path):
         await site.start()
         port = site._server.sockets[0].getsockname()[1]
         try:
-            status, payload, timings = await upload_audio(
+            # Exercise the synchronous entrypoint actually used by desktop,
+            # not only upload_audio on pytest's outer event loop. Windows'
+            # native Proactor transport is required on the real gateway route.
+            status, payload, timings = await asyncio.to_thread(
+                post_audio,
                 f"http://127.0.0.1:{port}/v1/transcribe", path, filename="recording.flac",
                 content_type="audio/flac", fields={"strategy": "ubuntu-gpu-preferred"},
                 headers={"X-CtrlSpeak-Request-ID": "safe-request-id"},
-                cancel_check=lambda: False, progress=stages.append,
+                cancel_check=lambda: False, progress=progress,
             )
             assert status == 200 and payload["text"] == "worked"
             assert stages == ["uploading", "transcribing"]
+            if sys.platform == "win32":
+                assert client_loops == ["ProactorEventLoop", "ProactorEventLoop"]
             assert timings["request_ms"] >= timings["upload_ms"] >= 0
         finally:
             await runner.cleanup()
