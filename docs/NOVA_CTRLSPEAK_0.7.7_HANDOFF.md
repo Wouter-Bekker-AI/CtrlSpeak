@@ -15,7 +15,12 @@ Do not manually poll/retry the same voice note in a loop, and do not add a secon
 cleanup pass. Report an actionable bounded failure if all permitted providers
 fail; an explicit retry can incur another provider charge.
 
-Suggested notice after the release is verified:
+Deployment verified on 2026-10-22: gateway, GPU worker and this external helper
+all use release revision `47bcc677bf9f194a2fd15d592d3e6d95d557cfe5`. GPU/S1,
+OpenAI, gateway Tiny and helper schema-2 live canaries passed. The existing
+Hermes Telegram process was not restarted. See the [release verification record](V0.7.7_RELEASE.md).
+
+Suggested notice (not automatically sent to Nova):
 
 > CtrlSpeak 0.7.7 improves busy-worker fallback and adds request/stage diagnostics.
 > Your external helper was reconciled with the release without restarting Hermes.
