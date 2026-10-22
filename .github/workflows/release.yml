@@ -83,6 +83,7 @@ jobs:
           $expectedVersion = ('${{ github.ref_name }}').Substring(1)
           if ($health.product -ne 'ctrlspeak' -or $health.version -ne $expectedVersion -or -not $health.frozen) { throw "Invalid packaged health metadata" }
           if (-not $health.audio_transport.bit_perfect) { throw "Packaged FLAC codec failed" }
+          if (-not $health.request_transport.ok -or -not $health.request_transport.async_dns) { throw "Packaged cancellable HTTP/DNS runtime failed" }
           $versionInfo = (Get-Item -LiteralPath .\dist\CtrlSpeak.exe).VersionInfo
           if ($versionInfo.FileVersion -ne $expectedVersion -or $versionInfo.ProductVersion -ne $expectedVersion) { throw "Invalid packaged Windows version resource" }
           Copy-Item -LiteralPath .\dist\CtrlSpeak.exe -Destination .\release\CtrlSpeak-windows-x86_64.exe
@@ -97,6 +98,7 @@ jobs:
           timeout 90 dist/CtrlSpeak --health-check-file "$RUNNER_TEMP/ctrlspeak-health.json"
           python -c "import json,os; p=json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json')); assert p['product']=='ctrlspeak' and p['version']=='${GITHUB_REF_NAME#v}' and p['frozen'] is True"
           python -c "import json,os; assert json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json'))['audio_transport']['bit_perfect'] is True"
+          python -c "import json,os; p=json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json'))['request_transport']; assert p['ok'] and p['async_dns'] and p['cancellable_http']"
           cp dist/CtrlSpeak release/CtrlSpeak-linux-x86_64
           chmod 755 release/CtrlSpeak-linux-x86_64
 

@@ -1,4 +1,4 @@
-# CtrlSpeak v0.7.6
+# CtrlSpeak v0.7.7
 
 CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into
@@ -21,6 +21,30 @@ timings, and configurable peak-bounded feedback sounds.
 The legacy **Client + Server** and **Client Only** roles remain inside the
 embedded/local backend. Remote API mode is independent of those roles and does
 not start discovery, a local server, or a model download.
+
+## v0.7.7 reliability and responsiveness
+
+Remote transcription now has cancellable network I/O, separate connection/read
+limits and an overall request deadline. The UI distinguishes preparation,
+upload, transcription and text insertion, and reports gateway/network problems
+separately from provider authentication, billing or availability failures.
+
+Failed remote recordings can be retried explicitly or discarded. Only one
+recording (at most 100 MiB) is retained in process memory, for at most 15 minutes;
+it does not survive exit/restart. Retry can incur a new provider charge. Cancel,
+Discard, expiry and starting a new recording clear recovery audio. A partial
+text-insertion failure never automatically retranscribes or replays the text:
+use **Copy last transcription** and check the target before pasting.
+
+Windows AnyDesk/terminal insertion uses small paced Unicode batches instead of sleeping
+after every character. Single-line/control-character protections remain on by
+default. Cancellation, focus changes or partial OS delivery stop typing rather
+than replaying a potentially duplicated prefix.
+
+The worker advertises busy/stalled capacity and the gateway falls back promptly
+when its inference slot is occupied. Offline circuit breaking, caller-owned
+OpenAI credentials, lossless FLAC and optional GPU S1 cleanup are preserved.
+See the [0.7.7 release and operations guide](docs/V0.7.7_RELEASE.md).
 
 ## v0.7.6 safe dictation and optional S1 formatting
 

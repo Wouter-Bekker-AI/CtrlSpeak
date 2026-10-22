@@ -2,7 +2,7 @@ name: CtrlSpeak tests
 
 on:
   push:
-    branches: [v0.7, 'codex/lossless-transport-*', 'codex/safe-dictation-*']
+    branches: [v0.7, 'codex/lossless-transport-*', 'codex/safe-dictation-*', 'codex/reliability-*']
   pull_request:
     branches: [v0.7]
 

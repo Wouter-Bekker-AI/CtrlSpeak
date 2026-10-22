@@ -22,6 +22,11 @@
     <category>Accessibility</category>
   </categories>
   <releases>
+    <release version="0.7.7" date="2026-10-22">
+      <description>
+        <p>Faster safe text insertion, cancellable uploads, manual failed-recording recovery, stage timings and busy-aware GPU fallback.</p>
+      </description>
+    </release>
     <release version="0.7.6" date="2026-09-19">
       <description>
         <p>Safe single-line dictation, optional S1 paragraph formatting and complete private transcription auditing.</p>

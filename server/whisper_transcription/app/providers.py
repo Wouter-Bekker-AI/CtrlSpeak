@@ -11,6 +11,7 @@ from typing import Any, Callable, Protocol
 
 import httpx
 from app.audio_transport import audio_format, AudioLimitError
+from app.admission import Admission, safe_timings
 
 
 LOGGER = logging.getLogger("ctrlspeak_whisper_transcription.providers")
@@ -73,6 +74,21 @@ class ProviderContext:
     word_timestamps: bool
     openai_api_key: str | None
     cleanup: bool = False
+    request_id: str | None = None
+    deadline_at: float | None = None
+    cancel_event: threading.Event | None = None
+
+    def remaining_seconds(self, default: float) -> float:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise ProviderFailure("Caller cancelled the request", category="request_cancelled",
+                                  retryable=False, status_code=499)
+        if self.deadline_at is None:
+            return default
+        remaining = self.deadline_at - time.monotonic()
+        if remaining <= 0:
+            raise ProviderFailure("Request deadline exceeded", category="request_deadline_exceeded",
+                                  retryable=True, status_code=504)
+        return min(default, remaining)
 
 
 class Provider(Protocol):
@@ -90,6 +106,7 @@ class LocalWhisperProvider:
         self.lazy = lazy
         self._loaded = False
         self._load_lock = threading.Lock()
+        self._admission = Admission(1, 120)
 
     def load(self) -> None:
         if self._loaded:
@@ -100,19 +117,26 @@ class LocalWhisperProvider:
                 self._loaded = True
 
     def describe(self) -> dict[str, Any]:
+        admission = self._admission.snapshot()
         return {
             "id": self.id,
             "kind": "local_whisper",
             "model": self.backend.name,
             "device": self.backend.device,
             "compute_type": self.backend.compute_type,
-            "status": "ready" if self._loaded else ("available" if self.lazy else "starting"),
+            "status": admission["status"] if admission["active"] else (
+                "ready" if self._loaded else ("available" if self.lazy else "starting")),
+            "admission": admission,
             "quality": "fallback" if self.lazy else "high",
             "requires_credential": False,
             "paid": False,
         }
 
     def transcribe(self, audio_path: Path, context: ProviderContext) -> dict[str, Any]:
+        lease = self._admission.acquire()
+        if lease is None:
+            raise ProviderFailure("local transcription provider is busy", category="local_busy",
+                                  retryable=True, status_code=503)
         try:
             self.load()
             return self.backend.transcribe(
@@ -131,6 +155,8 @@ class LocalWhisperProvider:
                 category="local_provider_failed",
                 retryable=True,
             ) from exc
+        finally:
+            lease.release()
 
 
 class RemoteWorkerProvider:
@@ -169,8 +195,10 @@ class RemoteWorkerProvider:
         self._monotonic = monotonic
         self._state_lock = threading.Lock()
         self._probe_lock = threading.Lock()
+        self._request_lock = threading.Lock()
         self._healthy_until = 0.0
         self._circuit_open_until = 0.0
+        self._busy_until = 0.0
         self._last_probe_at: float | None = None
         self._last_probe_duration_ms: float | None = None
         self._last_probe_status = "not_probed"
@@ -190,6 +218,7 @@ class RemoteWorkerProvider:
         with self._state_lock:
             self._healthy_until = now + self.health_cache_seconds
             self._circuit_open_until = 0.0
+            self._busy_until = 0.0
             if payload:
                 for key in ("model", "device", "compute_type"):
                     if payload.get(key):
@@ -200,6 +229,16 @@ class RemoteWorkerProvider:
         with self._state_lock:
             self._healthy_until = 0.0
             self._circuit_open_until = now + self.circuit_break_seconds
+
+    def _mark_busy(self) -> None:
+        with self._state_lock:
+            self._healthy_until = 0.0
+            self._busy_until = self._monotonic() + 0.5
+
+    @staticmethod
+    def _busy_failure() -> ProviderFailure:
+        return ProviderFailure("GPU worker has no free transcription capacity",
+                               category="worker_busy", retryable=True, status_code=503)
 
     def _record_probe(self, status: str, started_at: float) -> None:
         finished_at = self._monotonic()
@@ -228,6 +267,7 @@ class RemoteWorkerProvider:
                     now,
                     max(now, self._circuit_open_until),
                 ),
+                "busy_retry_after_ms": _duration_ms(now, max(now, self._busy_until)),
             }
 
     @staticmethod
@@ -242,6 +282,8 @@ class RemoteWorkerProvider:
     def _state_is_usable(self) -> bool:
         now = self._monotonic()
         with self._state_lock:
+            if now < self._busy_until:
+                raise self._busy_failure()
             if now < self._circuit_open_until:
                 raise self._circuit_failure()
             return now < self._healthy_until
@@ -289,15 +331,24 @@ class RemoteWorkerProvider:
                 payload = dict(response.json())
             except (ValueError, TypeError):
                 payload = {}
+            admission = payload.get("admission", {})
+            if (payload.get("status") in {"busy", "stalled"}
+                    or isinstance(admission, dict) and admission.get("available") == 0):
+                self._record_probe("busy", probe_started_at)
+                self._mark_busy()
+                raise self._busy_failure()
             self._record_probe("ready", probe_started_at)
             self._mark_ready(payload)
 
     def describe(self) -> dict[str, Any]:
         try:
+            if self._request_lock.locked():
+                raise self._busy_failure()
             self._ensure_available()
             status = "ready"
         except ProviderFailure as exc:
-            status = "circuit_open" if exc.category == "worker_circuit_open" else "unavailable"
+            status = ("busy" if exc.category == "worker_busy" else
+                      "circuit_open" if exc.category == "worker_circuit_open" else "unavailable")
         with self._state_lock:
             metadata = dict(self._worker_metadata)
         health = self._health_snapshot(status)
@@ -316,6 +367,18 @@ class RemoteWorkerProvider:
         }
 
     def transcribe(self, audio_path: Path, context: ProviderContext) -> dict[str, Any]:
+        # The one-slot worker cannot accept overlapping requests from this
+        # gateway. Reject before sending another multipart body over the WAN;
+        # HTTP clients may send the full body before noticing an early 503.
+        if not self._request_lock.acquire(blocking=False):
+            raise self._busy_failure()
+        try:
+            return self._transcribe_admitted(audio_path, context)
+        finally:
+            self._request_lock.release()
+
+    def _transcribe_admitted(self, audio_path: Path, context: ProviderContext) -> dict[str, Any]:
+        context.remaining_seconds(self.timeout_seconds)
         self._ensure_available()
         data: dict[str, str] = {
             "allowed_languages": ",".join(context.allowed_languages),
@@ -326,16 +389,20 @@ class RemoteWorkerProvider:
         if context.initial_prompt:
             data["initial_prompt"] = context.initial_prompt
         extension, content_type = audio_format(audio_path)
+        timeout_seconds = context.remaining_seconds(self.timeout_seconds)
+        headers = {"Authorization": f"Bearer {self._token}"}
+        if context.request_id:
+            headers["X-CtrlSpeak-Request-ID"] = context.request_id
         try:
             with audio_path.open("rb") as handle, self._client_context() as client:
                 response = client.post(
                     f"{self.base_url}/v1/worker/transcribe",
-                    headers={"Authorization": f"Bearer {self._token}"},
+                    headers=headers,
                     data=data,
                     files={"audio": ("recording" + extension, handle, content_type)},
                     timeout=httpx.Timeout(
-                        self.timeout_seconds,
-                        connect=self.connect_timeout_seconds,
+                        timeout_seconds,
+                        connect=min(timeout_seconds, self.connect_timeout_seconds),
                     ),
                 )
         except httpx.RequestError as exc:
@@ -346,6 +413,14 @@ class RemoteWorkerProvider:
                 retryable=True,
             ) from exc
         if response.status_code != 200:
+            try:
+                detail = response.json().get("detail", {})
+            except (ValueError, AttributeError):
+                detail = {}
+            category = detail.get("category") if isinstance(detail, dict) else None
+            if category in {"worker_busy", "worker_deadline_exceeded"}:
+                self._mark_busy()
+                raise self._busy_failure()
             if response.status_code == 401 or response.status_code >= 500:
                 self._mark_unavailable()
             raise ProviderFailure(
@@ -453,6 +528,7 @@ class OpenAITranscriptionProvider:
         if context.initial_prompt:
             form["prompt"] = context.initial_prompt
         extension, content_type = audio_format(audio_path)
+        timeout_seconds = context.remaining_seconds(self.timeout_seconds)
         try:
             client_context = (
                 nullcontext(self._client)
@@ -465,7 +541,7 @@ class OpenAITranscriptionProvider:
                     headers={"Authorization": f"Bearer {context.openai_api_key}"},
                     data=form,
                     files={"file": ("recording" + extension, handle, content_type)},
-                    timeout=self.timeout_seconds,
+                    timeout=httpx.Timeout(timeout_seconds, connect=min(3.0, timeout_seconds)),
                 )
         except httpx.RequestError as exc:
             raise ProviderFailure(
@@ -600,6 +676,7 @@ class ProviderRouter:
                 continue
             attempt_started_at = self._monotonic()
             try:
+                context.remaining_seconds(600)
                 result = provider.transcribe(audio_path, context)
                 attempt = {
                     "provider": current_id,
@@ -616,6 +693,9 @@ class ProviderRouter:
                         float(inference_duration_ms),
                         3,
                     )
+                timings = safe_timings(result.get("timings"))
+                if timings:
+                    attempt["worker_timings"] = timings
                 attempts.append(attempt)
                 return RoutedResult(
                     result,
@@ -635,7 +715,7 @@ class ProviderRouter:
                 # terminal error.  Cascading strategies are explicit user
                 # consent to try the next provider even for credential/quota
                 # failures, while still recording the cause in ``attempts``.
-                if not exc.retryable and len(chain) == 1:
+                if exc.category in {"invalid_audio", "request_deadline_exceeded", "request_cancelled"} or (not exc.retryable and len(chain) == 1):
                     exc.attempts = attempts  # type: ignore[attr-defined]
                     exc.routing_duration_ms = _duration_ms(  # type: ignore[attr-defined]
                         routing_started_at,

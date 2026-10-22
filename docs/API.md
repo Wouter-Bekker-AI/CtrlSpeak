@@ -1,4 +1,48 @@
-# CtrlSpeak API v0.7.6
+# CtrlSpeak API v0.7.7
+
+## Admission, deadlines and diagnostics (0.7.7)
+
+The gateway/worker retain the existing transcription and correction contracts.
+New request correlation and numeric stage timing fields are additive; consumers
+must continue selecting `normalized_text` only with validated applied S1
+provenance, otherwise `text`. No desktop formatting policy is imposed on API
+or Telegram output.
+
+Workers have bounded inference capacity and explicitly report busy/stalled
+admission state. The gateway treats this as a retryable provider-availability
+condition and follows the caller's configured strategy; GPU-only requests do
+not silently use a paid alternative. Provider-independent invalid audio stops
+the chain instead of causing redundant requests/charges.
+
+Request response deadlines do not claim to forcibly terminate native GPU work.
+An occupied slot and its audio remain owned until the actual operation finishes,
+even when the waiting caller times out/disconnects. Subsequent requests can
+bypass that busy worker. See [0.7.7 operations and exact limits](V0.7.7_RELEASE.md).
+
+| Limit | Default | Override |
+| --- | --- | --- |
+| Worker / gateway active requests | 1 / 8 | `CTRLSPEAK_MAX_ACTIVE_REQUESTS` (1–32) |
+| Worker / gateway response deadline | 75 / 150 seconds | `CTRLSPEAK_REQUEST_DEADLINE_SECONDS` (greater than 0, at most 600) |
+| Gateway Tiny inference capacity | 1 | Fixed |
+| Busy / offline provider cooldown | 0.5 / 30 seconds | Busy is distinct from offline |
+
+Send `X-CtrlSpeak-Request-ID` with 1–64 ASCII letters, digits, `_` or `-` to
+correlate a request. Invalid/missing IDs are replaced. The response header and
+JSON `request_id` identify the request. Transcription responses add numeric
+`timings`: `receive_duration_ms`, `upload_spool_duration_ms`,
+`routing_duration_ms`, `server_duration_ms`, and (when using the worker) nested
+`worker` measurements including `queue_duration_ms`, `inference_duration_ms`
+and `cleanup_duration_ms`. Actual multipart receive and post-parse upload spool
+are distinct. Inference timing includes decode/thread dispatch, not just GPU
+kernel execution. Do not add these overlapping measurements together.
+
+Busy/deadline failures provide typed categories such as `worker_busy`,
+`gateway_busy`, `local_busy`, `worker_deadline_exceeded` and
+`request_deadline_exceeded`; retryable does not mean automatically replay.
+An earlier provider may have accepted the audio before a timeout.
+Health `admission` reports capacity/active/available/oldest-active age/status.
+`resources.disk_warning` is true below 5 GiB free or above 90% used; this is a
+diagnostic warning, not automatic storage cleanup.
 
 ## Formatted text and audit (0.7.6)
 

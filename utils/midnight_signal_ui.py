@@ -524,6 +524,16 @@ class MidnightSignalManagementMixin:
         actions.pack(fill=tk.X, side=tk.BOTTOM, pady=(20, 0))
         ttk.Button(actions, text="Copy last", style="MS.TButton", command=sysmod.copy_last_transcript_from_tray).pack(side=tk.LEFT)
         ttk.Button(actions, text="Cancel active", style="MS.Danger.TButton", command=sysmod.cancel_active_transcription).pack(side=tk.LEFT, padx=(10, 0))
+        recovery = ttk.Frame(left, style="MS.Card.TFrame")
+        recovery.pack(fill=tk.X, side=tk.BOTTOM, pady=(12, 0))
+        self.ms_recovery_var = tk.StringVar(value=sysmod.failed_recording_status())
+        ttk.Label(recovery, textvariable=self.ms_recovery_var, style="MS.CardMuted.TLabel", wraplength=410).pack(anchor=tk.W)
+        recovery_actions = ttk.Frame(recovery, style="MS.Card.TFrame")
+        recovery_actions.pack(fill=tk.X, pady=(8, 0))
+        self.ms_retry_btn = ttk.Button(recovery_actions, text="Retry failed recording…", style="MS.TButton", command=sysmod.request_retry_failed_recording)
+        self.ms_retry_btn.pack(side=tk.LEFT)
+        self.ms_discard_btn = ttk.Button(recovery_actions, text="Discard", style="MS.TButton", command=sysmod.discard_failed_recording)
+        self.ms_discard_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         ttk.Label(right, text="Capture feedback", style="MS.Section.TLabel").pack(anchor=tk.W)
         with settings_lock:
@@ -1374,6 +1384,10 @@ class MidnightSignalManagementMixin:
             return
         snapshot = sysmod.transcription_ui_session.snapshot()
         ready = snapshot.phase in {UiPhase.IDLE, UiPhase.SUCCESS}
+        if hasattr(self, "ms_recovery_var"):
+            self.ms_recovery_var.set(sysmod.failed_recording_status())
+            self._set_button_enabled(self.ms_retry_btn, sysmod.can_retry_failed_recording())
+            self._set_button_enabled(self.ms_discard_btn, sysmod.has_failed_recording())
         self.ms_ready_var.set("● READY" if ready else f"● {snapshot.phase.value.upper()}")
         self.ms_capture_detail_var.set(f"{snapshot.headline} · {snapshot.detail}")
         self.ms_level_var.set(snapshot.level_fraction * 100)
@@ -1641,6 +1655,12 @@ class MidnightTrayFlyout:
         ttk.Button(actions, text="Routing", style="MS.TButton", command=self._open_control).grid(row=0, column=1, sticky="ew", padx=(4, 0), pady=(0, 4))
         ttk.Button(actions, text="Audio controls", style="MS.TButton", command=self._open_control).grid(row=1, column=0, sticky="ew", padx=(0, 4), pady=(4, 0))
         ttk.Button(actions, text="Open CtrlSpeak", style="MS.TButton", command=self._open_control).grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=(4, 0))
+        self.recovery_var = tk.StringVar(value=sysmod.failed_recording_status())
+        ttk.Label(actions, textvariable=self.recovery_var, style="MS.Muted.TLabel", wraplength=390).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(9, 3))
+        self.retry_button = ttk.Button(actions, text="Retry failed recording…", style="MS.TButton", command=self._retry_recording)
+        self.retry_button.grid(row=3, column=0, sticky="ew", padx=(0, 4))
+        self.discard_button = ttk.Button(actions, text="Discard", style="MS.TButton", command=sysmod.discard_failed_recording)
+        self.discard_button.grid(row=3, column=1, sticky="ew", padx=(4, 0))
 
         footer = ttk.Frame(frame, style="MS.Root.TFrame")
         footer.pack(fill=tk.X, pady=(9, 0))
@@ -1659,6 +1679,10 @@ class MidnightTrayFlyout:
     def _open_control(self) -> None:
         self.close()
         self.open_control()
+
+    def _retry_recording(self) -> None:
+        self.close()
+        sysmod.request_retry_failed_recording()
 
     def _open_corrections(self) -> None:
         self.close()
@@ -1717,6 +1741,10 @@ class MidnightTrayFlyout:
         if snapshot.provider:
             self.last_var.set(f"{snapshot.provider.display_name} · {snapshot.provider.latency_label}{' · fallback' if snapshot.degraded else ''}")
         self.cancel_button.state(["!disabled"] if snapshot.can_cancel else ["disabled"])
+        if hasattr(self, "recovery_var"):
+            self.recovery_var.set(sysmod.failed_recording_status())
+            self.retry_button.state(["!disabled"] if sysmod.can_retry_failed_recording() else ["disabled"])
+            self.discard_button.state(["!disabled"] if sysmod.has_failed_recording() else ["disabled"])
         self._poll_job = self.window.after(200, self._poll)
 
     def _refresh_capabilities(self) -> None:

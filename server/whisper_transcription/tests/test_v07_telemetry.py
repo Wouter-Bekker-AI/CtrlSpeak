@@ -230,6 +230,8 @@ def test_gateway_response_and_audit_store_routing_telemetry(tmp_path: Path) -> N
         "routing_duration_ms": True,
         "worker_inference_duration_ms": True,
         "worker_health": True,
+        "request_id": True,
+        "stage_timings": True,
     }
 
 

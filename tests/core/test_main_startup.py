@@ -123,6 +123,8 @@ def test_packaged_health_check_file_exits_before_normal_startup(tmp_path, monkey
     assert payload["product"] == "ctrlspeak"
     assert payload["version"] == app.APP_VERSION
     assert isinstance(payload["frozen"], bool)
+    assert payload["request_transport"]["ok"] is True
+    assert payload["request_transport"]["async_dns"] is True
 
 
 def test_version_mode_exits_before_normal_startup(monkeypatch, capsys) -> None:

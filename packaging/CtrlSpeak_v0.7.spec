@@ -53,6 +53,7 @@ for pkg in (
     'pyautogui',
     'certifi',
     'requests',
+    'aiohttp',
     'cryptography',
 ):
     third_party_datas.extend(_collect_or_empty(collect_data_files, pkg))
@@ -68,11 +69,18 @@ asset_datas = [
 datas = _dedupe(third_party_datas + asset_datas)
 
 third_party_binaries = []
-for pkg in ('ctranslate2', 'ffpyplayer', 'faster_whisper', 'cryptography', 'av'):
+for pkg in ('ctranslate2', 'ffpyplayer', 'faster_whisper', 'cryptography', 'av', 'pycares'):
     third_party_binaries.extend(_collect_or_empty(collect_dynamic_libs, pkg))
 binaries = _dedupe(third_party_binaries)
 
 common_hiddenimports = [
+    'aiohttp',
+    'aiodns',
+    'pycares',
+    'aiohttp.client',
+    'aiohttp._http_parser',
+    'aiohttp._http_writer',
+    'aiohttp._websocket.mask',
     'av',
     'server.whisper_transcription.app.audio_transport',
     'cryptography',

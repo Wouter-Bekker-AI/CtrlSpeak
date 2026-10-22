@@ -935,9 +935,10 @@ class MidnightSignalOverlay:
             tags=("processing-comet",),
         )
         strategy_label = self._processing_strategy_label(state)
+        stage_label = state.headline.upper()
         if layout.compact:
             compact_status = fit_overlay_text(
-                f"TRANSCRIBING · {strategy_label}",
+                f"{stage_label} · {strategy_label}",
                 pixel_width=max(1.0, width - layout.status_x - 12.0),
             )
             self._text(
@@ -951,7 +952,7 @@ class MidnightSignalOverlay:
             )
             return
         self._text(
-            canvas, layout.status_x, 31, "TRANSCRIBING",
+            canvas, layout.status_x, 31, stage_label,
             fill=CYAN, font=("Segoe UI Semibold", 9),
         )
         self._text(

@@ -1,4 +1,10 @@
-# CtrlSpeak transcription service v0.7.6
+# CtrlSpeak transcription service v0.7.7
+
+0.7.7 adds bounded worker/gateway admission, truthful busy/stalled state,
+request-response deadlines, fast busy fallback and correlated stage diagnostics.
+It preserves the external Nova helper, lossless compressed forwarding and the
+optional CUDA S1 cleanup contract. See the
+[0.7.7 release guide](../../docs/V0.7.7_RELEASE.md).
 
 0.7.6 adds nullable `s1_cleaned_text` and `normalized_text` gateway audit columns
 and the additive `s1_cleaned_text` diagnostic response field. Formatted API text,

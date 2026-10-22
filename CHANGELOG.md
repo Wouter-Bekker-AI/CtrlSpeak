@@ -4,6 +4,21 @@ CtrlSpeak follows semantic versioning. Published binaries are immutable; a
 consumed release is corrected by a newer patch rather than by moving its tag or
 replacing its assets.
 
+## 0.7.7 — 2026-10-22
+
+- Replace per-character Windows injection delays with bounded, surrogate-safe
+  batches; stop on cancellation/focus change and never replay partial delivery.
+- Add cancellable remote transcription, separate connection/read/total limits,
+  typed actionable errors and explicit processing-stage telemetry.
+- Offer manual Retry/Discard for one short-lived, memory-only failed recording;
+  never automatically resend audio or retype a possibly inserted transcript.
+- Bound worker/gateway admission, expose worker busy/stalled state and route
+  busy workers to the next permitted provider without a long offline cooldown.
+- Add correlated request/stage diagnostics and low-disk resource warnings;
+  avoid sending provider-independent invalid audio through every fallback.
+- Preserve lossless transport, correction rules, S1 selection/formatting and
+  coordinated signed release deployment. Windows clients remain user-updated.
+
 ## 0.7.6 — 2026-09-19
 
 - Separate S1 cleanup from desktop formatting: optional paragraph checkbox,

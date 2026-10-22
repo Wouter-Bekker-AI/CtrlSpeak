@@ -1,5 +1,7 @@
 ctranslate2
 av>=15,<19
+aiohttp>=3.12,<4
+aiodns>=3.2,<4
 cryptography>=43,<47
 faster-whisper
 ffpyplayer

@@ -111,16 +111,18 @@ def test_windows_sendinput_exact_events_no_hidden_enter_or_truncated_unicode(mon
     from utils import windows_input as win
     events = []
     def send(count, pointer, size):
-        key = ctypes.cast(pointer, ctypes.POINTER(win.INPUT)).contents.union.ki
-        events.append((key.wVk, key.wScan, key.dwFlags))
-        return 1
+        packet = ctypes.cast(pointer, ctypes.POINTER(win.INPUT))
+        for index in range(count):
+            key = packet[index].union.ki
+            events.append((key.wVk, key.wScan, key.dwFlags))
+        return count
     monkeypatch.setattr(win, '_send_input', send)
     monkeypatch.setattr(win, 'get_focused_control', lambda: 1)
     monkeypatch.setattr(win, 'ensure_foreground', lambda _: None)
     monkeypatch.setattr(win.time, 'sleep', lambda _: None)
     # U+1000D used to truncate to CR in a 16-bit wScan.
     text = 'A\n\nB\t\x1b\x08🌱\U0001000d\n'
-    assert win.send_unicode_input(text, preserve_formatting=preserve)
+    assert win.send_unicode_input(text, preserve_formatting=preserve, remote=False)
     expected = prepare_dictation_text(text, preserve_formatting=preserve).replace('\n', '\r').encode('utf-16-le')
     units = [int.from_bytes(expected[i:i+2], 'little') for i in range(0, len(expected), 2)]
     assert events == [event for unit in units for event in [(0, unit, win.KEYEVENTF_UNICODE), (0, unit, win.KEYEVENTF_UNICODE | win.KEYEVENTF_KEYUP)]]
@@ -140,9 +142,9 @@ def test_windows_all_insertion_routes_receive_sanitized_text(monkeypatch, remote
     monkeypatch.setattr(win, 'is_remote_host_window', lambda _: remote)
     monkeypatch.setattr(win, 'is_anydesk_window', lambda _: remote)
     monkeypatch.setattr(win, 'send_unicode_input', lambda text, **kw: received.append(text) or send_success)
-    monkeypatch.setattr(win, 'try_direct_text_insert', lambda text, hwnd: received.append(text) or direct_success)
+    monkeypatch.setattr(win, 'try_direct_text_insert', lambda text, hwnd, **kw: received.append(text) or direct_success)
     for name in ('try_sendinput_paste', 'try_clipboard_paste'):
-        monkeypatch.setattr(win, name, lambda text: received.append(text) or False)
+        monkeypatch.setattr(win, name, lambda text, **kw: received.append(text) or False)
     monkeypatch.setattr(win.pyautogui, 'write', lambda text: received.append(text), raising=False)
     win.insert_text_into_focus('First.\nSecond.\t\x1b\r')
     assert received and set(received) == {'First. Second.'}

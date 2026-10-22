@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import os
 import logging
+import time
+import threading
+import uuid
 from dataclasses import dataclass, field as dataclass_field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -22,6 +25,8 @@ from utils.credential_store import (
 )
 from utils.languages import language_policy_display, normalize_allowed_output_languages
 from server.whisper_transcription.app.audio_transport import prepare_audio
+from utils.request_control import current_request_control
+from utils.cancellable_http import TransportFailure, post_audio
 
 
 DEFAULT_API_URL = "http://127.0.0.1:8765"
@@ -35,6 +40,12 @@ BACKEND_DISPLAY_NAMES = {
 
 class ApiBackendError(RuntimeError):
     """An actionable failure returned by, or communicating with, the API backend."""
+
+    def __init__(self, message: str, *, category: str = "invalid_response", retryable: bool = False):
+        super().__init__(message)
+        self.category = category
+        self.retryable = retryable
+        self.request_id: str | None = None
 
 
 class BackendPersistenceError(RuntimeError):
@@ -340,6 +351,39 @@ def uses_bundled_runtime(config: BackendConfig | None = None) -> bool:
     return (config or get_runtime_backend_config()).backend == "bundled"
 
 
+def _transcription_http_error(status: int, payload: Mapping[str, Any]) -> ApiBackendError:
+    """Closed error vocabulary; never echo untrusted response details or secrets."""
+    detail = payload.get("detail")
+    category = detail.get("category") if isinstance(detail, dict) else None
+    labels = {
+        "openai_invalid_key": "OpenAI rejected your API key.",
+        "openai_quota_exhausted": "OpenAI credit or quota is exhausted.",
+        "openai_unavailable": "OpenAI transcription is temporarily unavailable.",
+        "providers_exhausted": "No selected transcription provider is available.",
+        "worker_unavailable": "The Ubuntu GPU worker is unavailable.",
+        "worker_busy": "The Ubuntu GPU worker is busy.",
+        "local_busy": "The local fallback provider is busy.",
+        "request_deadline_exceeded": "The gateway request reached its deadline. A manual retry may incur another provider charge.",
+        "worker_deadline_exceeded": "The GPU worker reached its deadline. A manual retry may incur another provider charge.",
+        "invalid_audio": "The gateway could not decode this recording.",
+        "language_policy_violation": "The provider could not satisfy the output-language policy.",
+        "invalid_route": "The selected provider route is not available on this gateway.",
+    }
+    if category in labels:
+        return ApiBackendError(labels[category], category=category,
+                               retryable=category not in {"language_policy_violation", "invalid_route", "invalid_audio"})
+    if status in {401, 403}:
+        return ApiBackendError("The gateway rejected its bearer token. Check gateway credentials (not your OpenAI key).",
+                               category="gateway_auth_failed", retryable=True)
+    if status == 429:
+        return ApiBackendError("The gateway is busy or rate limited. Retry later.", category="gateway_busy", retryable=True)
+    if status >= 500:
+        return ApiBackendError("The gateway could not complete transcription. Check provider availability.",
+                               category="providers_exhausted", retryable=True)
+    return ApiBackendError(f"The gateway rejected the transcription request (HTTP {status}).",
+                           category="invalid_request")
+
+
 class ApiTranscriptionClient:
     def __init__(
         self,
@@ -350,6 +394,7 @@ class ApiTranscriptionClient:
         openai_api_key: str | None = None,
     ) -> None:
         self.config = config
+        self._injected_session = session is not None
         if session is None:
             try:
                 import requests
@@ -677,8 +722,18 @@ class ApiTranscriptionClient:
 
     def transcribe(self, audio_path: Path) -> TranscriptionResult:
         path = Path(audio_path)
+        control = current_request_control()
+        cancel = control.cancel if control else threading.Event()
+        progress = control.progress if control else None
+        started = time.monotonic()
+        timings = {}
+        request_id = str(uuid.uuid4())
         try:
-            with prepare_audio(path) as prepared, prepared.path.open("rb") as audio_file:
+            if cancel.is_set():
+                raise ApiBackendError("Transcription cancelled.", category="cancelled")
+            if progress:
+                progress("preparing")
+            with prepare_audio(path, cancelled=cancel) as prepared, prepared.path.open("rb") as audio_file:
                 transport_metadata = prepared.telemetry()
                 logging.getLogger(__name__).info("Audio transport: %s", transport_metadata)
                 request: dict[str, Any] = {
@@ -700,12 +755,35 @@ class ApiTranscriptionClient:
                     if self._openai_api_key
                     else None
                 )
-                payload = self._post(
-                    "/v1/transcribe",
-                    extra_headers=secret_headers,
-                    **request,
-                )
-        except ApiBackendError:
+                if self._injected_session:
+                    payload = self._post("/v1/transcribe", extra_headers=secret_headers, **request)
+                else:
+                    headers = self._headers()
+                    headers.update(secret_headers or {})
+                    headers["X-CtrlSpeak-Request-ID"] = request_id
+                    remaining = min(float(self.timeout_seconds), 180.0) - (time.monotonic() - started)
+                    if remaining <= 0:
+                        raise ApiBackendError("Audio preparation exceeded the request deadline.", category="request_timeout", retryable=True)
+                    status, payload, timings = post_audio(
+                        f"{self.config.api_url}/v1/transcribe", prepared.path,
+                        filename=prepared.filename, content_type=prepared.content_type,
+                        headers=headers, fields=request_data, cancel_check=cancel.is_set,
+                        progress=progress, total_seconds=remaining,
+                    )
+                    if status < 200 or status >= 300:
+                        raise _transcription_http_error(status, payload)
+                if cancel.is_set():
+                    raise ApiBackendError("Transcription cancelled.", category="cancelled")
+        except TransportFailure as exc:
+            error = ApiBackendError(str(exc), category=exc.category, retryable=exc.retryable)
+            error.request_id = request_id
+            logging.getLogger(__name__).warning("Transcription request failed: category=%s request_id=%s", error.category, request_id)
+            raise error from exc
+        except InterruptedError as exc:
+            raise ApiBackendError("Transcription cancelled during audio preparation.", category="cancelled") from exc
+        except ApiBackendError as exc:
+            exc.request_id = request_id
+            logging.getLogger(__name__).warning("Transcription request failed: category=%s request_id=%s", exc.category, request_id)
             raise
         except (OSError, ValueError) as exc:
             raise ApiBackendError(f"Unable to read audio file {path}: {exc}") from exc
@@ -744,7 +822,18 @@ class ApiTranscriptionClient:
                 selected_text = cleaned
                 cleanup_applied = True
         result_metadata = dict(payload)
+        # Correlate client/gateway logs without retaining any credential data.
+        if not self._injected_session:
+            result_metadata["request_id"] = request_id
         result_metadata["client_audio_transport"] = transport_metadata
+        result_metadata["client_timings"] = {
+            **timings, "preparation_ms": transport_metadata.get("preparation_ms", 0),
+            "transcription_total_ms": round((time.monotonic() - started) * 1000, 2),
+        }
+        if isinstance(payload.get("routing_duration_ms"), (int, float)):
+            result_metadata["client_timings"]["routing_ms"] = payload["routing_duration_ms"]
+        if isinstance(normalization, dict) and isinstance(normalization.get("duration_ms"), (int, float)):
+            result_metadata["client_timings"]["cleanup_ms"] = normalization["duration_ms"]
         result_metadata["client_cleanup_requested"] = self.config.gpu_cleanup_enabled
         result_metadata["client_cleanup_applied"] = cleanup_applied
         return TranscriptionResult(

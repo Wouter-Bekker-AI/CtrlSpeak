@@ -142,6 +142,19 @@ _GENERIC_PROVIDER_WORDS = {
 }
 
 _FAILURE_CATEGORY_LABELS = {
+    "gateway_unreachable": "Cannot reach the gateway. Check your VPN connection and gateway service.",
+    "gateway_auth_failed": "The gateway bearer token was rejected; check gateway credentials.",
+    "gateway_tls_error": "The gateway TLS certificate could not be verified.",
+    "gateway_busy": "The gateway is busy or rate limited. Retry later.",
+    "request_timeout": "The request timed out. A manual retry may incur another provider charge.",
+    "worker_busy": "The GPU worker is busy; check the fallback route.",
+    "local_busy": "The local fallback provider is busy. Retry later.",
+    "request_deadline_exceeded": "The gateway request timed out. A manual retry may incur another provider charge.",
+    "worker_deadline_exceeded": "The GPU worker timed out. A manual retry may incur another provider charge.",
+    "invalid_audio": "The recording could not be decoded. Check the microphone and try again.",
+    "invalid_request": "The gateway rejected the request. Check your configuration.",
+    "invalid_response": "The gateway returned an invalid or empty response.",
+    "insertion_partial": "Insertion stopped. Some text may already be inserted; use Copy last to recover it.",
     "microphone_failed": "The microphone could not be read.",
     "worker_unavailable": "The Ubuntu GPU is unavailable; check the fallback route.",
     "worker_circuit_open": "The Ubuntu GPU is temporarily being bypassed.",
@@ -547,6 +560,8 @@ class TranscriptionUiSession:
         self._error_category: str | None = None
         self._final_elapsed_ms: float | None = None
         self._cleanup_label = ""
+        self._processing_stage = "transcribing"
+        self._timings_label = ""
 
     @property
     def phase(self) -> UiPhase:
@@ -572,11 +587,19 @@ class TranscriptionUiSession:
             self._error_category = None
             self._final_elapsed_ms = None
             self._cleanup_label = ""
+            self._timings_label = ""
 
     def begin_processing(self) -> None:
         with self._lock:
             self._transition(UiPhase.PROCESSING)
             self._level.reset()
+            self._processing_stage = "transcribing"
+
+    def set_processing_stage(self, stage: str) -> None:
+        with self._lock:
+            if self._phase is UiPhase.PROCESSING and stage in {"preparing", "uploading", "transcribing", "inserting", "retry_waiting"}:
+                self._processing_stage = stage
+                self._revision += 1
 
     def update_level_pcm16(self, frames: bytes | bytearray | memoryview) -> float:
         """Update recording level without retaining the supplied audio chunk."""
@@ -610,6 +633,14 @@ class TranscriptionUiSession:
             self._attempts = normalize_attempts(metadata.get("attempts") if metadata else None)
             self._degraded = bool(metadata.get("degraded")) if metadata else False
             self._cleanup_label = cleanup_result_label(metadata)
+            timings = (metadata or {}).get("client_timings")
+            if isinstance(timings, Mapping):
+                self._timings_label = " · ".join(
+                    f"{label} {format_latency_ms(timings[key])}"
+                    for key, label in (("upload_ms", "Upload"), ("routing_ms", "Route"),
+                                       ("cleanup_ms", "Cleanup"), ("insertion_ms", "Insert"))
+                    if _finite_number(timings.get(key)) is not None
+                )
             self._error_category = None
 
     def fail(self, category: object = None, *, elapsed_ms: object | None = None) -> None:
@@ -680,12 +711,20 @@ class TranscriptionUiSession:
         if self._phase is UiPhase.RECORDING:
             return "Listening", "Release Right Ctrl to transcribe."
         if self._phase is UiPhase.PROCESSING:
-            return "Transcribing", "Routing through your preferred provider…"
+            return {
+                "preparing": ("Preparing audio", "Compressing your recording without quality loss…"),
+                "uploading": ("Uploading", "Sending compressed audio to the gateway…"),
+                "transcribing": ("Transcribing", "Waiting for the gateway and preferred provider…"),
+                "inserting": ("Inserting text", "Keep the destination focused. Cancel stops remaining text."),
+                "retry_waiting": ("Retry queued", "Focus the destination now. Sending starts after three seconds."),
+            }[self._processing_stage]
         if self._phase is UiPhase.SUCCESS:
             if self._provider:
                 route = self._provider.display_name
                 if self._cleanup_label:
                     route += f" · {self._cleanup_label}"
+                if self._timings_label:
+                    route += f" · {self._timings_label}"
                 if self._degraded:
                     return "Transcription ready", f"Completed via fallback · {route}"
                 return "Transcription ready", f"Completed with {route}"

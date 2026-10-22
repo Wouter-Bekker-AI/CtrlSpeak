@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -17,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.auth import Authenticator, Principal
+from app.admission import Admission, RequestTelemetryMiddleware, WorkOwner, milliseconds, safe_timings
 from app.audio_transport import AudioLimitError, capabilities as audio_capabilities, decode_bounded
 from app.corrections import CorrectionStore
 from app.languages import choose_allowed_language, normalize_language_policy
@@ -34,7 +37,7 @@ from app.providers import (
 )
 
 
-SERVICE_VERSION = "0.7.6"
+SERVICE_VERSION = "0.7.7"
 LOGGER = logging.getLogger("ctrlspeak_whisper_transcription")
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = Path(os.environ.get("WHISPER_DATA_DIR", ROOT / "data"))
@@ -390,6 +393,14 @@ def create_app(
         legacy_token=bearer_token,
         worker_token=worker_token,
     )
+    request_deadline = float(environ.get("CTRLSPEAK_REQUEST_DEADLINE_SECONDS", "75" if role == "worker" else "150"))
+    if not 0 < request_deadline <= 600:
+        raise ValueError("CTRLSPEAK_REQUEST_DEADLINE_SECONDS must be between 0 and 600")
+    capacity = int(environ.get("CTRLSPEAK_MAX_ACTIVE_REQUESTS", "1" if role == "worker" else "8"))
+    if not 1 <= capacity <= 32:
+        raise ValueError("CTRLSPEAK_MAX_ACTIVE_REQUESTS must be between 1 and 32")
+    admission = Admission(capacity, request_deadline)
+    owned_tasks: set[asyncio.Task] = set()
     if role != "worker":
         router = router or _build_router(role, backend, environ)
     eager_provider = None
@@ -426,6 +437,123 @@ def create_app(
     )
     app.state.role = role
     app.state.router = router
+    app.state.admission = admission
+    app.state.owned_tasks = owned_tasks
+
+    async def admitted_call(request: Request, call_next):
+        if request.url.path not in {"/v1/transcribe", "/v1/worker/transcribe"}:
+            return await call_next(request)
+        lease = admission.acquire()
+        if lease is None:
+            category = "worker_busy" if role == "worker" else "gateway_busy"
+            request.state.failure_category = category
+            return JSONResponse(status_code=503, headers={"Retry-After": "1"}, content={
+                "detail": {"message": "Transcription capacity is busy; retry shortly.",
+                           "category": category, "retryable": True,
+                           "request_id": request.state.request_id,
+                           "admission": admission.snapshot()},
+            })
+        request.state.lease = lease
+        try:
+            return await asyncio.wait_for(call_next(request), timeout=request_deadline + 0.1)
+        except asyncio.TimeoutError:
+            request.state.cancel_event.set()
+            category = "worker_deadline_exceeded" if role == "worker" else "request_deadline_exceeded"
+            request.state.failure_category = category
+            return JSONResponse(status_code=504, content={"detail": {
+                "message": "Transcription exceeded its request deadline.",
+                "category": category, "retryable": True,
+                "request_id": request.state.request_id,
+            }})
+        except asyncio.CancelledError:
+            request.state.cancel_event.set()
+            raise
+        finally:
+            # Ownership is moved to the actual job before inference starts. A
+            # disconnected caller must never make still-running work look idle.
+            if not lease.transferred:
+                lease.release()
+
+    async def owned_job(request: Request, temp_path: Path, operation):
+        # Reject before scheduling: a body that exhausted the request budget
+        # must not start even a millisecond of new inference or paid fallback.
+        remaining = request_deadline - (time.monotonic() - request.state.request_started_at)
+        if remaining <= 0 or request.state.cancel_event.is_set():
+            temp_path.unlink(missing_ok=True)
+            category = ("request_cancelled" if request.state.cancel_event.is_set() else
+                        "worker_deadline_exceeded" if role == "worker" else "request_deadline_exceeded")
+            request.state.failure_category = category
+            raise HTTPException(499 if category == "request_cancelled" else 504, {
+                "message": "Request ended before transcription could begin.",
+                "category": category, "retryable": category != "request_cancelled",
+                "request_id": request.state.request_id,
+            })
+        lease = request.state.lease
+        lease.transferred = True
+        owner = WorkOwner(lease, temp_path)
+        request.state.work_owner = owner
+
+        async def run():
+            try:
+                return await operation()
+            finally:
+                owner.close()
+
+        task = asyncio.create_task(run())
+        owned_tasks.add(task)
+
+        def finished(completed):
+            owned_tasks.discard(completed)
+            if not completed.cancelled():
+                completed.exception()  # Retrieve errors even after caller disconnect.
+
+        task.add_done_callback(finished)
+
+        async def disconnected():
+            # Multipart parsing has consumed the complete body before owned_job
+            # is invoked. This is now the sole ASGI receive consumer; it must be
+            # stopped before the endpoint returns and response streaming begins.
+            while True:
+                message = await request.receive()
+                if message["type"] == "http.disconnect":
+                    request.state.cancel_event.set()
+                    return
+
+        disconnect_task = asyncio.create_task(disconnected())
+        try:
+            # Shielding is intentional: Python cannot kill a running inference
+            # thread. Its permit and input remain owned until it really exits.
+            done, _ = await asyncio.wait({task, disconnect_task}, timeout=remaining,
+                                         return_when=asyncio.FIRST_COMPLETED)
+            if disconnect_task in done:
+                request.state.failure_category = "request_cancelled"
+                raise HTTPException(499, {"message": "Caller disconnected.",
+                                         "category": "request_cancelled", "retryable": False,
+                                         "request_id": request.state.request_id})
+            if task in done:
+                return task.result()
+            request.state.cancel_event.set()
+            category = "worker_deadline_exceeded" if role == "worker" else "request_deadline_exceeded"
+            request.state.failure_category = category
+            raise HTTPException(504, {"message": "Transcription exceeded its request deadline.",
+                                     "category": category, "retryable": True,
+                                     "request_id": request.state.request_id})
+        except asyncio.CancelledError:
+            request.state.cancel_event.set()
+            raise
+        finally:
+            disconnect_task.cancel()
+            await asyncio.gather(disconnect_task, return_exceptions=True)
+
+    def resource_health() -> dict[str, Any]:
+        # Root/system drive health: inspection only, never automatic deletion.
+        try:
+            disk = shutil.disk_usage(Path.cwd().anchor or "/")
+            used_percent = round((disk.total - disk.free) / disk.total * 100, 2)
+            return {"disk_free_bytes": disk.free, "disk_used_percent": used_percent,
+                    "disk_warning": disk.free < 5 * 1024**3 or used_percent > 90}
+        except OSError:
+            return {"disk_warning": None}
 
     @app.middleware("http")
     async def require_bearer_auth(request: Request, call_next):
@@ -433,7 +561,7 @@ def create_app(
         if _is_loopback_client(client_host):
             request.state.principal = Principal("legacy", admin=True)
             request.state.worker_authenticated = True
-            return await call_next(request)
+            return await admitted_call(request, call_next)
 
         authorization = request.headers.get("authorization")
         if role == "worker":
@@ -452,7 +580,7 @@ def create_app(
                 )
             request.state.principal = Principal("gateway-service")
             request.state.worker_authenticated = True
-            return await call_next(request)
+            return await admitted_call(request, call_next)
 
         if not authenticator.has_client_credentials:
             return JSONResponse(
@@ -469,7 +597,11 @@ def create_app(
                 content={"detail": "valid client bearer authentication is required"},
             )
         request.state.principal = principal
-        return await call_next(request)
+        return await admitted_call(request, call_next)
+
+    # Outer ASGI wrapper measures body receipt (including multipart parsing),
+    # generates a bounded correlation ID and never records bodies or credentials.
+    app.add_middleware(RequestTelemetryMiddleware)
 
     @app.get("/health", tags=["service"])
     async def health(request: Request) -> dict[str, Any]:
@@ -481,6 +613,8 @@ def create_app(
             "role": role,
             "revision": os.environ.get("CTRLSPEAK_RELEASE_REVISION", "source"),
             "audio_transport": audio_capabilities(),
+            "admission": admission.snapshot(),
+            "resources": resource_health(),
         }
         if role in {"worker", "standalone"}:
             payload.update(
@@ -502,6 +636,8 @@ def create_app(
                 "role": role,
                 "revision": os.environ.get("CTRLSPEAK_RELEASE_REVISION", "source"),
                 "audio_transport": audio_capabilities(),
+                "admission": admission.snapshot(),
+                "request_deadline_seconds": request_deadline,
                 "accepts_client_transcriptions": False,
                 "applies_corrections": False,
                 "text_normalization": {
@@ -511,6 +647,7 @@ def create_app(
                 },
                 "telemetry": {
                     "inference_duration_ms": True,
+                    "request_id": True, "stage_timings": True,
                 },
                 "provider": {
                     "id": "ubuntu-gpu-large-v3-turbo",
@@ -518,7 +655,7 @@ def create_app(
                     "model": getattr(backend, "name", "unknown"),
                     "device": getattr(backend, "device", "unknown"),
                     "compute_type": getattr(backend, "compute_type", "unknown"),
-                    "status": "ready",
+                    "status": admission.snapshot()["status"],
                 },
             }
         principal = _principal(request)
@@ -532,6 +669,8 @@ def create_app(
             "role": role,
             "revision": os.environ.get("CTRLSPEAK_RELEASE_REVISION", "source"),
             "audio_transport": audio_capabilities(),
+            "admission": admission.snapshot(),
+            "request_deadline_seconds": request_deadline,
             "accepts_client_transcriptions": True,
             "applies_corrections": True,
             "openai_key_storage": "request_only",
@@ -547,6 +686,8 @@ def create_app(
                 "routing_duration_ms": True,
                 "worker_inference_duration_ms": True,
                 "worker_health": True,
+                "request_id": True,
+                "stage_timings": True,
             },
             **description,
         }
@@ -565,7 +706,7 @@ def create_app(
                         raise HTTPException(413, f"audio exceeds {max_upload_bytes} byte upload limit")
                     uploaded.write(chunk)
             return temp_path
-        except Exception:
+        except BaseException:
             if temp_path:
                 temp_path.unlink(missing_ok=True)
             raise
@@ -574,6 +715,7 @@ def create_app(
 
         @app.post("/v1/worker/transcribe", tags=["worker"])
         async def worker_transcribe(
+            request: Request,
             audio: UploadFile = File(...),
             allowed_languages: str | None = Form(None),
             language: str | None = Form(None),
@@ -601,46 +743,76 @@ def create_app(
             if decoded_keywords:
                 vocabulary = "Known spellings: " + ", ".join(decoded_keywords)
                 effective_prompt = f"{initial_prompt}\n{vocabulary}" if initial_prompt else vocabulary
-            temp_path = await receive_audio(audio)
-            inference_started_at = time.monotonic()
+            spool_started = time.monotonic()
             try:
-                result = await run_in_threadpool(
-                    backend.transcribe,
-                    temp_path,
-                    language_policy,
-                    effective_prompt,
-                    word_timestamps,
-                )
-                inference_duration_ms = round(
-                    max(0.0, time.monotonic() - inference_started_at) * 1000.0,
-                    3,
-                )
-            except AudioLimitError as exc:
-                raise HTTPException(422, "audio is invalid or exceeds decoding limits") from exc
-            except Exception as exc:
-                LOGGER.exception("worker transcription failed")
-                raise HTTPException(500, "worker transcription failed") from exc
+                temp_path = await receive_audio(audio)
             finally:
                 await audio.close()
-                temp_path.unlink(missing_ok=True)
-            result["provider"] = "ubuntu-gpu-large-v3-turbo"
-            result["inference_duration_ms"] = inference_duration_ms
-            result["corrected"] = False
-            result["normalized_text"] = None
-            result["normalization"] = cleanup_metadata(cleanup, "unavailable" if cleanup else "disabled")
-            if cleanup and normalizer is not None:
+            spool_duration = milliseconds(spool_started)
+
+            async def process():
+                inference_started_at = time.monotonic()
+                def infer():
+                    # Re-check in the actual inference thread, not just before
+                    # scheduling it, so cancellation while waiting for a thread
+                    # does not start new GPU work.
+                    if request.state.cancel_event.is_set():
+                        raise ProviderFailure("Caller cancelled the request", category="request_cancelled",
+                                              retryable=False, status_code=499)
+                    if time.monotonic() - request.state.request_started_at >= request_deadline:
+                        raise ProviderFailure("Worker request deadline exceeded", category="worker_deadline_exceeded",
+                                              retryable=True, status_code=504)
+                    return backend.transcribe(temp_path, language_policy, effective_prompt, word_timestamps)
                 try:
-                    cleaned = await normalizer.normalize(
-                        str(result.get("raw_text") or ""),
-                        language=str(result.get("language") or "").casefold(),
+                    result = await run_in_threadpool(
+                        request.state.work_owner.call, infer,
                     )
-                    result["normalized_text"] = cleaned.text
-                    result["normalization"] = cleaned.info
-                except Exception:
-                    # Keep ASR on unexpected cleanup errors, without sensitive diagnostics.
-                    LOGGER.warning("worker cleanup failed; preserving transcription")
-                    result["normalization"] = cleanup_metadata(True, "runtime_error")
-            return result
+                except ProviderFailure as exc:
+                    request.state.failure_category = exc.category
+                    raise HTTPException(exc.status_code, {"message": str(exc), "category": exc.category,
+                                                          "retryable": exc.retryable,
+                                                          "request_id": request.state.request_id}) from exc
+                except AudioLimitError as exc:
+                    request.state.failure_category = "invalid_audio"
+                    raise HTTPException(422, {"message": "Audio is invalid or exceeds decoding limits",
+                                             "category": "invalid_audio", "retryable": False,
+                                             "request_id": request.state.request_id}) from exc
+                except Exception as exc:
+                    request.state.failure_category = "worker_error"
+                    LOGGER.warning("worker transcription failed request_id=%s", request.state.request_id)
+                    raise HTTPException(500, {"message": "Worker transcription failed",
+                                             "category": "worker_error", "retryable": True,
+                                             "request_id": request.state.request_id}) from exc
+                inference_duration = milliseconds(inference_started_at)
+                result["provider"] = "ubuntu-gpu-large-v3-turbo"
+                result["inference_duration_ms"] = inference_duration
+                result["corrected"] = False
+                result["normalized_text"] = None
+                result["normalization"] = cleanup_metadata(cleanup, "unavailable" if cleanup else "disabled")
+                cleanup_started = time.monotonic()
+                if cleanup and normalizer is not None and not request.state.cancel_event.is_set():
+                    try:
+                        cleaned = await normalizer.normalize(
+                            str(result.get("raw_text") or ""),
+                            language=str(result.get("language") or "").casefold(),
+                        )
+                        result["normalized_text"] = cleaned.text
+                        result["normalization"] = cleaned.info
+                    except Exception:
+                        LOGGER.warning("worker cleanup failed request_id=%s", request.state.request_id)
+                        result["normalization"] = cleanup_metadata(True, "runtime_error")
+                result["request_id"] = request.state.request_id
+                result["timings"] = {
+                    "receive_duration_ms": request.state.receive_duration_ms,
+                    "upload_spool_duration_ms": spool_duration,
+                    "queue_duration_ms": 0.0,
+                    "inference_duration_ms": inference_duration,
+                    "cleanup_duration_ms": milliseconds(cleanup_started),
+                    "server_duration_ms": milliseconds(request.state.request_started_at),
+                }
+                return result
+
+            return await owned_job(request, temp_path, process)
 
     else:
         assert router is not None
@@ -762,23 +934,40 @@ def create_app(
                 word_timestamps=word_timestamps,
                 openai_api_key=request.headers.get("x-ctrlspeak-openai-key") or None,
                 cleanup=cleanup,
+                request_id=request.state.request_id,
+                deadline_at=request.state.request_started_at + request_deadline,
+                cancel_event=request.state.cancel_event,
             )
-            temp_path = await receive_audio(audio)
+            spool_started = time.monotonic()
             try:
-                routed = await run_in_threadpool(
-                    router.transcribe,
+                temp_path = await receive_audio(audio)
+            finally:
+                await audio.close()
+            spool_duration = milliseconds(spool_started)
+
+            async def route():
+                return await run_in_threadpool(
+                    request.state.work_owner.call, router.transcribe,
                     temp_path,
                     provider_context,
                     strategy=strategy,
                     provider_id=provider,
                     allowed_provider_ids=_allowed_provider_ids(principal, router),
                 )
+
+            try:
+                routed = await owned_job(request, temp_path, route)
             except ProviderFailure as exc:
+                request.state.failure_category = exc.category
                 detail: dict[str, Any] = {
                     "message": str(exc),
                     "category": exc.category,
                     "retryable": exc.retryable,
                     "attempts": getattr(exc, "attempts", []),
+                    "request_id": request.state.request_id,
+                    "timings": {"receive_duration_ms": request.state.receive_duration_ms,
+                                "upload_spool_duration_ms": spool_duration,
+                                "server_duration_ms": milliseconds(request.state.request_started_at)},
                 }
                 routing_duration_ms = getattr(exc, "routing_duration_ms", None)
                 if routing_duration_ms is not None:
@@ -786,9 +975,6 @@ def create_app(
                 if exc.action:
                     detail["action"] = exc.action
                 raise HTTPException(exc.status_code, detail) from exc
-            finally:
-                await audio.close()
-                temp_path.unlink(missing_ok=True)
 
             result = routed.result
             result_language = str(result.get("language") or "").strip().casefold()
@@ -820,6 +1006,15 @@ def create_app(
                     normalized_text, context, principal_id=principal.id,
                     language=result_language or rule_language,
                 )
+            timings = {
+                "receive_duration_ms": request.state.receive_duration_ms,
+                "upload_spool_duration_ms": spool_duration,
+                "routing_duration_ms": routed.routing_duration_ms,
+                "server_duration_ms": milliseconds(request.state.request_started_at),
+            }
+            worker_timings = safe_timings(result.get("timings"))
+            if worker_timings:
+                timings["worker"] = worker_timings
             transcription_id = store.create_transcription(
                 raw_text=raw_text,
                 corrected_text=corrected_text,
@@ -847,10 +1042,14 @@ def create_app(
                     "usage": result.get("usage"),
                     "normalization": normalization,
                     "normalized_applied_correction_rule_ids": normalized_ids,
+                    "request_id": request.state.request_id,
+                    "timings": timings,
                 },
             )
             return {
                 "id": transcription_id,
+                "request_id": request.state.request_id,
+                "timings": timings,
                 "raw_text": raw_text,
                 "text": corrected_text,
                 "normalized_text": normalized_text,

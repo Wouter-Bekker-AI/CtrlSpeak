@@ -49,6 +49,8 @@ from utils.dictation_text import prepare_dictation_text
 from utils.transcript_audit import record_injection
 from utils.audio_cues import CueKind, CuePlayer, Pcm16Cue, cue_to_wav_bytes
 from utils.ui_state import TranscriptionUiSession, UiPhase
+from utils.request_control import request_control, current_request_control
+from utils.recording_recovery import RecordingRecovery
 
 
 logger = get_logger(__name__)
@@ -201,6 +203,10 @@ _recording_failed_event = threading.Event()
 _recording_stop_event = threading.Event()
 _transcription_generation = 0
 _active_transcription_generation: Optional[int] = None
+_inserting_generation: Optional[int] = None
+_failed_recording = RecordingRecovery()
+RETRY_FOCUS_DELAY_SECONDS = 3.0
+atexit.register(_failed_recording.discard)
 
 recording_temp_dir_name = "temp"
 AUTO_MODE = False
@@ -359,6 +365,7 @@ def track_feedback_injection(result) -> None:
 
 def inject_transcription_result(result) -> None:
     """Retain the result, insert once, then make a successful injection eligible for feedback."""
+    original_result = result
     # Read this desktop-only choice at insertion time: saving the safety switch
     # takes effect immediately, including for a request already in flight.
     with settings_lock:
@@ -366,6 +373,10 @@ def inject_transcription_result(result) -> None:
                     and settings.get("gpu_cleanup_preserve_formatting") is True
                     and (result.metadata or {}).get("client_cleanup_applied") is True)
     text = prepare_dictation_text(result.text, preserve_formatting=preserve)
+    metadata = dict(result.metadata or {})
+    timings = dict(metadata.get("client_timings") or {})
+    metadata["client_timings"] = timings
+    result = replace(result, metadata=metadata)
     attempt_id = str(uuid.uuid4())
     def audit(outcome):
         record_injection(result, text, preserve_formatting=preserve,
@@ -375,16 +386,20 @@ def inject_transcription_result(result) -> None:
     if not text:
         audit("skipped_empty")
         return
+    insertion_started = time.monotonic()
     try:
-        if preserve:
-            insert_text_into_focus(text, preserve_formatting=True)
-        else:
-            insert_text_into_focus(text)
+        control = current_request_control()
+        options = {"preserve_formatting": True} if preserve else {}
+        if control:
+            options["cancel_check"] = control.cancel.is_set
+        insert_text_into_focus(text, **options)
     except Exception:
+        timings["insertion_ms"] = round((time.monotonic() - insertion_started) * 1000, 2)
         audit("failed_or_partial")
         raise
+    timings["insertion_ms"] = round((time.monotonic() - insertion_started) * 1000, 2)
     audit("adapter_returned")
-    track_feedback_injection(replace(result, text=text))
+    track_feedback_injection(replace(original_result, text=text))
 
 
 def _pynput_key_name(key) -> str:
@@ -1327,6 +1342,86 @@ def is_transcription_busy(_item=None) -> bool:
         )
 
 
+def has_failed_recording(_item=None) -> bool:
+    return _failed_recording.seconds_remaining() > 0
+
+
+def can_retry_failed_recording(_item=None) -> bool:
+    return has_failed_recording() and not is_transcription_busy()
+
+
+def failed_recording_status() -> str:
+    remaining = _failed_recording.seconds_remaining()
+    if remaining <= 0:
+        return "No failed recording retained. Recovery audio is memory-only."
+    return f"Failed recording available for {max(1, int(remaining / 60))} min · Retry may incur another provider charge."
+
+
+def discard_failed_recording(_icon=None, _item=None) -> None:
+    _failed_recording.discard()
+    _refresh_tray_menu()
+    schedule_management_refresh()
+
+
+def retry_failed_recording(_icon=None, _item=None) -> bool:
+    """Start one explicitly requested retry; allow three seconds to focus target."""
+    global transcription_cancel_event, transcription_thread, recording_file_path
+    with _client_state_lock:
+        if not client_enabled:
+            return False
+        with _transcription_state_lock:
+            if is_transcription_busy():
+                return False
+            path = _failed_recording.take(create_recording_file_path)
+            if path is None:
+                return False
+            try:
+                _prepare_ui_session_for_recording()
+                transcription_ui_session.begin_processing()
+                transcription_ui_session.set_processing_stage("retry_waiting")
+                generation = _next_transcription_generation_locked()
+                cancel = threading.Event()
+                transcription_cancel_event = cancel
+                recording_file_path = path
+
+                def work():
+                    if cancel.wait(RETRY_FOCUS_DELAY_SECONDS):
+                        _finalize_transcription_session(generation, path, owner_thread=threading.current_thread())
+                        _refresh_tray_menu()
+                        schedule_management_refresh()
+                        return
+                    _transcribe_recording_worker(path, time.monotonic(), generation=generation,
+                                                 cancel_event=cancel, owner_thread=threading.current_thread())
+
+                worker = threading.Thread(target=work, name="CtrlSpeakManualRetry", daemon=True)
+                transcription_thread = worker
+                worker.start()
+            except Exception:
+                _finalize_transcription_session(_active_transcription_generation, path)
+                raise
+    _show_processing_overlay()
+    _refresh_tray_menu()
+    schedule_management_refresh()
+    return True
+
+
+def request_retry_failed_recording(_icon=None, _item=None) -> None:
+    def confirm():
+        from tkinter import messagebox
+        if not can_retry_failed_recording():
+            return
+        if not messagebox.askyesno("Retry failed recording?",
+                                  "Retrying sends this audio again and may incur another provider charge. "
+                                  "After clicking Yes, focus the destination within three seconds. "
+                                  "No text will be inserted until transcription finishes.", parent=tk_root):
+            return
+        # Hide our surfaces so they cannot accidentally receive retried text.
+        if management_window is not None:
+            management_window.close()
+        retry_failed_recording()
+    enqueue_management_task(confirm)
+
+
 def _finish_cancelled_session() -> None:
     phase = transcription_ui_session.phase
     if phase not in {UiPhase.RECORDING, UiPhase.PROCESSING}:
@@ -1340,14 +1435,15 @@ def _finish_cancelled_session() -> None:
 
 
 def cancel_active_transcription(_icon=None, _item=None) -> bool:
-    """Cancel recording immediately or suppress a pending request's insertion."""
+    """Stop capture/HTTP/insertion; retain busy ownership until it really exits."""
 
     global recording, transcription_thread
+    _failed_recording.discard()
     reaper: Optional[threading.Thread] = None
     reaper_start_failed = False
     with _transcription_state_lock:
         phase = transcription_ui_session.phase
-        if phase not in {UiPhase.RECORDING, UiPhase.PROCESSING} and not recording:
+        if phase not in {UiPhase.RECORDING, UiPhase.PROCESSING} and not recording and transcription_thread is None:
             return False
         generation = _active_transcription_generation
         cancel_event = transcription_cancel_event
@@ -1356,7 +1452,10 @@ def cancel_active_transcription(_icon=None, _item=None) -> bool:
         recording = False
         path = recording_file_path
         recorder = recording_thread
-        _finish_cancelled_session()
+        # Insertion can have partially succeeded. Its worker will distinguish
+        # partial output from a clean cancellation once the adapter stops.
+        if _inserting_generation != generation or generation is None:
+            _finish_cancelled_session()
 
         # A capture cancelled before key release has no coordinator yet.  Give
         # it one, retain both worker references, and clean only after the
@@ -1404,7 +1503,7 @@ def _finalize_transcription_session(
     """Clean one generation without ever clearing a newer generation's state."""
 
     global recording, recording_file_path, recording_thread, transcription_thread
-    global _active_transcription_generation
+    global _active_transcription_generation, _inserting_generation
 
     should_cleanup = True
     clear_waveform = False
@@ -1429,6 +1528,7 @@ def _finalize_transcription_session(
             recording = False
             if recording_thread is None and transcription_thread is None:
                 _active_transcription_generation = None
+                _inserting_generation = None
     if should_cleanup:
         cleanup_recording_file(path)
     if clear_waveform:
@@ -1533,9 +1633,18 @@ def _transcribe_recording_worker(
     recorder: Optional[threading.Thread] = None,
 ) -> None:
     from utils.models import transcribe_audio_result
+    from utils.input_errors import InputInsertionError
+
+    global _inserting_generation
 
     cancel = cancel_event or transcription_cancel_event
     owner = owner_thread or threading.current_thread()
+    insertion_started = False
+
+    def progress(stage):
+        with _transcription_state_lock:
+            if _session_is_current_locked(generation) and not cancel.is_set():
+                transcription_ui_session.set_processing_stage(stage)
     try:
         with _transcription_state_lock:
             if not _session_is_current_locked(generation):
@@ -1545,14 +1654,14 @@ def _transcribe_recording_worker(
                 return
         if path is None or not path.exists() or path.stat().st_size <= 44:
             raise RuntimeError("The recording did not contain usable audio")
-        result = transcribe_audio_result(str(path), play_feedback=False)
+        with request_control(cancel, progress):
+            result = transcribe_audio_result(str(path), play_feedback=False)
         if result is None or not result.text:
             raise RuntimeError("No transcription text was returned")
 
-        # Cancellation and insertion form one commit point.  A cancellation
-        # that acquires the lifecycle lock first suppresses insertion; once
-        # insertion begins, cancellation cannot report a contradictory
-        # CANCELLED terminal state.
+        # Register insertion under the lifecycle lock, but never hold it while
+        # typing: Cancel must remain responsive. Worker/generation ownership
+        # continues to block new capture until the adapter has really returned.
         with _transcription_state_lock:
             if not _session_is_current_locked(generation):
                 return
@@ -1561,17 +1670,47 @@ def _transcribe_recording_worker(
                 return
             if transcription_ui_session.phase is not UiPhase.PROCESSING:
                 return
+            _inserting_generation = generation
+            insertion_started = True
+            transcription_ui_session.set_processing_stage("inserting")
+        insertion_start = time.monotonic()
+        with request_control(cancel, progress):
             inject_transcription_result(result)
+        metadata = dict(result.metadata or {})
+        timings = dict(metadata.get("client_timings") or {})
+        timings["insertion_ms"] = round((time.monotonic() - insertion_start) * 1000, 2)
+        if isinstance(metadata.get("routing_duration_ms"), (int, float)):
+            timings["routing_ms"] = metadata["routing_duration_ms"]
+        normalization = metadata.get("normalization") or {}
+        if isinstance(normalization, dict) and isinstance(normalization.get("duration_ms"), (int, float)):
+            timings["cleanup_ms"] = normalization["duration_ms"]
+        metadata["client_timings"] = timings
+        logger.info("Dictation stage timings: %s", timings)
+        with _transcription_state_lock:
+            if not _session_is_current_locked(generation):
+                return
+            _inserting_generation = None
+            if cancel.is_set():
+                # The final chunk may have completed just before Cancel.
+                transcription_ui_session.fail("insertion_partial")
+                play_ui_cue(CueKind.ERROR)
+                _set_terminal_overlay_hide(3800)
+                return
             elapsed_ms = (time.monotonic() - started_at) * 1000.0
-            transcription_ui_session.complete(result.metadata or {}, elapsed_ms=elapsed_ms)
+            transcription_ui_session.complete(metadata, elapsed_ms=elapsed_ms)
         play_ui_cue(CueKind.SUCCESS)
         _set_terminal_overlay_hide(1600)
     except Exception as exc:
         with _transcription_state_lock:
             if not _session_is_current_locked(generation):
                 return
-            cancelled = cancel.is_set()
-            if cancelled:
+            partial = isinstance(exc, InputInsertionError) and exc.may_have_inserted
+            cancelled = cancel.is_set() and not partial
+            _inserting_generation = None
+            if partial:
+                if transcription_ui_session.phase is UiPhase.PROCESSING:
+                    transcription_ui_session.fail("insertion_partial")
+            elif cancelled:
                 _finish_cancelled_session()
             else:
                 category = _safe_error_category(exc)
@@ -1581,8 +1720,20 @@ def _transcribe_recording_worker(
                         elapsed_ms=(time.monotonic() - started_at) * 1000.0,
                     )
         if not cancelled:
+            recovered = False
+            if not insertion_started and not cancel.is_set() and getattr(exc, "retryable", False) and path is not None:
+                try:
+                    recovered = _failed_recording.retain(path)
+                    if cancel.is_set():
+                        _failed_recording.discard()
+                        recovered = False
+                except Exception:
+                    logger.warning("Could not retain failed recording for manual retry")
             logger.exception("Transcription or text insertion failed")
-            notify_error("Transcription failed", format_exception_details(exc))
+            detail = format_exception_details(exc)
+            if recovered:
+                detail += "\nRecording retained privately in memory for 15 minutes. Use Retry failed recording or Discard in CtrlSpeak. Retrying may incur another provider charge."
+            notify_error("Transcription failed", detail)
             play_ui_cue(CueKind.ERROR)
             _set_terminal_overlay_hide(3800)
     finally:
@@ -1629,6 +1780,7 @@ def on_press(key):
                 except RuntimeError:
                     return
                 generation = _next_transcription_generation_locked()
+                _failed_recording.discard()
                 transcription_cancel_event = threading.Event()
                 _recording_stop_event = threading.Event()
                 _recording_failed_event = threading.Event()
@@ -2153,6 +2305,10 @@ def run_tray():
             cancel_active_transcription,
             enabled=is_transcription_busy,
         ),
+        pystray.MenuItem("Retry failed recording…", request_retry_failed_recording,
+                         enabled=can_retry_failed_recording),
+        pystray.MenuItem("Discard failed recording", discard_failed_recording,
+                         enabled=has_failed_recording),
         pystray.MenuItem("Check for updates", check_for_updates_from_tray),
     ]
     separator = getattr(pystray.Menu, "SEPARATOR", None)
@@ -2347,6 +2503,7 @@ def stop_discovery_listener() -> None:
 
 def shutdown_all():
     logger.info("Shutting down all CtrlSpeak services")
+    _failed_recording.discard()
     stop_client_listener(); shutdown_server()
     try:
         stop_discovery_listener()

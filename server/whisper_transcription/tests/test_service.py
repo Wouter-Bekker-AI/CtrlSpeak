@@ -74,7 +74,10 @@ def test_health_and_openapi_report_current_language_contract(tmp_path: Path) -> 
         document = client.get("/openapi.json").json()
 
     assert response.status_code == 200
-    assert response.json() == {
+    health = response.json()
+    assert health.pop("admission")["available"] == 8
+    assert isinstance(health.pop("resources")["disk_free_bytes"], int)
+    assert health == {
         "status": "ready",
         "version": SERVICE_VERSION,
         "role": "standalone",
@@ -84,7 +87,7 @@ def test_health_and_openapi_report_current_language_contract(tmp_path: Path) -> 
         "device": "fake-cuda",
         "compute_type": "fake-float16",
     }
-    assert SERVICE_VERSION == "0.7.6"
+    assert SERVICE_VERSION == "0.7.7"
     rendered = str(document)
     assert "allowed_languages" in rendered
     assert "server-enforced" in rendered

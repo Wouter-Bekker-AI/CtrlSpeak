@@ -20,6 +20,7 @@ import pyautogui
 
 from utils.config_paths import get_logger
 from utils.dictation_text import prepare_dictation_text
+from utils.input_errors import CancelCheck, InputInsertionError, check_insertion_cancelled
 
 logger = get_logger(__name__)
 
@@ -39,6 +40,8 @@ KEYEVENTF_KEYUP = 0x0002
 VK_CONTROL = 0x11
 VK_V = 0x56
 KEYEVENTF_UNICODE = 0x0004
+SMTO_BLOCK = 0x0001
+SMTO_ABORTIFHUNG = 0x0002
 
 PROCESS_QUERY_INFORMATION = 0x0400
 PROCESS_VM_READ = 0x0010
@@ -131,10 +134,25 @@ if sys.platform.startswith("win"):
     _send_input.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
     _send_input.restype = wintypes.UINT
 
+    user32.SendMessageTimeoutW.argtypes = (
+        wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+        wintypes.UINT, wintypes.UINT, ctypes.POINTER(wintypes.WPARAM),
+    )
+    user32.SendMessageTimeoutW.restype = wintypes.LPARAM
+
 _FORCE_SENDINPUT = False
 _CLIPBOARD_LOCK = threading.RLock()
 _CLIPBOARD_OPEN_ATTEMPTS = 16
 _CLIPBOARD_RETRY_SECONDS = 0.02
+# Remote viewers can lose/reorder very large bursts even when SendInput accepts
+# them. Small, paced packets are deliberately more conservative than an entire
+# transcript in one call, while removing the former 10 ms per UTF-16 unit delay.
+_REMOTE_BATCH_UNITS = 16
+_REMOTE_BATCH_PAUSE_SECONDS = 0.020
+_LOCAL_BATCH_UNITS = 64
+_LOCAL_BATCH_PAUSE_SECONDS = 0.005
+_INSERTION_DEADLINE_SECONDS = 30.0
+_DIRECT_INSERT_TIMEOUT_MS = 250
 
 
 def set_force_sendinput(flag: bool) -> None:
@@ -483,64 +501,197 @@ def ensure_foreground(hwnd: int) -> None:
         logger.exception("Failed to bring window %s to foreground", hwnd)
 
 
-def send_unicode_input(text: str, *, preserve_formatting: bool = False) -> bool:
+def _unicode_batches(text: str, max_units: int):
+    """Yield bounded UTF-16 batches without splitting surrogate pairs."""
+    units: list[int] = []
+    for character in text:
+        # SendInput wScan is a UTF-16 WORD, not a Unicode codepoint. Truncating
+        # supplementary characters can manufacture a CR/ESC/control character.
+        encoded = character.encode("utf-16-le")
+        character_units = [
+            int.from_bytes(encoded[offset:offset + 2], "little")
+            for offset in range(0, len(encoded), 2)
+        ]
+        if units and len(units) + len(character_units) > max_units:
+            yield units
+            units = []
+        units.extend(character_units)
+    if units:
+        yield units
+
+
+def _keyboard_event(*, code: int = 0, vk: int = 0, flags: int = 0) -> INPUT:
+    union = _INPUTUNION()
+    union.ki = KEYBDINPUT(wVk=vk, wScan=code, dwFlags=flags, time=0, dwExtraInfo=0)
+    return INPUT(type=INPUT_KEYBOARD, union=union)
+
+
+def _check_insertion_target(hwnd: int | None, events_inserted: int = 0) -> None:
+    # Never reclaim focus between batches: the user may have deliberately
+    # switched windows. A partial prefix is safer than typing into a new target.
+    if not hwnd or get_focused_control() != hwnd:
+        raise InputInsertionError(
+            "The focused window changed during insertion. Use Copy last transcription "
+            "to recover the text; it has not been automatically replayed.",
+            events_inserted=events_inserted,
+        )
+
+
+def _release_paste_keys() -> None:
+    for vk in (VK_V, VK_CONTROL):
+        try:
+            if not send_input_key(vk, True):
+                logger.warning("Could not release paste key %s after partial delivery", vk)
+        except Exception:
+            logger.warning("Could not release paste key %s after partial delivery", vk)
+
+
+def send_unicode_input(
+    text: str, *, preserve_formatting: bool = False,
+    cancel_check: CancelCheck = None, target_hwnd: int | None = None,
+    remote: bool | None = None,
+) -> bool:
+    """Send paced Unicode batches, returning False ONLY before any accepted input.
+
+    Partial or uncertain delivery raises rather than enabling a full-text
+    clipboard fallback, which would duplicate an already inserted prefix.
+    """
     if not sys.platform.startswith("win"):
         return False
-    hwnd = get_focused_control()
-    ensure_foreground(hwnd)
+    check_insertion_cancelled(cancel_check)
     text = prepare_dictation_text(text, preserve_formatting=preserve_formatting)
-    # SendInput wScan is a UTF-16 WORD, not a Unicode codepoint. Truncating a
-    # supplementary character can turn its low bits into CR/ESC/another control.
-    encoded = text.replace("\n", "\r").encode("utf-16-le")
-    for offset in range(0, len(encoded), 2):
-        code = int.from_bytes(encoded[offset:offset + 2], "little")
-        union = _INPUTUNION()
-        union.ki = KEYBDINPUT(wVk=0, wScan=code, dwFlags=KEYEVENTF_UNICODE, time=0, dwExtraInfo=0)
-        inp = INPUT(type=INPUT_KEYBOARD, union=union)
-        if _send_input(1, ctypes.byref(inp), ctypes.sizeof(inp)) != 1:
+    if not text:
+        return True
+    hwnd = target_hwnd if target_hwnd is not None else get_focused_control()
+    if not hwnd:
+        raise InputInsertionError("There is no focused window for text insertion.")
+    if remote is None:
+        remote = is_remote_host_window(hwnd) or is_anydesk_window(hwnd)
+    batch_units = _REMOTE_BATCH_UNITS if remote else _LOCAL_BATCH_UNITS
+    pause = _REMOTE_BATCH_PAUSE_SECONDS if remote else _LOCAL_BATCH_PAUSE_SECONDS
+    inserted = 0
+    started = time.monotonic()
+    for units in _unicode_batches(text.replace("\n", "\r"), batch_units):
+        check_insertion_cancelled(cancel_check, events_inserted=inserted)
+        _check_insertion_target(hwnd, inserted)
+        if time.monotonic() - started >= _INSERTION_DEADLINE_SECONDS:
+            raise InputInsertionError(
+                "Text insertion exceeded its safety deadline. Copy last transcription "
+                "to recover the text; no automatic replay was attempted.",
+                events_inserted=inserted,
+            )
+        events = [event for code in units for event in (
+            _keyboard_event(code=code, flags=KEYEVENTF_UNICODE),
+            _keyboard_event(code=code, flags=KEYEVENTF_UNICODE | KEYEVENTF_KEYUP),
+        )]
+        packet = (INPUT * len(events))(*events)
+        try:
+            sent = int(_send_input(len(packet), packet, ctypes.sizeof(INPUT)))
+        except Exception as exc:
+            raise InputInsertionError(
+                "Windows input delivery could not be confirmed. No automatic replay was attempted.",
+                events_inserted=inserted, may_have_inserted=True,
+            ) from exc
+        if not 0 <= sent <= len(packet):
+            raise InputInsertionError(
+                "Windows returned an invalid input count. No automatic replay was attempted.",
+                events_inserted=inserted, may_have_inserted=True,
+            )
+        inserted += sent
+        if sent != len(packet):
+            if sent % 2:
+                # The final key-down may have been accepted without its key-up.
+                # Release it best-effort; never resend its key-down or text.
+                release = _keyboard_event(
+                    code=units[sent // 2], flags=KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                )
+                try:
+                    _send_input(1, ctypes.byref(release), ctypes.sizeof(INPUT))
+                except Exception:
+                    logger.warning("Could not release the last partially accepted Unicode input")
+            if inserted:
+                raise InputInsertionError(
+                    "Windows accepted only part of the transcript. Use Copy last transcription; "
+                    "automatic fallback was stopped to avoid duplicating text.",
+                    events_inserted=inserted,
+                )
             return False
-        union = _INPUTUNION()
-        union.ki = KEYBDINPUT(wVk=0, wScan=code, dwFlags=KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, time=0, dwExtraInfo=0)
-        inp = INPUT(type=INPUT_KEYBOARD, union=union)
-        if _send_input(1, ctypes.byref(inp), ctypes.sizeof(inp)) != 1:
-            return False
-        time.sleep(0.01)
-    time.sleep(0.02)
+        time.sleep(pause)
+    logger.info("Unicode insertion accepted %s input events in %.3fs (remote=%s)",
+                inserted, time.monotonic() - started, remote)
     return True
 
 
-def try_sendinput_paste(text: str) -> bool:
+def try_sendinput_paste(text: str, *, cancel_check: CancelCheck = None,
+                        target_hwnd: int | None = None) -> bool:
     if not sys.platform.startswith("win"):
         return False
-    hwnd = get_focused_control()
-    ensure_foreground(hwnd)
+    check_insertion_cancelled(cancel_check)
+    hwnd = target_hwnd if target_hwnd is not None else get_focused_control()
+    _check_insertion_target(hwnd)
+    if clipboard_contains_non_text_data():
+        return False
     previous = get_clipboard_text()
     if not set_clipboard_text(text):
         return False
     try:
-        if not (send_input_key(VK_CONTROL) and send_input_key(VK_V) and send_input_key(VK_V, True) and send_input_key(VK_CONTROL, True)):
-            return False
+        check_insertion_cancelled(cancel_check)
+        _check_insertion_target(hwnd)
+        packet = (INPUT * 4)(
+            _keyboard_event(vk=VK_CONTROL), _keyboard_event(vk=VK_V),
+            _keyboard_event(vk=VK_V, flags=KEYEVENTF_KEYUP),
+            _keyboard_event(vk=VK_CONTROL, flags=KEYEVENTF_KEYUP),
+        )
+        try:
+            sent = int(_send_input(4, packet, ctypes.sizeof(INPUT)))
+        except Exception as exc:
+            # The call might have sent Ctrl+V before failing. Never replay it.
+            _release_paste_keys()
+            raise InputInsertionError("Paste delivery could not be confirmed.",
+                                      may_have_inserted=True) from exc
+        if sent != 4:
+            if sent:
+                _release_paste_keys()
+            if sent >= 2 or sent < 0:
+                raise InputInsertionError(
+                    "Paste may already have been delivered. No automatic replay was attempted.",
+                    may_have_inserted=True,
+                )
+            return False  # Zero events, or only Ctrl-down, cannot paste text.
         time.sleep(0.15)
         return True
     finally:
         restore_clipboard_text(previous)
 
 
-def try_clipboard_paste(text: str) -> bool:
+def try_clipboard_paste(text: str, *, cancel_check: CancelCheck = None,
+                        target_hwnd: int | None = None) -> bool:
     if not sys.platform.startswith("win"):
+        return False
+    check_insertion_cancelled(cancel_check)
+    hwnd = target_hwnd if target_hwnd is not None else get_focused_control()
+    _check_insertion_target(hwnd)
+    if clipboard_contains_non_text_data():
         return False
     previous = get_clipboard_text()
     if not set_clipboard_text(text):
         return False
     try:
-        pyautogui.hotkey("ctrl", "v")
+        check_insertion_cancelled(cancel_check)
+        _check_insertion_target(hwnd)
+        try:
+            pyautogui.hotkey("ctrl", "v")
+        except Exception as exc:
+            raise InputInsertionError("Paste delivery could not be confirmed.",
+                                      may_have_inserted=True) from exc
         time.sleep(0.05)
         return True
     finally:
         restore_clipboard_text(previous)
 
 
-def try_direct_text_insert(text: str, hwnd: Optional[int] = None) -> bool:
+def try_direct_text_insert(text: str, hwnd: Optional[int] = None, *,
+                           cancel_check: CancelCheck = None) -> bool:
     if not sys.platform.startswith("win"):
         return False
     if hwnd is None:
@@ -550,22 +701,48 @@ def try_direct_text_insert(text: str, hwnd: Optional[int] = None) -> bool:
     class_name = get_class_name(hwnd)
     if not class_name:
         return False
-    try:
-        if any(token in class_name for token in ("edit", "richedit", "notepad", "textarea", "tmemo", "scintilla")):
-            user32.SendMessageW(hwnd, EM_SETSEL, 0xFFFFFFFF, 0xFFFFFFFF)
-            user32.SendMessageW(hwnd, EM_REPLACESEL, True, text)
-            return True
-    except Exception:
-        logger.exception("Direct text insertion failed for hwnd=%s", hwnd)
-        return False
+    if any(token in class_name for token in ("edit", "richedit", "notepad", "textarea", "tmemo", "scintilla")):
+        check_insertion_cancelled(cancel_check)
+        _check_insertion_target(hwnd)
+        result = wintypes.WPARAM()
+        flags = SMTO_BLOCK | SMTO_ABORTIFHUNG
+        # A hung editor must not hold CtrlSpeak's dictation thread indefinitely.
+        if not user32.SendMessageTimeoutW(
+            hwnd, EM_SETSEL, 0xFFFFFFFF, 0xFFFFFFFF, flags,
+            _DIRECT_INSERT_TIMEOUT_MS, ctypes.byref(result),
+        ):
+            return False  # Selection-only failure has not inserted text.
+        # Selection can take the full timeout; Cancel/focus may have changed
+        # while the target editor was responding. Recheck before sending text.
+        check_insertion_cancelled(cancel_check)
+        _check_insertion_target(hwnd)
+        payload = ctypes.create_unicode_buffer(text)
+        try:
+            delivered = user32.SendMessageTimeoutW(
+                hwnd, EM_REPLACESEL, True, ctypes.addressof(payload), flags,
+                _DIRECT_INSERT_TIMEOUT_MS, ctypes.byref(result),
+            )
+        except Exception as exc:
+            raise InputInsertionError("Direct editor insertion could not be confirmed.",
+                                      may_have_inserted=True) from exc
+        if not delivered:
+            # Timeout does not prove the editor failed to process the message.
+            raise InputInsertionError(
+                "The editor did not acknowledge insertion in time. No automatic replay was attempted.",
+                may_have_inserted=True,
+            )
+        return True
     return False
 
 
-def insert_text_into_focus(text: str, *, preserve_formatting: bool = False) -> None:
+def insert_text_into_focus(text: str, *, preserve_formatting: bool = False,
+                           cancel_check: CancelCheck = None) -> None:
+    check_insertion_cancelled(cancel_check)
     text = prepare_dictation_text(text, preserve_formatting=preserve_formatting)
     if not text:
         return
     if not sys.platform.startswith("win"):
+        check_insertion_cancelled(cancel_check)
         pyautogui.write(text)
         return
 
@@ -574,25 +751,49 @@ def insert_text_into_focus(text: str, *, preserve_formatting: bool = False) -> N
     hosted_remote = bool(hwnd and is_remote_host_window(hwnd))
     anydesk_window = bool(hwnd and is_anydesk_window(hwnd))
 
-    # Prefer SendInput for consoles/WSL, AnyDesk (explicit), and remote-hosted windows, or when forced by CLI
+    if not hwnd:
+        raise InputInsertionError("There is no focused window for text insertion.")
+
+    # A False return guarantees zero text events; partial/uncertain delivery
+    # raises and must never fall through into another whole-transcript route.
     if hwnd and (_FORCE_SENDINPUT or anydesk_window or console_window or hosted_remote):
-        if send_unicode_input(text, preserve_formatting=preserve_formatting):
-            return
-        if try_sendinput_paste(text):
+        if send_unicode_input(
+            text, preserve_formatting=preserve_formatting,
+            cancel_check=cancel_check, target_hwnd=hwnd,
+            remote=anydesk_window or hosted_remote,
+        ):
             return
 
     # For normal local GUI controls, try direct insertion first
-    if not console_window and not anydesk_window and not hosted_remote and try_direct_text_insert(text, hwnd):
+    check_insertion_cancelled(cancel_check)
+    _check_insertion_target(hwnd)
+    if (not console_window and not anydesk_window and not hosted_remote
+            and try_direct_text_insert(text, hwnd, cancel_check=cancel_check)):
         return
 
-    # If forced or remote-hosted / AnyDesk (but not console), try SendInput again
-    if (_FORCE_SENDINPUT or anydesk_window or hosted_remote) and not console_window:
-        if send_unicode_input(text, preserve_formatting=preserve_formatting):
-            return
-
-    # Fallbacks
-    if try_sendinput_paste(text):
+    # Fallbacks are cancellation- and focus-aware immediately before delivery.
+    if try_sendinput_paste(text, cancel_check=cancel_check, target_hwnd=hwnd):
         return
-    if try_clipboard_paste(text):
+    if try_clipboard_paste(text, cancel_check=cancel_check, target_hwnd=hwnd):
         return
-    pyautogui.write(text)
+    check_insertion_cancelled(cancel_check)
+    _check_insertion_target(hwnd)
+    # pyautogui.write silently drops unsupported Unicode; do not claim success
+    # for a damaged transcript. ASCII last-resort typing is bounded/cancellable.
+    if not text.isascii() or "\n" in text or "\r" in text:
+        raise InputInsertionError("No safe Unicode insertion method is available. Use Copy last transcription.")
+    accepted = 0
+    started = time.monotonic()
+    for offset in range(0, len(text), _LOCAL_BATCH_UNITS):
+        check_insertion_cancelled(cancel_check, events_inserted=accepted)
+        _check_insertion_target(hwnd, accepted)
+        if time.monotonic() - started >= _INSERTION_DEADLINE_SECONDS:
+            raise InputInsertionError("Direct typing exceeded its safety deadline.",
+                                      events_inserted=accepted)
+        chunk = text[offset:offset + _LOCAL_BATCH_UNITS]
+        try:
+            pyautogui.write(chunk)
+        except Exception as exc:
+            raise InputInsertionError("Direct typing delivery could not be confirmed.",
+                                      events_inserted=accepted, may_have_inserted=True) from exc
+        accepted += len(chunk) * 2

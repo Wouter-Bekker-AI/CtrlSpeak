@@ -163,7 +163,7 @@ def test_recording_and_processing_use_the_same_loaded_ctrlspeak_artwork(monkeypa
         processing,
         548,
         88,
-        SimpleNamespace(elapsed_label="1.4s"),
+        SimpleNamespace(elapsed_label="1.4s", headline="Transcribing"),
     )
 
     for canvas in (recording, processing):
@@ -205,7 +205,7 @@ def test_recording_and_processing_fail_safe_to_brand_silhouette(monkeypatch) -> 
         canvases[1],
         548,
         88,
-        SimpleNamespace(elapsed_label="1.4s"),
+        SimpleNamespace(elapsed_label="1.4s", headline="Transcribing"),
     )
 
     for canvas in canvases:

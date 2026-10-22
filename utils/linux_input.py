@@ -19,6 +19,7 @@ from typing import Any, Optional
 from utils.config_paths import get_logger
 from utils.dictation_text import prepare_dictation_text
 from utils.hotkeys import DesktopSessionError, ensure_desktop_automation_supported
+from utils.input_errors import CancelCheck, InputInsertionError, check_insertion_cancelled
 
 
 logger = get_logger(__name__)
@@ -304,9 +305,37 @@ def restore_clipboard_text(previous: Optional[str]) -> None:
         logger.warning("Failed to restore the previous X11 text clipboard")
 
 
-def _type_directly_or_raise(text: str, *, reason: str) -> None:
+def _type_ascii(text: str, cancel_check: CancelCheck = None) -> None:
+    accepted = 0
+    started = time.monotonic()
+    for offset in range(0, len(text), 32):
+        check_insertion_cancelled(cancel_check, events_inserted=accepted)
+        if time.monotonic() - started >= 30.0:
+            raise InputInsertionError("Direct typing exceeded its safety deadline.",
+                                      events_inserted=accepted)
+        chunk = text[offset:offset + 32]
+        try:
+            get_pyautogui().write(chunk, interval=0.001)
+        except Exception as exc:
+            raise InputInsertionError("Direct typing delivery could not be confirmed.",
+                                      events_inserted=accepted, may_have_inserted=True) from exc
+        accepted += len(chunk) * 2
+
+
+def _paste_once(cancel_check: CancelCheck = None) -> None:
+    check_insertion_cancelled(cancel_check)
+    try:
+        get_pyautogui().hotkey("ctrl", "v")
+    except Exception as exc:
+        raise InputInsertionError("Paste delivery could not be confirmed.",
+                                  may_have_inserted=True) from exc
+
+
+def _type_directly_or_raise(text: str, *, reason: str,
+                            cancel_check: CancelCheck = None) -> None:
+    check_insertion_cancelled(cancel_check)
     if text.isascii() and "\n" not in text and "\r" not in text:
-        get_pyautogui().write(text, interval=0.001)
+        _type_ascii(text, cancel_check)
         return
     raise DesktopSessionError(
         f"{reason} CtrlSpeak preserved the existing clipboard but cannot safely type this "
@@ -315,13 +344,14 @@ def _type_directly_or_raise(text: str, *, reason: str) -> None:
     )
 
 
-def _insert_text_with_tk_fallback(text: str) -> None:
+def _insert_text_with_tk_fallback(text: str, *, cancel_check: CancelCheck = None) -> None:
+    check_insertion_cancelled(cancel_check)
     try:
         clipboard_session = _new_tk_clipboard_session()
     except DesktopSessionError:
         # Preserve the pre-v0.4 safe last resort if Tk itself cannot start.
         if text.isascii() and "\n" not in text and "\r" not in text:
-            get_pyautogui().write(text, interval=0.001)
+            _type_ascii(text, cancel_check)
             return
         raise
 
@@ -330,40 +360,45 @@ def _insert_text_with_tk_fallback(text: str) -> None:
             _type_directly_or_raise(
                 text,
                 reason="The clipboard contains non-text data that CtrlSpeak will not overwrite.",
+                cancel_check=cancel_check,
             )
             return
 
         previous = clipboard.get_text()
         try:
             clipboard.set_text(text)
-            get_pyautogui().hotkey("ctrl", "v")
+            _paste_once(cancel_check)
             clipboard.wait_with_events(0.08)
         finally:
             clipboard.restore_text(previous)
             clipboard.wait_with_events(_TK_EVENT_POLL_SECONDS)
 
 
-def insert_text_into_focus(text: str, *, preserve_formatting: bool = False) -> None:
+def insert_text_into_focus(text: str, *, preserve_formatting: bool = False,
+                           cancel_check: CancelCheck = None) -> None:
+    check_insertion_cancelled(cancel_check)
     text = prepare_dictation_text(text, preserve_formatting=preserve_formatting)
     if not text:
         return
     ensure_desktop_automation_supported()
     if not clipboard_tool_available():
-        _insert_text_with_tk_fallback(text)
+        _insert_text_with_tk_fallback(text, cancel_check=cancel_check)
         return
     if clipboard_contains_non_text_data():
         _type_directly_or_raise(
             text,
             reason="The clipboard contains non-text data that CtrlSpeak will not overwrite.",
+            cancel_check=cancel_check,
         )
         return
 
     previous = get_clipboard_text()
     try:
         if not set_clipboard_text(text):
-            _type_directly_or_raise(text, reason="CtrlSpeak could not stage the X11 clipboard.")
+            _type_directly_or_raise(text, reason="CtrlSpeak could not stage the X11 clipboard.",
+                                    cancel_check=cancel_check)
             return
-        get_pyautogui().hotkey("ctrl", "v")
+        _paste_once(cancel_check)
         time.sleep(0.08)
     finally:
         restore_clipboard_text(previous)

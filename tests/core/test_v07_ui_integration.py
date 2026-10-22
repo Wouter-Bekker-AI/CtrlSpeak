@@ -1124,6 +1124,63 @@ def test_background_transcription_error_is_terminal_and_cleans_temp_file(
     assert system.transcription_thread is None
 
 
+def test_transient_failure_is_retained_only_until_explicit_retry(monkeypatch, tmp_path):
+    from utils import system
+    from utils.transcription_backend import ApiBackendError
+
+    _processing_session(system)
+    observed = _isolate_worker_side_effects(monkeypatch, system)
+    path = _usable_recording(tmp_path / "failed.wav")
+    calls = []
+
+    def transcribe(filename, **_kwargs):
+        calls.append(filename)
+        if len(calls) == 1:
+            raise ApiBackendError("Gateway unreachable", category="gateway_unreachable", retryable=True)
+        return TranscriptionResult(text="retried text", metadata={"provider_used": "openai-gpt-transcribe"})
+
+    _install_fake_models(monkeypatch, transcribe)
+    system.recording_file_path = path
+    system.transcription_thread = FakeThread()
+    system._transcribe_recording_worker(path, time.monotonic())
+    assert not path.exists()
+    assert system.has_failed_recording()
+    assert calls == [str(path)]  # Nothing auto-resends.
+    assert "15 minutes" in observed["notifications"][0][1]
+    monkeypatch.setattr(system, "RETRY_FOCUS_DELAY_SECONDS", 0)
+    monkeypatch.setattr(system, "_show_processing_overlay", lambda: None)
+    assert system.retry_failed_recording()
+    worker = system.transcription_thread
+    if worker is not None:
+        worker.join(2)
+    assert not system.is_transcription_busy()
+    assert not system.has_failed_recording()
+    assert len(calls) == 2
+    assert not Path(calls[1]).exists()
+    assert len(observed["injected"]) == 1
+
+
+def test_partial_insertion_failure_never_retains_audio_for_retry(monkeypatch, tmp_path):
+    from utils import system
+    from utils.input_errors import InputInsertionError
+    _processing_session(system)
+    observed = _isolate_worker_side_effects(monkeypatch, system)
+    path = _usable_recording(tmp_path / "partial.wav")
+    _install_fake_models(monkeypatch, lambda *_args, **_kwargs: TranscriptionResult(text="partial text"))
+
+    def fail(_result):
+        raise InputInsertionError("Focus changed", events_inserted=2)
+
+    monkeypatch.setattr(system, "inject_transcription_result", fail)
+    system.recording_file_path = path
+    system.transcription_thread = FakeThread()
+    system._transcribe_recording_worker(path, time.monotonic())
+    assert system.transcription_ui_session.snapshot().error_category == "insertion_partial"
+    assert not system.has_failed_recording()
+    assert not path.exists()
+    assert observed["hide_delays"] == [3800]
+
+
 def test_cancellation_during_background_request_suppresses_text_insertion_and_cleans_temp(
     monkeypatch, tmp_path
 ) -> None:
@@ -1350,7 +1407,7 @@ def test_release_never_detaches_recorder_before_wav_flush(monkeypatch, tmp_path)
     assert not recording.exists()
 
 
-def test_cancellation_and_text_insertion_have_one_atomic_commit(monkeypatch, tmp_path) -> None:
+def test_cancellation_during_insertion_is_responsive_and_retains_busy_ownership(monkeypatch, tmp_path) -> None:
     from utils import system
 
     session = TranscriptionUiSession()
@@ -1402,15 +1459,18 @@ def test_cancellation_and_text_insertion_have_one_atomic_commit(monkeypatch, tmp
 
     cancelling = threading.Thread(target=cancel, daemon=True)
     cancelling.start()
-    assert not cancel_finished.wait(0.1)
+    assert cancel_finished.wait(0.3)
+    assert system.is_transcription_busy()
+    assert cancel_event.is_set()
     allow_injection.set()
     worker.join(2.0)
     cancelling.join(1.0)
 
     assert observed["injected"] == [result]
-    assert session.phase is UiPhase.SUCCESS
-    assert cancel_result == [False]
-    assert not cancel_event.is_set()
+    assert session.phase is UiPhase.ERROR
+    assert session.snapshot().error_category == "insertion_partial"
+    assert cancel_result == [True]
+    assert not system.is_transcription_busy()
 
 
 def test_stale_generation_finalizer_cannot_clear_newer_session(monkeypatch, tmp_path) -> None:
