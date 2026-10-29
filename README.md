@@ -1,4 +1,24 @@
-# CtrlSpeak v0.8.1
+# CtrlSpeak v0.8.2
+
+## Smaller updates from 0.8.2 onward
+
+The updater now supports **signed differential executable patches**. When your
+installed executable exactly matches a supported base, it downloads the smaller
+patch, reconstructs the full new executable locally, verifies its signed hash,
+and uses the existing restart/health/rollback process. A full download remains
+the fallback. The Updates page shows the selected method, transfer size and a
+redacted receipt for the last installed update.
+
+**Installing 0.8.2 from 0.8.1 is still a full download:** this installs the patch
+decoder. The planned 0.8.3 animated mode guide will be the first user acceptance
+test of upgrading from 0.8.2 using a smaller patch. Skipping releases is allowed;
+direct patches cover up to three recent patch-aware bases, otherwise download
+the full release. See [0.8.2 details](docs/V0.8.2_RELEASE.md).
+
+Smaller downloads still need temporary disk space for the reconstructed file,
+native startup and rollback. Successful-update payload caches retain two recent
+installs and the most recent explicit 0.7.7 rollback; audit metadata and active,
+failed or unrecognized transactions are not automatically deleted.
 
 CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into

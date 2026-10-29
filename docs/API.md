@@ -1,8 +1,14 @@
-# CtrlSpeak API v0.8.1
+# CtrlSpeak API v0.8.2
 
-0.8.1 changes only desktop Ctrl-key recognition and Live overlay placement.
+0.8.2 introduces desktop differential updates, not a transcription API change.
+Gateway, worker and external-helper version metadata is aligned; requests,
+authentication, language constraints, correction rules, cleanup and response
+contracts are unchanged. Older clients remain compatible. See
+[0.8.2 updater/release details](V0.8.2_RELEASE.md).
+
+Previous patch 0.8.1 changed desktop Ctrl-key recognition and Live overlay placement.
 The batch transcription, correction, language, cleanup and helper contracts are
-unchanged. The fleet version is aligned at 0.8.1; 0.7.7/0.8.0 clients remain
+unchanged. Its fleet version was aligned at 0.8.1; 0.7.7/0.8.0 clients remain
 compatible. See [0.8.1 release details](V0.8.1_RELEASE.md).
 
 ## Desktop dictation modes and compatibility (0.8.0)
@@ -254,7 +260,7 @@ loaded model/runtime:
 ```json
 {
   "status": "ready",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "role": "worker",
   "model": "large-v3-turbo",
   "device": "cuda",
@@ -267,7 +273,7 @@ providers permitted for the caller:
 
 ```json
 {
-  "version": "0.8.1",
+  "version": "0.8.2",
   "role": "gateway",
   "accepts_client_transcriptions": true,
   "applies_corrections": true,
@@ -539,7 +545,7 @@ binds feedback to the original transcription ID, URL, and client bearer token.
   "rule_ids": [],
   "confirmed_text": "the user-confirmed final text",
   "capture_method": "active_field_on_enter",
-  "client_metadata": {"client": "CtrlSpeak", "version": "0.8.1"}
+  "client_metadata": {"client": "CtrlSpeak", "version": "0.8.2"}
 }
 ```
 

@@ -2,7 +2,7 @@ name: CtrlSpeak tests
 
 on:
   push:
-    branches: [v0.7, 'codex/lossless-transport-*', 'codex/safe-dictation-*', 'codex/reliability-*', 'codex/dictation-modes-*']
+    branches: [v0.7, 'codex/lossless-transport-*', 'codex/safe-dictation-*', 'codex/reliability-*', 'codex/dictation-modes-*', 'codex/differential-updates-*']
   pull_request:
     branches: [v0.7]
 
@@ -36,7 +36,10 @@ jobs:
           python -m pip install -r requirements.txt
 
       - name: Run core headless tests
-        run: python scripts/run_bounded_tests.py --timeout 180 -m core_headless
+        # Native roundtrips are offline tests; fetch only the pinned build tool here.
+        run: |
+          python scripts/fetch_patch_tool.py
+          python scripts/run_bounded_tests.py --timeout 180 -m core_headless
 
       - name: Compile Python sources
         run: python -m compileall main.py utils scripts tests

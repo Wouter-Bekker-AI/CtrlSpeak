@@ -92,6 +92,7 @@ from utils.update_manager import (
     get_update_coordinator,
     sanitize_release_notes,
     utc_now_iso,
+    latest_completed_transfer,
 )
 
 # Shared UI thread root + instance ref (imported by utils.system.schedule_management_refresh)
@@ -2847,6 +2848,7 @@ class _LegacyManagementWindow:
         self._last_recorded_check_generation = -1
         self.update_status_var = tk.StringVar()
         self.update_last_checked_var = tk.StringVar()
+        self.update_last_transfer_var = tk.StringVar(value="")
         self.update_progress_var = tk.DoubleVar(value=0.0)
 
         ttk.Label(
@@ -2866,6 +2868,8 @@ class _LegacyManagementWindow:
             textvariable=self.update_last_checked_var,
             style="Caption.TLabel",
         ).pack(anchor=tk.W, pady=(6, 0))
+        ttk.Label(update_card, textvariable=self.update_last_transfer_var,
+                  style="Caption.TLabel", wraplength=520).pack(anchor=tk.W, pady=(6, 0))
 
         self.update_progress = ttk.Progressbar(
             update_card,
@@ -2955,6 +2959,14 @@ class _LegacyManagementWindow:
     def _apply_update_event(self, event: UpdateEvent) -> None:
         if not self.is_open():
             return
+        if hasattr(self, "update_last_transfer_var") and event.state in {"idle", "available", "up_to_date", "newer_than_release"}:
+            receipt = latest_completed_transfer()
+            if receipt:
+                method = "differential patch" if receipt["transfer_mode"] == "delta" else "full download"
+                self.update_last_transfer_var.set(
+                    f"Last installed update {receipt['version']}: {method} · "
+                    f"{self._format_update_bytes(receipt['download_bytes'])} downloaded · "
+                    f"{self._format_update_bytes(receipt['full_bytes'])} full application")
         self._update_event = event
         if event.release is not None:
             self._update_release = event.release
@@ -2981,9 +2993,9 @@ class _LegacyManagementWindow:
             self.update_progress_var.set(0.0)
             self.update_progress_text_var.set("")
 
-        busy = event.state in {"checking", "downloading", "verifying", "launching_updater"}
+        busy = event.state in {"checking", "downloading", "applying_patch", "falling_back", "verifying", "launching_updater"}
         self._set_button_enabled(self.check_update_btn, not busy)
-        self._set_button_enabled(self.cancel_update_btn, event.state == "downloading")
+        self._set_button_enabled(self.cancel_update_btn, event.state in {"downloading", "applying_patch", "falling_back"})
         self._set_button_enabled(self.view_release_btn, self._update_release is not None)
 
         install_eligible = self._update_runtime == "packaged_user_writable"
@@ -3035,7 +3047,9 @@ class _LegacyManagementWindow:
             f"Current version: {APP_VERSION}\n"
             f"Target version: {release.version}\n"
             f"Artifact: {release.asset.name}\n"
-            f"Download: approximately {self._format_update_bytes(release.asset.size)}\n\n"
+            f"Method: {getattr(release, 'transfer_description', 'Full application download')}\n"
+            f"Download: approximately {self._format_update_bytes(getattr(release, 'download_size', release.asset.size))}\n"
+            f"Full-download fallback: {self._format_update_bytes(release.asset.size)} if the patch is unavailable or fails verification.\n\n"
             "CtrlSpeak will verify the signed download before it closes. Settings, models, "
             "CUDA files, and corrections will be retained. Continue?"
         )
@@ -3147,7 +3161,12 @@ class _LegacyManagementWindow:
             f"Release tag: {release.tag if release else 'none'}",
             f"Manifest SHA-256: {release.manifest_sha256 if release else 'none'}",
             f"Transaction: {transaction.transaction_id if transaction else 'none'}",
+            f"Selected transfer: {getattr(release, 'transfer_description', 'none') if release else 'none'}",
+            f"Selected download bytes: {getattr(release, 'download_size', release.asset.size) if release else 0}",
         ]
+        receipt = latest_completed_transfer()
+        if receipt:
+            lines.extend(f"Last installed {key}: {value}" for key, value in receipt.items())
         try:
             self.window.clipboard_clear()
             self.window.clipboard_append("\n".join(lines))

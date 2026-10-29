@@ -150,7 +150,7 @@ actionable message if the system runtime is not usable.
 
 On Windows the same maintained specification produces `CtrlSpeak.exe` with
 `console=False`; the executable does not have a console window. Windows version
-resources identify the current release's product/file version (0.8.1). The historical v0.2-v0.6
+resources identify the current release's product/file version (0.8.2). The historical v0.2-v0.6
 specs remain in the repository for reproducibility but are no longer selected
 by the standard build helper. The Watcher option remains Windows-only and does
 not use the standard CtrlSpeak updater identity.
@@ -173,6 +173,15 @@ is started. A failed self-test exits non-zero and cannot count as a healthy
 build. The Windows and Linux release jobs require this evidence before signing.
 This proves bundling and pure safety logic, not real microphone quality,
 AnyDesk delivery, global shortcut compatibility or live end-to-end latency.
+
+From 0.8.2, the build helper fetches the hash-pinned Xdelta tool and its license
+using `scripts/fetch_patch_tool.py`. The packaged health command additionally
+executes a bounded native encode/decode roundtrip and requires
+`differential_updates.ok` and `byte_identical`. No runtime network download of a
+decoder is permitted. CI generates patches from recent signed bases before
+signing the additive manifest entries, and roundtrip-verifies full output hashes.
+Published assets are the original five plus declared `.vcdiff` files; audit them
+with `scripts/release.py verify --exact-assets`. See `docs/V0.8.2_RELEASE.md`.
 
 Release assets use platform-qualified names, but an installed standard copy is
 always `CtrlSpeak.exe` on Windows or `CtrlSpeak` on Linux. The signed updater

@@ -14,6 +14,18 @@ from utils import update_helper, update_manager
 
 
 pytestmark = pytest.mark.core_headless
+_TEST_PUBLIC_KEYS = {}
+
+
+@pytest.fixture(autouse=True)
+def verify_ephemeral_test_signatures(monkeypatch):
+    original = update_manager.verify_signed_manifest
+
+    def verify(manifest_bytes, signature_bytes, **kwargs):
+        kwargs['public_key_base64'] = _TEST_PUBLIC_KEYS[manifest_bytes]
+        return original(manifest_bytes, signature_bytes, **kwargs)
+
+    monkeypatch.setattr(update_helper, 'verify_signed_manifest', verify)
 
 
 def _release(artifact: bytes) -> update_manager.VerifiedRelease:
@@ -46,6 +58,7 @@ def _release(artifact: bytes) -> update_manager.VerifiedRelease:
     }
     manifest_bytes = update_manager.canonical_manifest_bytes(payload)
     signature_bytes = base64.b64encode(private_key.sign(manifest_bytes))
+    _TEST_PUBLIC_KEYS[manifest_bytes] = public_key
     manifest, selected, version, minimum = update_manager.verify_signed_manifest(
         manifest_bytes,
         signature_bytes,

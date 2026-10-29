@@ -61,7 +61,9 @@ jobs:
         run: python scripts/release.py check-version --tag "${{ github.ref_name }}"
 
       - name: Run required tests
-        run: python scripts/run_bounded_tests.py --timeout 180 -m core_headless
+        run: |
+          python scripts/fetch_patch_tool.py
+          python scripts/run_bounded_tests.py --timeout 180 -m core_headless
 
       - name: Build one-file application
         run: python -m utils.build_exe
@@ -85,6 +87,7 @@ jobs:
           if (-not $health.audio_transport.bit_perfect) { throw "Packaged FLAC codec failed" }
           if (-not $health.request_transport.ok -or -not $health.request_transport.async_dns) { throw "Packaged cancellable HTTP/DNS runtime failed" }
           if (-not $health.dictation_modes.ok -or -not $health.dictation_modes.pcm_bit_perfect -or -not $health.dictation_modes.mute_capture_gate -or -not $health.dictation_modes.delivery_epoch_guard) { throw "Packaged dictation-mode safety self-test failed" }
+          if (-not $health.differential_updates.ok -or -not $health.differential_updates.byte_identical) { throw "Packaged differential-update roundtrip failed" }
           if ($health.request_transport.event_loop -ne 'ProactorEventLoop') { throw "Windows packaged HTTP runtime must use its native network event loop" }
           $versionInfo = (Get-Item -LiteralPath .\dist\CtrlSpeak.exe).VersionInfo
           if ($versionInfo.FileVersion -ne $expectedVersion -or $versionInfo.ProductVersion -ne $expectedVersion) { throw "Invalid packaged Windows version resource" }
@@ -102,6 +105,7 @@ jobs:
           python -c "import json,os; assert json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json'))['audio_transport']['bit_perfect'] is True"
           python -c "import json,os; p=json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json'))['request_transport']; assert p['ok'] and p['async_dns'] and p['cancellable_http']"
           python -c "import json,os; p=json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json'))['dictation_modes']; assert p['ok'] and p['pcm_bit_perfect'] and p['mute_capture_gate'] and p['delivery_epoch_guard']"
+          python -c "import json,os; p=json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json'))['differential_updates']; assert p['ok'] and p['byte_identical']"
           cp dist/CtrlSpeak release/CtrlSpeak-linux-x86_64
           chmod 755 release/CtrlSpeak-linux-x86_64
 
@@ -140,6 +144,11 @@ jobs:
           path: release
           merge-multiple: true
 
+      - name: Generate and roundtrip-test direct patches from recent signed bases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/generate_deltas.py --directory release
+
       - name: Generate and sign canonical update manifest
         env:
           CTRLSPEAK_UPDATE_SIGNING_KEY: ${{ secrets.CTRLSPEAK_UPDATE_SIGNING_KEY }}
@@ -148,7 +157,8 @@ jobs:
             --tag "${{ github.ref_name }}" \
             --windows release/CtrlSpeak-windows-x86_64.exe \
             --linux release/CtrlSpeak-linux-x86_64 \
-            --output-dir release
+            --output-dir release \
+            --deltas-file release/deltas.json
 
       - name: Independently verify release set
         run: |
@@ -162,8 +172,16 @@ jobs:
             release/update-manifest.json
             release/update-manifest.sig
             release/SHA256SUMS
+            release/*.vcdiff
           if-no-files-found: error
           retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: delta-build-evidence
+          path: |
+            release/deltas.json
+            release/delta-evidence.json
 
   publish:
     needs: manifest
@@ -200,17 +218,15 @@ jobs:
         run: |
           set -euo pipefail
           if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            shopt -s nullglob
+            assets=(release/CtrlSpeak-windows-x86_64.exe release/CtrlSpeak-linux-x86_64 release/update-manifest.json release/update-manifest.sig release/SHA256SUMS release/*.vcdiff)
             gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --draft \
             --generate-notes \
             --title "CtrlSpeak ${GITHUB_REF_NAME#v}" \
-            release/CtrlSpeak-windows-x86_64.exe \
-            release/CtrlSpeak-linux-x86_64 \
-            release/update-manifest.json \
-            release/update-manifest.sig \
-            release/SHA256SUMS
+            "${assets[@]}"
           fi
 
       - name: Join private deployment network
@@ -242,9 +258,8 @@ jobs:
         run: |
           mkdir audit
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir audit
-          test "$(find audit -maxdepth 1 -type f | wc -l)" -eq 5
           chmod +x audit/CtrlSpeak-linux-x86_64
-          python scripts/release.py verify --directory audit --tag "$GITHUB_REF_NAME"
+          python scripts/release.py verify --directory audit --tag "$GITHUB_REF_NAME" --exact-assets
           cmp release/update-manifest.json audit/update-manifest.json
           cmp release/update-manifest.sig audit/update-manifest.sig
 

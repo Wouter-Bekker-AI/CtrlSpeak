@@ -129,6 +129,8 @@ def test_packaged_health_check_file_exits_before_normal_startup(tmp_path, monkey
     assert payload["dictation_modes"]["pcm_bit_perfect"] is True
     assert payload["dictation_modes"]["mute_capture_gate"] is True
     assert payload["dictation_modes"]["delivery_epoch_guard"] is True
+    assert payload["differential_updates"]["ok"] is True
+    assert payload["differential_updates"]["byte_identical"] is True
 
 
 def test_packaged_health_fails_closed_on_dictation_smoke_failure(tmp_path, monkeypatch) -> None:

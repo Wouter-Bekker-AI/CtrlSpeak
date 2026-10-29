@@ -142,6 +142,9 @@ def generate(args: argparse.Namespace) -> None:
         ],
     }
     revision = os.environ.get("GITHUB_SHA")
+    delta_file = getattr(args, "deltas_file", None)
+    if delta_file:
+        payload["deltas"] = json.loads(Path(delta_file).read_text(encoding="utf-8"))
     if revision:
         if not re.fullmatch("[0-9a-f]{40}", revision):
             raise SystemExit("invalid release revision")
@@ -158,6 +161,15 @@ def generate(args: argparse.Namespace) -> None:
     signature_path.write_bytes(signature_bytes)
 
     checksum_paths = [windows_path, linux_path, manifest_path, signature_path]
+    for platform_name in ("windows", "linux"):
+        from utils.update_manager import parse_deltas
+        _, target_asset, _, _ = verify_signed_manifest(manifest_bytes,signature_bytes,
+            platform_name=platform_name,architecture="x86_64")
+        for delta in parse_deltas(payload,target_asset):
+            path=output_dir/delta.asset.name
+            if path.stat().st_size!=delta.asset.size or sha256_file(path)!=delta.asset.sha256:
+                raise SystemExit("patch failed signed size/hash binding")
+            checksum_paths.append(path)
     checksums = "".join(f"{sha256_file(path)}  {path.name}\n" for path in checksum_paths)
     (output_dir / CHECKSUMS_ASSET_NAME).write_text(checksums, encoding="ascii", newline="\n")
     print(f"Generated signed CtrlSpeak {version} manifest in {output_dir}")
@@ -215,11 +227,22 @@ def verify(args: argparse.Namespace) -> None:
         MANIFEST_ASSET_NAME,
         SIGNATURE_ASSET_NAME,
     }
+    from utils.update_manager import parse_deltas
+    for target_asset in (windows_asset,linux_asset):
+        for delta in parse_deltas(windows_manifest,target_asset):
+            expected_names.add(delta.asset.name)
+            path=directory/delta.asset.name
+            if not path.is_file() or path.stat().st_size!=delta.asset.size or sha256_file(path)!=delta.asset.sha256:
+                raise SystemExit(f"release patch failed manifest verification: {delta.asset.name}")
     if set(checksums) != expected_names:
-        raise SystemExit("SHA256SUMS does not name exactly the four signed release inputs")
+        raise SystemExit("SHA256SUMS does not name exactly the signed full artifacts, metadata and patches")
     for name, expected_hash in checksums.items():
         if sha256_file(directory / name) != expected_hash:
             raise SystemExit(f"SHA256SUMS verification failed: {name}")
+    if getattr(args,"exact_assets",False):
+        actual={p.name for p in directory.iterdir() if p.is_file()}
+        if actual != expected_names|{CHECKSUMS_ASSET_NAME}:
+            raise SystemExit("uploaded release does not contain exactly the signed asset set")
     print(f"Verified complete CtrlSpeak {version} release set in {directory}")
 
 
@@ -236,10 +259,12 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--linux", required=True)
     create.add_argument("--output-dir", required=True)
     create.add_argument("--published-at")
+    create.add_argument("--deltas-file")
 
     audit = subparsers.add_parser("verify")
     audit.add_argument("--directory", required=True)
     audit.add_argument("--tag")
+    audit.add_argument("--exact-assets",action="store_true")
     return parser
 
 

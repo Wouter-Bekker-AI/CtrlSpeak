@@ -8,11 +8,12 @@ import json
 import os
 import platform
 import re
+import shutil
 import sys
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Optional
@@ -23,6 +24,8 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from utils.config_paths import get_config_dir, get_logger
+from utils.binary_delta import ALGORITHM, MAX_PATCH_BYTES, MAX_PATCH_RATIO, PatchCancelled, PatchError, apply_patch_file
+from utils.version import APP_VERSION
 
 
 logger = get_logger(__name__)
@@ -111,6 +114,17 @@ class UpdateAsset:
 
 
 @dataclass(frozen=True)
+class DeltaAsset:
+    asset: UpdateAsset
+    base_version: str
+    base_size: int
+    base_sha256: str
+    target_size: int
+    target_sha256: str
+    minimum_updater_version: str = "0.8.2"
+
+
+@dataclass(frozen=True)
 class VerifiedRelease:
     version: SemanticVersion
     tag: str
@@ -124,6 +138,18 @@ class VerifiedRelease:
     signature_bytes: bytes
     # Local, explicit user intent; never supplied by unsigned GitHub metadata.
     operation: str = "update"
+    deltas: tuple[DeltaAsset, ...] = ()
+    selected_delta: Optional[DeltaAsset] = None
+
+    @property
+    def download_size(self) -> int:
+        return self.selected_delta.asset.size if self.selected_delta else self.asset.size
+
+    @property
+    def transfer_description(self) -> str:
+        if self.selected_delta:
+            return f"Differential patch from {self.selected_delta.base_version}"
+        return "Full application download"
 
     @property
     def manifest_sha256(self) -> str:
@@ -290,6 +316,57 @@ def _parse_asset(value: object, *, tag: str) -> UpdateAsset:
     return UpdateAsset(platform_name, architecture, variant, name, url, size, sha256)
 
 
+def delta_asset_name(platform_name: str, base_version: str) -> str:
+    return f"CtrlSpeak-{platform_name}-x86_64-from-{base_version}.vcdiff"
+
+
+def parse_deltas(manifest: Mapping[str, object], target: UpdateAsset) -> tuple[DeltaAsset, ...]:
+    values = manifest.get("deltas", [])
+    if not isinstance(values, list) or len(values) > 12:
+        raise UpdateError("invalid_delta", "The signed patch list is invalid or excessive.")
+    result, seen = [], set()
+    for entry in values:
+        if not isinstance(entry, dict):
+            raise UpdateError("invalid_delta", "A signed patch entry is invalid.")
+        if entry.get("algorithm") != ALGORITHM:
+            continue  # Future algorithms fall back to the normal signed full asset.
+        if (entry.get("platform"), entry.get("architecture"), entry.get("variant")) != (target.platform, target.architecture, target.variant):
+            continue
+        asset = _parse_asset(entry, tag=str(manifest["tag"]))
+        base_version = str(SemanticVersion.parse(entry.get("base_version")))
+        minimum = str(SemanticVersion.parse(entry.get("minimum_updater_version")))
+        base_size, base_hash = entry.get("base_size"), entry.get("base_sha256")
+        if (SemanticVersion.parse(base_version) >= SemanticVersion.parse(manifest["version"])
+                or asset.name != delta_asset_name(target.platform, base_version)
+                or not isinstance(base_size, int) or isinstance(base_size, bool)
+                or not 1 <= base_size <= ARTIFACT_MAX_BYTES
+                or not isinstance(base_hash, str) or not _SHA256_PATTERN.fullmatch(base_hash)
+                or entry.get("target_sha256") != target.sha256
+                or entry.get("target_size") != target.size
+                or asset.size > min(MAX_PATCH_BYTES, int(target.size * MAX_PATCH_RATIO))
+                or base_version in seen):
+            raise UpdateError("invalid_delta", "A signed patch is not bound to a valid base and target.")
+        seen.add(base_version)
+        result.append(DeltaAsset(asset, base_version, base_size, base_hash, target.size, target.sha256, minimum))
+    return tuple(result)
+
+
+def select_delta(release: VerifiedRelease, current_version: str | None, installation_path: Path) -> VerifiedRelease:
+    """Select by exact version, size AND SHA-256, not version text alone."""
+    selected = None
+    if release.operation == "update" and current_version:
+        path = Path(installation_path)
+        for delta in release.deltas:
+            if delta.base_version != current_version or SemanticVersion.parse(APP_VERSION) < SemanticVersion.parse(delta.minimum_updater_version):
+                continue
+            try:
+                if path.is_file() and path.stat().st_size == delta.base_size and sha256_file(path) == delta.base_sha256:
+                    selected = delta
+            except OSError:
+                pass
+    return replace(release, selected_delta=selected)
+
+
 def verify_signed_manifest(
     manifest_bytes: bytes,
     signature_bytes: bytes,
@@ -356,6 +433,7 @@ def verify_signed_manifest(
     selected = matches[0]
     if selected.name != expected_asset_name(wanted_platform):
         raise UpdateError("wrong_asset", "The compatible update artifact has an unexpected name.")
+    parse_deltas(decoded, selected)
     return decoded, selected, version, minimum_updater
 
 
@@ -548,6 +626,7 @@ def _discover_release(
             manifest_bytes=manifest_bytes,
             signature_bytes=signature_bytes,
             operation=ROLLBACK_OPERATION if rollback_077 else "update",
+            deltas=parse_deltas(manifest, asset),
         )
         checked_at = utc_now_iso()
         if current < minimum_updater:
@@ -706,6 +785,91 @@ def update_transaction_journal(transaction: UpdateTransaction, **changes: object
     return journal
 
 
+def prune_completed_update_payloads(*, root: Optional[Path] = None, keep: int = 2,
+                                    protected: tuple[str, ...] = ()) -> dict[str, int]:
+    """Bound successful-update caches, keeping metadata and recovery states.
+
+    No recursive deletion, no glob removal, no directory removal, no user
+    settings/models. Failed, active, unrecognised and symlinked entries stay.
+    Keep the most recent explicit 0.7.7 rollback in addition to recent installs.
+    """
+    directory = Path(root or get_updates_dir()).resolve()
+    if not directory.is_dir():
+        return {"files": 0, "bytes": 0}
+    completed = []
+    for index, child in enumerate(directory.iterdir()):
+        if index >= 512:
+            break  # Bounded metadata inspection, not an unbounded housekeeping job.
+        if child.is_symlink() or not child.is_dir() or not _TRANSACTION_ID_PATTERN.fullmatch(child.name):
+            continue
+        if child.resolve().parent != directory:
+            continue
+        try:
+            journal_path = child / "transaction.json"
+            if journal_path.is_symlink() or journal_path.stat().st_size > 65536:
+                continue
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            if (journal.get("transaction_id") == child.name and journal.get("product") == PRODUCT_ID
+                    and journal.get("state") == "installed" and journal.get("health_confirmed") is True):
+                completed.append((str(journal.get("installed_at", journal.get("updated_at", ""))), child, journal))
+        except (OSError, ValueError, AttributeError):
+            continue
+    completed.sort(key=lambda item: item[0], reverse=True)
+    retained = {item[1].name for item in completed[:max(2, keep)]} | set(protected)
+    last_rollback = next((item[1].name for item in completed if item[2].get("operation") == ROLLBACK_OPERATION), None)
+    if last_rollback:
+        retained.add(last_rollback)
+    stats = {"files": 0, "bytes": 0}
+    names = ("artifact.partial", "verified-candidate", "previous-executable",
+             "ctrlspeak-updater-helper.exe", "ctrlspeak-updater-helper", "delta.partial", "delta.vcdiff")
+    for _, child, _ in completed:
+        if child.name in retained:
+            continue
+        for name in names:
+            path = child / name
+            try:
+                if path.is_file() and not path.is_symlink() and path.resolve().parent == child.resolve():
+                    size = path.stat().st_size
+                    path.unlink()
+                    stats["files"] += 1
+                    stats["bytes"] += size
+            except OSError:
+                continue  # A locked payload remains recoverable; never force-delete it.
+    return stats
+
+
+def latest_completed_transfer(*, root: Optional[Path] = None) -> dict[str, object] | None:
+    """Redacted, bounded receipt for proving a patch was used after restart."""
+    directory = Path(root or get_updates_dir()).resolve()
+    if not directory.is_dir():
+        return None
+    candidates = []
+    for index, child in enumerate(directory.iterdir()):
+        if index >= 512:
+            break
+        if child.is_symlink() or not child.is_dir() or not _TRANSACTION_ID_PATTERN.fullmatch(child.name):
+            continue
+        try:
+            path = child / "transaction.json"
+            if path.is_symlink() or path.stat().st_size > 65536:
+                continue
+            row = json.loads(path.read_text(encoding="utf-8"))
+            if row.get("state") != "installed" or row.get("health_confirmed") is not True or row.get("product") != PRODUCT_ID or row.get("transaction_id") != child.name:
+                continue
+            version = str(SemanticVersion.parse(row.get("version")))
+            full, downloaded = row.get("asset_size"), row.get("transfer_bytes", row.get("asset_size"))
+            mode = row.get("transfer_mode", "full")
+            if (mode not in {"full", "delta"} or not isinstance(full, int) or isinstance(full, bool)
+                    or not isinstance(downloaded, int) or isinstance(downloaded, bool)
+                    or not 1 <= downloaded <= full <= ARTIFACT_MAX_BYTES):
+                continue
+            candidates.append((str(row.get("installed_at", row.get("updated_at", ""))),
+                {"version": version, "transfer_mode": mode, "download_bytes": downloaded, "full_bytes": full}))
+        except (OSError, ValueError, AttributeError, UpdateError):
+            continue
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -751,7 +915,7 @@ def _download_response(
     return _request(session, asset.url, stream=True, headers=headers)
 
 
-def download_release(
+def _download_full_release(
     release: VerifiedRelease,
     transaction: UpdateTransaction,
     *,
@@ -778,7 +942,17 @@ def download_release(
     client.headers.setdefault("User-Agent", f"CtrlSpeak/{release.version} updater")
     partial = transaction.partial_path
     candidate = transaction.candidate_path
-    candidate.unlink(missing_ok=True)
+    if candidate.is_file():
+        try:
+            verify_file(candidate, release.asset)
+            update_transaction_journal(transaction, state="ready_to_install", downloaded=release.asset.size)
+            if progress:
+                progress(release.asset.size, release.asset.size)
+            if session is None:
+                client.close()
+            return candidate
+        except UpdateError:
+            candidate.unlink(missing_ok=True)
     partial_size = partial.stat().st_size if partial.exists() else 0
     if partial_size > release.asset.size:
         partial.unlink(missing_ok=True)
@@ -912,6 +1086,101 @@ def download_release(
             client.close()
 
 
+def download_release(
+    release: VerifiedRelease, transaction: UpdateTransaction, *,
+    cancel_event: Optional[threading.Event] = None,
+    progress: Optional[Callable[[int, int], None]] = None,
+    session: Optional[requests.Session] = None,
+    phase: Optional[Callable[[str, str], None]] = None,
+) -> Path:
+    """Reconstruct an exact signed candidate, or download that full candidate.
+
+    Installation still uses the existing external helper/health/rollback flow.
+    Patches are never applied to the running executable or user configuration.
+    """
+    if cancel_event is not None and cancel_event.is_set():
+        raise UpdateCancelled()
+    journal = read_transaction_journal(transaction)
+    expected = {"version": str(release.version), "tag": release.tag,
+                "manifest_sha256": release.manifest_sha256,
+                "asset_name": release.asset.name, "asset_size": release.asset.size,
+                "asset_sha256": release.asset.sha256, "asset_url": release.asset.url,
+                "product": PRODUCT_ID, "operation": release.operation}
+    if any(journal.get(k) != v for k, v in expected.items()):
+        raise UpdateError("stale_partial", "The staged update does not match the selected signed release.")
+    selected = None
+    base = Path(str(journal.get("installation_path", "")))
+    if release.deltas and release.operation == "update":
+        # Revalidate the signed bytes at use time, not a mutable dataclass or
+        # transaction's proposed patch/hash. A full candidate remains mandatory.
+        signed, asset, version, _ = verify_signed_manifest(
+            release.manifest_bytes, release.signature_bytes,
+            platform_name=release.asset.platform, architecture=release.asset.architecture)
+        if asset != release.asset or version != release.version:
+            raise UpdateError("release_mismatch", "The patch target differs from the signed release.")
+        selected = select_delta(replace(release, deltas=parse_deltas(signed, asset)),
+                                journal.get("source_version"), base).selected_delta
+    # Smaller network transfer does not remove candidate/sibling/rollback or
+    # one-file extraction space. Reserve conservatively on both relevant drives.
+    base_size = base.stat().st_size if base.is_file() else release.asset.size
+    required = (2 * (base_size + release.asset.size) + 4 * max(base_size, release.asset.size)
+                + (selected.asset.size if selected else 0) + 128 * 1024 * 1024)
+    locations = {transaction.directory.resolve(), base.parent.resolve()}
+    if any(shutil.disk_usage(location).free < required for location in locations):
+        raise UpdateError("insufficient_space",
+            f"Free at least {required / (1024*1024):.0f} MB on the application-data and installation drives before updating. Small patches still need space for reconstruction, startup and rollback.")
+    if selected is not None:
+        delta = selected
+        patch_transaction = replace(transaction,
+            journal_path=transaction.directory / "delta-journal.json",
+            partial_path=transaction.directory / "delta.partial",
+            candidate_path=transaction.directory / "delta.vcdiff")
+        if not patch_transaction.journal_path.exists():
+            _atomic_write_json(patch_transaction.journal_path, {
+                **journal, "asset_name": delta.asset.name, "asset_url": delta.asset.url,
+                "asset_size": delta.asset.size, "asset_sha256": delta.asset.sha256})
+        try:
+            if phase:
+                phase("downloading", f"Downloading differential patch from {delta.base_version}…")
+            update_transaction_journal(transaction, state="downloading", transfer_mode="delta",
+                                       delta_name=delta.asset.name, transfer_bytes=delta.asset.size)
+            patch_path = _download_full_release(replace(release, asset=delta.asset), patch_transaction,
+                cancel_event=cancel_event, progress=progress, session=session)
+            if cancel_event is not None and cancel_event.is_set():
+                raise UpdateCancelled()
+            if base.stat().st_size != delta.base_size or sha256_file(base) != delta.base_sha256:
+                raise PatchError("Patch base changed")
+            update_transaction_journal(transaction, state="applying_patch")
+            if phase:
+                phase("applying_patch", "Reconstructing the new executable locally; the running app is untouched…")
+            apply_patch_file(base, patch_path, transaction.candidate_path, release.asset.size, cancel=cancel_event)
+            verify_file(transaction.candidate_path, release.asset)
+            update_transaction_journal(transaction, state="ready_to_install", downloaded=delta.asset.size,
+                transfer_mode="delta", transfer_bytes=delta.asset.size, reconstructed_size=release.asset.size)
+            return transaction.candidate_path
+        except (UpdateCancelled, PatchCancelled) as exc:
+            raise UpdateCancelled() from exc
+        except (UpdateError, PatchError, OSError, RuntimeError) as exc:
+            if isinstance(exc, UpdateError) and exc.code in {"insufficient_space", "disk_error"}:
+                raise
+            if cancel_event is not None and cancel_event.is_set():
+                raise UpdateCancelled() from exc
+            transaction.candidate_path.unlink(missing_ok=True)
+            reason = exc.code if isinstance(exc, UpdateError) else "patch_failed"
+            update_transaction_journal(transaction, transfer_mode="full", delta_fallback_reason=reason)
+            logger.warning("Differential update fallback [%s]; using signed full artifact", reason)
+            if phase:
+                phase("falling_back", "Patch unavailable or failed verification; switching to the full signed download…")
+    elif release.selected_delta is not None and phase:
+        phase("falling_back", "Installed base no longer matches the patch; using the full signed download…")
+    if cancel_event is not None and cancel_event.is_set():
+        raise UpdateCancelled()
+    candidate = _download_full_release(release, transaction, cancel_event=cancel_event,
+                                       progress=progress, session=session)
+    update_transaction_journal(transaction, transfer_mode="full", transfer_bytes=release.asset.size)
+    return candidate
+
+
 class UpdateCoordinator:
     """Own one process-wide update operation and reject stale worker events."""
 
@@ -940,6 +1209,7 @@ class UpdateCoordinator:
         self._release: Optional[VerifiedRelease] = None
         self._transaction: Optional[UpdateTransaction] = None
         self._cancel_event: Optional[threading.Event] = None
+        self._download_worker: Optional[threading.Thread] = None
 
     @property
     def generation(self) -> int:
@@ -1031,6 +1301,8 @@ class UpdateCoordinator:
 
     def _check_async(self, *, rollback_077: bool) -> int:
         with self._lock:
+            if self._state in {"downloading", "applying_patch", "falling_back", "verifying"} or (self._download_worker is not None and self._download_worker.is_alive()):
+                raise UpdateError("update_busy", "Cancel the active download and wait for its patch worker to close before checking again.")
             generation = self._next_generation("checking")
             # A newly selected release must never reuse an earlier candidate or
             # leave it installable after a failed/superseded check.
@@ -1044,6 +1316,10 @@ class UpdateCoordinator:
             try:
                 discoverer = self._rollback_discoverer if rollback_077 else self._discoverer
                 result = discoverer(self.current_version)
+                if result.release is not None and result.status == "available":
+                    planned = select_delta(result.release, self.current_version, Path(sys.executable))
+                    result = replace(result, release=planned,
+                        message=result.message + f" {planned.transfer_description}: {planned.download_size / (1024*1024):.1f} MB.")
                 if result.release is not None and rollback_077:
                     _validate_version_operation(result.release, self.current_version)
                     if result.release.operation != ROLLBACK_OPERATION:
@@ -1082,24 +1358,29 @@ class UpdateCoordinator:
 
     def download_async(self, *, installation_path: Optional[Path] = None) -> int:
         with self._lock:
+            if self._state in {"downloading", "applying_patch", "falling_back", "verifying"} or (self._download_worker is not None and self._download_worker.is_alive()):
+                raise UpdateError("update_busy", "The previous update worker is still closing; retry shortly.")
             release = self._release
             existing_transaction = self._transaction
-        if release is None:
-            raise UpdateError("no_update", "No verified update is ready to download.")
-        _validate_version_operation(release, self.current_version)
-        generation = self._next_generation("downloading")
-        cancel_event = self._cancel_event
+            if release is None:
+                raise UpdateError("no_update", "No verified update is ready to download.")
+            _validate_version_operation(release, self.current_version)
+            release = select_delta(release, self.current_version, Path(installation_path or sys.executable))
+            generation = self._next_generation("downloading")
+            cancel_event = self._cancel_event
         self._publish(
             UpdateEvent(
                 generation,
                 "downloading",
                 f"Preparing CtrlSpeak {release.version}…",
-                total=release.asset.size,
+                total=release.download_size,
                 release=release,
             )
         )
 
         def worker() -> None:
+            transferred = [0, release.download_size]
+            transfer_message = [f"Downloading CtrlSpeak {release.version} ({release.transfer_description.lower()})…"]
             try:
                 transaction = existing_transaction
                 if transaction is None:
@@ -1112,8 +1393,8 @@ class UpdateCoordinator:
                     UpdateEvent(
                         generation,
                         "downloading",
-                        f"Downloading CtrlSpeak {release.version}…",
-                        total=release.asset.size,
+                        transfer_message[0],
+                        total=release.download_size,
                         release=release,
                         transaction=transaction,
                     )
@@ -1121,11 +1402,12 @@ class UpdateCoordinator:
                     return
 
                 def on_progress(downloaded: int, total: int) -> None:
+                    transferred[:] = [downloaded, total]
                     self._publish(
                         UpdateEvent(
                             generation,
                             "downloading",
-                            f"Downloading CtrlSpeak {release.version}…",
+                            transfer_message[0],
                             downloaded=downloaded,
                             total=total,
                             release=release,
@@ -1133,19 +1415,28 @@ class UpdateCoordinator:
                         )
                     )
 
+                def on_phase(state: str, message: str) -> None:
+                    if state == "falling_back":
+                        transfer_message[0] = f"Downloading CtrlSpeak {release.version} (full-download fallback)…"
+                        transferred[:] = [0, release.asset.size]
+                    self._publish(UpdateEvent(generation, state, message,
+                        downloaded=transferred[0], total=transferred[1], release=release, transaction=transaction))
+
+                extra = {"phase": on_phase} if self._downloader is download_release else {}
                 candidate = self._downloader(
                     release,
                     transaction,
                     cancel_event=cancel_event,
                     progress=on_progress,
+                    **extra,
                 )
                 self._publish(
                     UpdateEvent(
                         generation,
                         "verifying",
                         "Verifying the signed update…",
-                        downloaded=release.asset.size,
-                        total=release.asset.size,
+                        downloaded=transferred[0],
+                        total=transferred[1],
                         release=release,
                         transaction=transaction,
                     )
@@ -1156,8 +1447,8 @@ class UpdateCoordinator:
                         generation,
                         "ready_to_install",
                         f"CtrlSpeak {release.version} is verified and ready to install.",
-                        downloaded=release.asset.size,
-                        total=release.asset.size,
+                        downloaded=transferred[0],
+                        total=transferred[1],
                         release=release,
                         transaction=transaction,
                     )
@@ -1197,7 +1488,14 @@ class UpdateCoordinator:
                     )
                 )
 
-        threading.Thread(target=worker, name=f"CtrlSpeakUpdateDownload-{generation}", daemon=True).start()
+        with self._lock:
+            self._download_worker = threading.Thread(target=worker, name=f"CtrlSpeakUpdateDownload-{generation}", daemon=True)
+            try:
+                self._download_worker.start()
+            except Exception:
+                self._download_worker = None
+                self._state = "failed"
+                raise
         return generation
 
     def cancel(self) -> None:

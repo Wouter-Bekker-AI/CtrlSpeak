@@ -999,6 +999,7 @@ class MidnightSignalManagementMixin:
         ttk.Label(card, text=f"CtrlSpeak {sysmod.APP_VERSION} · stable channel", style="MS.CardMuted.TLabel").pack(anchor=tk.W, pady=(5, 22))
         ttk.Label(card, textvariable=self.update_status_var, style="MS.Metric.TLabel", wraplength=920, justify=tk.LEFT).pack(anchor=tk.W)
         ttk.Label(card, textvariable=self.update_last_checked_var, style="MS.CardMuted.TLabel").pack(anchor=tk.W, pady=(10, 0))
+        ttk.Label(card, textvariable=self.update_last_transfer_var, style="MS.CardMuted.TLabel", wraplength=920).pack(anchor=tk.W, pady=(8, 0))
         ttk.Progressbar(card, variable=self.update_progress_var, maximum=100, style="MS.Horizontal.TProgressbar").pack(fill=tk.X, pady=(24, 4))
         ttk.Label(card, textvariable=self.update_progress_text_var, style="MS.CardMuted.TLabel").pack(anchor=tk.W)
         buttons = ttk.Frame(card, style="MS.Card.TFrame")
@@ -1610,9 +1611,9 @@ class MidnightSignalManagementMixin:
         super()._apply_update_event(event)
         if not hasattr(self, "ms_check_update_btn"):
             return
-        busy = event.state in {"checking", "downloading", "verifying", "launching_updater"}
+        busy = event.state in {"checking", "downloading", "applying_patch", "falling_back", "verifying", "launching_updater"}
         self._set_button_enabled(self.ms_check_update_btn, not busy)
-        self._set_button_enabled(self.ms_cancel_update_btn, event.state == "downloading")
+        self._set_button_enabled(self.ms_cancel_update_btn, event.state in {"downloading", "applying_patch", "falling_back"})
         if hasattr(self, "ms_rollback_btn"):
             self._set_button_enabled(self.ms_rollback_btn, not busy and self._update_runtime == "packaged_user_writable"
                                      and SemanticVersion.parse(sysmod.APP_VERSION) > SemanticVersion.parse("0.7.7"))
@@ -1621,8 +1622,8 @@ class MidnightSignalManagementMixin:
         if event.state == "ready_to_install" and install_eligible:
             self.ms_install_update_btn.configure(text="Restart on 0.7.7" if rollback else "Restart and install")
             self._set_button_enabled(self.ms_install_update_btn, True)
-        elif event.state == "available" and install_eligible:
-            self.ms_install_update_btn.configure(text="Download 0.7.7" if rollback else "Download and install")
+        elif event.state in {"available", "failed"} and install_eligible:
+            self.ms_install_update_btn.configure(text="Download 0.7.7" if rollback else "Retry download" if event.state == "failed" else "Download and install")
             self._set_button_enabled(self.ms_install_update_btn, True)
         else:
             self.ms_install_update_btn.configure(text="Download and install")

@@ -86,6 +86,9 @@ def _resolve_build_config(
 
 def build(*, watcher: bool = False) -> None:
     config = _resolve_build_config(watcher)
+    if not watcher:
+        from scripts.fetch_patch_tool import ensure_tool
+        ensure_tool()
 
     if not config.spec_path.exists():
         raise SystemExit(f"Missing PyInstaller spec at {config.spec_path}")

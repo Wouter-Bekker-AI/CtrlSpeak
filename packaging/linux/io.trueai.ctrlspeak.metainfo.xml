@@ -22,6 +22,9 @@
     <category>Accessibility</category>
   </categories>
   <releases>
+    <release version="0.8.2" date="2026-10-29">
+      <description><p>Adds signed differential executable updates with exact-base checks, local reconstruction and full-download fallback. Existing update rollback and installation health checks remain in place.</p></description>
+    </release>
     <release version="0.8.1" date="2026-10-29">
       <description><p>Fixes generic Control-key recognition for the Live shortcut and places the Live capsule at the top, leaving terminal input visible. Hold and hands-free retain their bottom placement.</p></description>
     </release>

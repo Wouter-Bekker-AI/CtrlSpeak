@@ -151,15 +151,15 @@ def test_rollback_intent_is_persisted_and_checked(tmp_path, signed):
     assert journal["source_version"] == "0.8.0"
     assert journal["explicit_rollback_target"] == "0.7.7"
     helper._validate_transaction_identity(journal)
-    helper._verify_rollback_manifest(transaction, journal)
+    helper._verify_transaction_manifest(transaction, journal)
     for mutation in ({"version": "0.7.6"}, {"explicit_rollback_target": None}, {"source_version": "0.7.7"}):
         with pytest.raises(updater.UpdateError, match="wrong_rollback_target"):
             helper._validate_transaction_identity(dict(journal, **mutation))
     with pytest.raises(updater.UpdateError, match="rollback_manifest_mismatch"):
-        helper._verify_rollback_manifest(transaction, dict(journal, asset_sha256="0" * 64))
+        helper._verify_transaction_manifest(transaction, dict(journal, asset_sha256="0" * 64))
     transaction.signature_path.write_bytes(base64.b64encode(b"x" * 64))
     with pytest.raises(updater.UpdateError, match="invalid_signature"):
-        helper._verify_rollback_manifest(transaction, journal)
+        helper._verify_transaction_manifest(transaction, journal)
 
 
 def test_normal_transaction_cannot_be_disguised_downgrade(tmp_path, signed):

@@ -66,6 +66,11 @@ asset_datas = [
     (str(PROJECT_ROOT / 'assets' / 'fun_facts.txt'), 'assets'),
     (str(PROJECT_ROOT / 'assets' / 'TrueAI_Intro_Video.mp4'), 'assets'),
 ]
+patch_tool_root = PROJECT_ROOT / '.codex-tools' / 'xdelta3' / ('windows' if IS_WINDOWS else 'linux')
+patch_tool = patch_tool_root / ('xdelta3.exe' if IS_WINDOWS else 'xdelta3')
+asset_datas.append((str(patch_tool_root / 'LICENSE'), 'tools/xdelta3'))
+asset_datas.append((str(PROJECT_ROOT / 'packaging' / 'THIRD_PARTY_NOTICES.md'), 'tools/xdelta3'))
+asset_datas.append((str(patch_tool), 'tools/xdelta3'))
 datas = _dedupe(third_party_datas + asset_datas)
 
 third_party_binaries = []
@@ -102,6 +107,8 @@ common_hiddenimports = [
     'utils.ui_theme',
     'utils.update_manager',
     'utils.update_helper',
+    'utils.binary_delta',
+    'utils.delta_tools',
 ]
 if IS_WINDOWS:
     platform_hiddenimports = [

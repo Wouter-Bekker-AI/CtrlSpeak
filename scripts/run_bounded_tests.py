@@ -15,9 +15,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--cwd", default=".")
+    parser.add_argument("--temp-root", help="Optional test-only scratch directory on a drive with space")
     args, pytest_args = parser.parse_known_args()
     root = Path(args.cwd).resolve()
-    base = root / ".pytest-isolated" / uuid.uuid4().hex
+    base = (Path(args.temp_root).resolve() if args.temp_root else root / ".pytest-isolated") / uuid.uuid4().hex
     base.parent.mkdir(parents=True, exist_ok=True)
     options = {"start_new_session": True} if os.name != "nt" else {
         "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}

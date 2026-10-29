@@ -35,6 +35,8 @@ from utils.update_manager import (
     utc_now_iso,
     verify_file,
     verify_signed_manifest,
+    expected_asset_name,
+    prune_completed_update_payloads,
 )
 
 
@@ -76,6 +78,8 @@ def _asset_from_journal(journal: Mapping[str, object]) -> UpdateAsset:
         raise UpdateError("invalid_transaction", "The update journal has invalid artifact metadata.") from exc
     if asset.variant != UPDATE_VARIANT:
         raise UpdateError("wrong_product", "The update transaction belongs to a different variant.")
+    if asset.name != expected_asset_name(asset.platform):
+        raise UpdateError("wrong_asset", "A patch file cannot be installed as the application executable.")
     return asset
 
 
@@ -100,14 +104,12 @@ def _validate_transaction_identity(journal: Mapping[str, object]) -> None:
             raise UpdateError("downgrade_not_allowed", "An ordinary update cannot downgrade CtrlSpeak.")
 
 
-def _verify_rollback_manifest(transaction: UpdateTransaction, journal: Mapping[str, object]) -> None:
-    """Revalidate the pinned rollback at both handoff and replacement boundaries.
+def _verify_transaction_manifest(transaction: UpdateTransaction, journal: Mapping[str, object]) -> None:
+    """Revalidate signed target binding at handoff and replacement boundaries.
 
     Schema 1 and health fields remain compatible with the unchanged 0.7.7
-    executable. Only the running 0.8 helper interprets the additional intent.
+    executable. The running 0.8 helper also covers ordinary full and delta updates.
     """
-    if journal.get("operation") != ROLLBACK_OPERATION:
-        return
     try:
         manifest_bytes = transaction.manifest_path.read_bytes()
         signature_bytes = transaction.signature_path.read_bytes()
@@ -118,11 +120,13 @@ def _verify_rollback_manifest(transaction: UpdateTransaction, journal: Mapping[s
         platform_name=str(journal.get("platform", "")),
         architecture=str(journal.get("architecture", "")),
     )
-    if (str(version) != ROLLBACK_VERSION or manifest.get("tag") != f"v{ROLLBACK_VERSION}"
+    expected_version = ROLLBACK_VERSION if journal.get("operation") == ROLLBACK_OPERATION else journal.get("version")
+    if (str(version) != expected_version or manifest.get("tag") != f"v{expected_version}"
             or asset != _asset_from_journal(journal)
             or sha256_file(transaction.manifest_path) != journal.get("manifest_sha256")
-            or SemanticVersion.parse(journal.get("source_version")) < minimum):
-        raise UpdateError("rollback_manifest_mismatch", "The rollback journal does not match the signed 0.7.7 release.")
+            or journal.get("source_version") is not None and SemanticVersion.parse(journal.get("source_version")) < minimum):
+        raise UpdateError("rollback_manifest_mismatch" if journal.get("operation") == ROLLBACK_OPERATION else "manifest_mismatch",
+                          "The update journal does not match its signed executable target.")
 
 
 def resolve_transaction_argument(value: str) -> UpdateTransaction:
@@ -215,7 +219,7 @@ def prepare_update_handoff(
 
     journal = read_transaction_journal(transaction)
     _validate_transaction_identity(journal)
-    _verify_rollback_manifest(transaction, journal)
+    _verify_transaction_manifest(transaction, journal)
     asset = _asset_from_journal(journal)
     if journal.get("state") != "ready_to_install":
         raise UpdateError("invalid_transaction_state", "The update has not reached verified install state.")
@@ -403,7 +407,7 @@ def apply_update_transaction(
     transaction = resolve_transaction_argument(argument)
     journal = read_transaction_journal(transaction)
     _validate_transaction_identity(journal)
-    _verify_rollback_manifest(transaction, journal)
+    _verify_transaction_manifest(transaction, journal)
     if journal.get("state") not in {"launching_updater", "awaiting_original_exit"}:
         raise UpdateError("invalid_transaction_state", "The update helper was started in an invalid state.")
     asset = _asset_from_journal(journal)
@@ -493,6 +497,12 @@ def apply_update_transaction(
             health_confirmed=True,
         )
         _append_update_log(transaction, "New version health confirmation succeeded")
+        try:
+            pruned = prune_completed_update_payloads(root=transaction.directory.parent,
+                                                    protected=(transaction.transaction_id,))
+            _append_update_log(transaction, f"Pruned {pruned['files']} older completed-update payloads ({pruned['bytes']} bytes); audit metadata and recent rollback copies retained. Official versions remain downloadable from signed releases.")
+        except Exception:
+            logger.warning("Completed-update cache cleanup deferred; installation remains healthy")
         return 0
     except UpdateError:
         raise

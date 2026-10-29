@@ -4,6 +4,26 @@ CtrlSpeak follows semantic versioning. Published binaries are immutable; a
 consumed release is corrected by a newer patch rather than by moving its tag or
 replacing its assets.
 
+## 0.8.2 — 2026-10-29
+
+- Add signed VCDIFF executable patches, exact base-version/size/SHA-256
+  selection, bounded local reconstruction, full target verification and a
+  one-time full-download fallback. The running executable is never patched.
+- Show selected download method/size, separate reconstruction progress and
+  persisted redacted transfer receipts. Retain cancellation, resumable
+  downloads, startup-health rollback and explicit signed 0.7.7 rollback.
+- Publish and roundtrip-test direct patches from up to three recent
+  patch-aware releases. Preserve schema-1 full assets for older updaters.
+- Bundle hash-pinned Xdelta 3.2.2 and its Apache-2.0 license; never fetch a
+  decoder during an installed-app update. Bound subprocess time/output and
+  prevent overlapping updater workers.
+- Check temporary free space and bound completed-update payload caches while
+  retaining audit metadata, recent rollback payloads and all recovery states.
+- Bootstrap requires a full 0.8.2 install. The proposed animated mode guide
+  belongs to 0.8.3 and is not implemented in this release.
+
+See [verification and deployment status](docs/V0.8.2_RELEASE.md).
+
 ## 0.8.1 — 2026-10-29
 
 - Normalize generic pynput `Key.ctrl` events to Left Ctrl, fixing that event
