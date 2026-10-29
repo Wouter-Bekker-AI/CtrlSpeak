@@ -29,9 +29,12 @@ def dictation_health_self_test() -> dict[str, object]:
     # Deliberately import the wiring module too. Missing PyInstaller inclusion
     # must fail the build rather than first appearing when a user presses Ctrl.
     from utils.dictation_integration import DesktopDictationController, KEY_LABELS
+    from utils.hotkeys import key_name
 
     _require(callable(DesktopDictationController), "controller import")
     _require(KEY_LABELS.get("ctrl_r") == "Right Ctrl", "key labels")
+    _require(key_name("Key.ctrl") == "ctrl_l" and key_name("Key.ctrl_r") == "ctrl_r",
+             "generic Control normalization")
 
     gestures = DictationGestures()
     _require(gestures.press("ctrl_r", now=0) == (), "provisional hold")
@@ -45,10 +48,10 @@ def dictation_health_self_test() -> dict[str, object]:
     _require(gestures.release("ctrl_r", now=1.15)
              == (GestureAction.START_HANDS_FREE,), "hands-free activation")
     gestures.reset()
-    gestures.press("ctrl_l", now=2)
+    gestures.press("Key.ctrl", now=2)
     gestures.press("ctrl_r", now=2.01)
     _require(gestures.release("ctrl_r", now=2.05) == (), "chord release barrier")
-    _require(gestures.release("ctrl_l", now=2.06)
+    _require(gestures.release("Key.ctrl", now=2.06)
              == (GestureAction.START_LIVE,), "live activation")
     gestures.press("ctrl_l", mode=DictationMode.LIVE, now=3)
     _require(gestures.release("ctrl_l", mode=DictationMode.LIVE, now=3.05)

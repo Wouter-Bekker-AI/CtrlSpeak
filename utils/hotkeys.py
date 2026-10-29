@@ -128,7 +128,12 @@ def key_name(key: Any) -> str:
     if isinstance(char, str):
         return char.lower()
     value = str(key).strip().lower()
-    return value[4:] if value.startswith("key.") else value
+    name = value[4:] if value.startswith("key.") else value
+    # pynput can report the non-side-specific Key.ctrl (VK_CONTROL), rather
+    # than Key.ctrl_l. Right Ctrl has its own explicit/extended representation.
+    # Treat the generic left/default Control as the configured left key, not
+    # as a third modifier that invalidates the two-Control Live chord.
+    return "ctrl_l" if name == "ctrl" else name
 
 
 def is_right_control(key: Any) -> bool:

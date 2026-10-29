@@ -1,4 +1,4 @@
-# CtrlSpeak v0.8.0
+# CtrlSpeak v0.8.1
 
 CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into
@@ -24,6 +24,13 @@ embedded/local backend. Remote API mode is independent of those roles and does
 not start discovery, a local server, or a model download.
 
 ## v0.8.0 dictation modes
+
+**0.8.1 fixes:** the Live shortcut accepts generic `Ctrl` events as Left Ctrl,
+as well as explicit Left/Right Ctrl events. Press both controls, then release
+both to start (Live must still be enabled in Capture). Live's status capsule is
+now **top-centred on the active monitor**, including mute/finishing, so terminal
+input at the bottom remains visible. Hold and Hands-free stay at the bottom.
+See the [0.8.1 release guide](docs/V0.8.1_RELEASE.md).
 
 Choose how to dictate without changing your gateway, provider preference,
 OpenAI key or optional GPU S1 cleanup:

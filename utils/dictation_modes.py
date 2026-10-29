@@ -48,7 +48,8 @@ SUPPORTED_GESTURE_KEYS = ("ctrl_r", "ctrl_l", "f8", "f9", "f10")
 def _key_name(key: object) -> str:
     char = getattr(key, "char", None)
     value = char if isinstance(char, str) else str(key)
-    return value.strip().lower().removeprefix("key.")
+    name = value.strip().lower().removeprefix("key.")
+    return "ctrl_l" if name == "ctrl" else name
 
 
 class DictationGestures:

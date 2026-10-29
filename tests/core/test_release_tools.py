@@ -17,7 +17,7 @@ pytestmark = pytest.mark.core_headless
 
 
 def test_release_version_gate_matches_current_release():
-    assert APP_VERSION == "0.8.0"
+    assert APP_VERSION == "0.8.1"
     assert release.read_app_version() == APP_VERSION
     assert release.read_server_versions() == (APP_VERSION, APP_VERSION)
     assert release.check_version(f"v{APP_VERSION}") == APP_VERSION

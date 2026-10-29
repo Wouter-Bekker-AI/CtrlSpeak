@@ -4,6 +4,22 @@ CtrlSpeak follows semantic versioning. Published binaries are immutable; a
 consumed release is corrected by a newer patch rather than by moving its tag or
 replacing its assets.
 
+## 0.8.1 — 2026-10-29
+
+- Normalize generic pynput `Key.ctrl` events to Left Ctrl, fixing that event
+  path for the two-Control Live shortcut and isolated Left Ctrl mute/resume.
+  Retain explicit Right Ctrl identity and editing-chord protections.
+- Place active Live's capsule at the top centre of the active monitor's work
+  area, leaving bottom-aligned terminal/CLI input visible. Keep its position
+  through mute, editing, processing and completion; restore the established
+  bottom position for the next Hold/Hands-free capture, including reused windows.
+- Add controller/monitor, actual Windows pynput-enum and high-DPI/secondary-
+  monitor placement regressions. Preserve signed rollback to 0.7.7 and all
+  existing provider/API/cleanup behavior.
+
+Build, publication and deployment evidence is recorded in the
+[0.8.1 release guide](docs/V0.8.1_RELEASE.md).
+
 ## 0.8.0 — 2026-10-29
 
 - Keep Hold to Talk and add Hands-free Dictation (double-tap primary key) and

@@ -206,7 +206,7 @@ def processing_capsule_layout(width: float, height: float) -> ProcessingCapsuleL
     )
 
 
-def overlay_geometry(bounds: "MonitorBounds", scale: float) -> OverlayGeometry:
+def overlay_geometry(bounds: "MonitorBounds", scale: float, *, live: bool = False) -> OverlayGeometry:
     """Fit the capsule wholly inside the active monitor's physical work area.
 
     The returned dimensions are physical pixels.  Compactness is determined
@@ -225,16 +225,19 @@ def overlay_geometry(bounds: "MonitorBounds", scale: float) -> OverlayGeometry:
     available_width = max(1, bounds.width - (2 * horizontal_margin))
     width = min(desired_width, available_width)
 
-    # The preferred bottom lift mirrors the original tray-adjacent position,
-    # but is reduced as necessary rather than pushing the capsule above rcWork.
-    preferred_bottom_gap = max(
+    # Live must leave bottom-aligned terminal/CLI input visible. Other modes
+    # retain their established tray-adjacent placement. Respect rcWork for
+    # taskbars, negative-coordinate monitors and constrained/high-DPI displays.
+    preferred_edge_gap = max(
         int(round(34 * scale)), int(round(bounds.height * 0.045))
     )
     height = min(desired_height, bounds.height)
-    bottom_gap = min(preferred_bottom_gap, max(0, bounds.height - height))
+    edge_gap = min(preferred_edge_gap, max(0, bounds.height - height))
+    if live and bounds.height - height < 2 * edge_gap:
+        edge_gap = 0  # In a very short work area, favour the actual top edge.
 
     x = bounds.left + max(0, (bounds.width - width) // 2)
-    y = bounds.bottom - height - bottom_gap
+    y = bounds.top + edge_gap if live else bounds.bottom - height - edge_gap
     x = min(max(bounds.left, x), max(bounds.left, bounds.right - width))
     y = min(max(bounds.top, y), max(bounds.top, bounds.bottom - height))
     compact = width < int(round(470 * scale)) or height < int(round(76 * scale))
@@ -600,6 +603,7 @@ class MidnightSignalOverlay:
         self._close_job: str | None = None
         self._started = time.monotonic()
         self._closing = False
+        self._live_position = False
 
     def is_open(self) -> bool:
         try:
@@ -609,6 +613,7 @@ class MidnightSignalOverlay:
 
     def show(self) -> None:
         if self.is_open():
+            self._update_session_position()
             return
         window = tk.Toplevel(self.root, class_="CtrlSpeakOverlay")
         window.title("CtrlSpeak overlay")
@@ -625,7 +630,8 @@ class MidnightSignalOverlay:
         except tk.TclError:
             pass
         bounds = _active_monitor_bounds(self.root)
-        geometry = overlay_geometry(bounds, self.scale)
+        self._live_position = self._live_position_requested()
+        geometry = overlay_geometry(bounds, self.scale, live=self._live_position)
         # When physical height is unusually constrained, lower the canvas
         # render scale enough to retain a usable 72-logical-pixel composition.
         # Normal and narrow/high-DPI monitors continue to use the real DPI.
@@ -673,6 +679,28 @@ class MidnightSignalOverlay:
         self._closing = False
         self._started = time.monotonic()
         self.waveform_provider = provider
+        self._update_session_position()
+
+    def _live_position_requested(self) -> bool:
+        provider = getattr(self, "dictation_status_provider", None)
+        status = provider() if provider else {}
+        return isinstance(status, Mapping) and status.get("active") is True and status.get("mode") == "live"
+
+    def _update_session_position(self) -> None:
+        """Re-anchor a reused capsule for a new mode, without taking focus.
+
+        Called on show/new capture, not on every animation tick: a completed
+        Live result stays at the top until it closes, and mute/editing do not
+        make the capsule jump. The next Hold/Hands-free capture restores bottom.
+        """
+        live = self._live_position_requested()
+        if self.window is None or live == getattr(self, "_live_position", False):
+            return
+        geometry = overlay_geometry(_active_monitor_bounds(self.root), self.scale, live=live)
+        self._render_scale = max(0.25, min(self.scale, geometry.width / 160.0, geometry.height / 72.0))
+        self.window.geometry(overlay_geometry_spec(geometry))
+        _place_windows_overlay_absolute(self.window, geometry.x, geometry.y)
+        self._live_position = live
 
     def cancel_pending_close(self) -> None:
         window, close_job = self.window, self._close_job

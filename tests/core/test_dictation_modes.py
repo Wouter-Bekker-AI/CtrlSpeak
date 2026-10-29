@@ -106,6 +106,25 @@ def test_live_chord_aborts_hold_without_submitting_it(keys):
     assert g.release("ctrl_r") == (Action.START_LIVE,)
 
 
+def test_generic_pynput_control_is_the_left_side_of_live_chord(keys):
+    g, clock = keys
+    assert g.press("Key.ctrl") == ()
+    assert g.keys_down == frozenset({"ctrl_l"})
+    assert g.press("Key.ctrl_r") == ()
+    assert g.release("Key.ctrl_r") == ()
+    assert g.release("Key.ctrl") == (Action.START_LIVE,)
+
+
+def test_generic_control_editing_chord_still_cannot_start_live(keys):
+    g, clock = keys
+    g.press("Key.ctrl")
+    g.press("c")
+    g.release("c")
+    g.press("Key.ctrl_r")
+    assert g.release("Key.ctrl_r") == ()
+    assert g.release("Key.ctrl") == ()
+
+
 @pytest.mark.parametrize("mode", [Mode.HANDS_FREE, Mode.LIVE])
 def test_isolated_secondary_tap_toggles_mute_only_while_active(keys, mode):
     g, clock = keys

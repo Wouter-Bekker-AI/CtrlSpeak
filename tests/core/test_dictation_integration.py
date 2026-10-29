@@ -228,6 +228,45 @@ def test_live_chord_waits_for_both_releases_and_does_not_toggle_mute(build_contr
     assert controller.session.epoch == 0
 
 
+@pytest.mark.parametrize("left", ["Key.ctrl", "Key.ctrl_l"])
+@pytest.mark.parametrize("right_first", [False, True])
+@pytest.mark.parametrize("right_release_first", [False, True])
+@pytest.mark.parametrize("committed_hold", [False, True])
+def test_live_shortcut_activates_through_real_controller_and_monitor(
+    build_controller, left, right_first, right_release_first, committed_hold,
+):
+    controller, host, clock = build_controller()
+    first, second = ("Key.ctrl_r", left) if right_first else (left, "Key.ctrl_r")
+    controller.press(first)
+    if committed_hold:
+        commit_hold(controller, clock)
+    controller.press(second)
+    assert controller.pending_start is None
+    releases = ("Key.ctrl_r", left) if right_release_first else (left, "Key.ctrl_r")
+    controller.release(releases[0])
+    assert controller.pending_start is None
+    controller.release(releases[1])
+    assert controller.pending_start[0] == "live"
+    assert not controller.gestures.keys_down
+    assert not host.releases  # Never submit provisional/aborted Hold audio.
+    host.cleanup_pending = False
+
+    class OneStep:
+        calls = 0
+
+        def wait(self, _timeout):
+            self.calls += 1
+            return self.calls > 1
+
+    controller.stop = OneStep()
+    controller._monitor()
+    assert controller.pending_start is None
+    assert controller.session.mode == "live"
+    assert controller.session.start_called
+    assert not controller.session.muted
+    assert not controller.session.finishing
+
+
 @pytest.mark.parametrize("modifier", ["ctrl_r", "ctrl_l"])
 def test_active_control_c_is_editing_not_finish_or_mute(build_controller, modifier):
     controller, _host, clock = build_controller()
