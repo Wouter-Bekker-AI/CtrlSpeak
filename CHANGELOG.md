@@ -4,7 +4,7 @@ CtrlSpeak follows semantic versioning. Published binaries are immutable; a
 consumed release is corrected by a newer patch rather than by moving its tag or
 replacing its assets.
 
-## 0.8.0 — release candidate
+## 0.8.0 — 2026-10-29
 
 - Keep Hold to Talk and add Hands-free Dictation (double-tap primary key) and
   opt-in Windows Live Dictation (primary + secondary keys). Allow distinct
@@ -24,9 +24,9 @@ replacing its assets.
   credential-vault preservation. Keep coordinated gateway/worker/external-helper
   deployment; Windows installation remains a user action.
 
-Verification, packaged interactive acceptance and deployment status are recorded
-separately in [the 0.8.0 release guide](docs/V0.8.0_RELEASE.md); this entry does not
-assert that a candidate is already published or deployed.
+Published after signed Windows/Linux package checks and coordinated backend
+verification. Automated evidence and remaining interactive acceptance checks
+are recorded in [the 0.8.0 release guide](docs/V0.8.0_RELEASE.md).
 
 ## 0.7.7 — 2026-10-22
 
