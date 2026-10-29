@@ -69,8 +69,10 @@ def main(argv: list[str]) -> int:
         try:
             from server.whisper_transcription.app.audio_transport import self_test
             from utils.cancellable_http import request_transport_self_test
+            from utils.dictation_health import dictation_health_self_test
             audio_transport = self_test()
             request_transport = request_transport_self_test()
+            dictation_modes = dictation_health_self_test()
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(
                 json.dumps(
@@ -81,6 +83,7 @@ def main(argv: list[str]) -> int:
                         "frozen": bool(getattr(sys, "frozen", False)),
                         "audio_transport": audio_transport,
                         "request_transport": request_transport,
+                        "dictation_modes": dictation_modes,
                     },
                     sort_keys=True,
                 )
@@ -88,8 +91,8 @@ def main(argv: list[str]) -> int:
                 encoding="utf-8",
             )
             return 0
-        except OSError:
-            logger.exception("Packaged health-check result could not be written to %s", target)
+        except Exception:
+            logger.exception("Packaged health self-test or result write failed for %s", target)
             return 6
 
     if args.apply_update:

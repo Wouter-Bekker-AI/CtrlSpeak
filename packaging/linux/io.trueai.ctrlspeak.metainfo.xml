@@ -22,6 +22,9 @@
     <category>Accessibility</category>
   </categories>
   <releases>
+    <release version="0.8.0" date="2026-10-29">
+      <description><p>Adds hands-free dictation, isolated-key mute controls and signed rollback to 0.7.7. Windows also gains opt-in committed-phrase live dictation with editing guards.</p></description>
+    </release>
     <release version="0.7.7" date="2026-10-22">
       <description>
         <p>Faster safe text insertion, cancellable uploads, manual failed-recording recovery, stage timings and busy-aware GPU fallback.</p>

@@ -170,6 +170,8 @@ _client_state_lock = threading.RLock()
 # Shutdown releases the client/listener locks before it waits for lifecycle
 # workers, so lifecycle code never needs to acquire the client-state lock.
 client_enabled = True
+_dictation_controller = None
+_hold_gesture_tentative = False
 
 instance_lock_handle: Optional[object] = None
 processing_sound_thread: Optional[threading.Thread] = None
@@ -371,8 +373,11 @@ def inject_transcription_result(result) -> None:
     with settings_lock:
         preserve = (settings.get("gpu_cleanup_enabled") is True
                     and settings.get("gpu_cleanup_preserve_formatting") is True
-                    and (result.metadata or {}).get("client_cleanup_applied") is True)
+                    and (result.metadata or {}).get("client_cleanup_applied") is True
+                    and (result.metadata or {}).get("live_chunk") is not True)
     text = prepare_dictation_text(result.text, preserve_formatting=preserve)
+    if text and (result.metadata or {}).get("live_chunk") is True:
+        text += " "  # Exact trusted separator added after adapter sanitization.
     metadata = dict(result.metadata or {})
     timings = dict(metadata.get("client_timings") or {})
     metadata["client_timings"] = timings
@@ -390,6 +395,8 @@ def inject_transcription_result(result) -> None:
     try:
         control = current_request_control()
         options = {"preserve_formatting": True} if preserve else {}
+        if metadata.get("live_chunk") is True:
+            options["append_space"] = True
         if control:
             options["cancel_check"] = control.cancel.is_set
         insert_text_into_focus(text, **options)
@@ -399,7 +406,10 @@ def inject_transcription_result(result) -> None:
         raise
     timings["insertion_ms"] = round((time.monotonic() - insertion_started) * 1000, 2)
     audit("adapter_returned")
-    track_feedback_injection(replace(original_result, text=text))
+    if metadata.get("live_chunk") is not True:
+        # A live phrase is not the whole editable field. Do not attribute a
+        # later full-field Enter correction to just the last fragment.
+        track_feedback_injection(replace(original_result, text=text))
 
 
 def _pynput_key_name(key) -> str:
@@ -1327,6 +1337,8 @@ def _safe_error_category(exc: BaseException) -> str:
 
 
 def is_transcription_busy(_item=None) -> bool:
+    if _dictation_controller is not None and _dictation_controller.busy():
+        return True
     with _transcription_state_lock:
         # A referenced worker is pending even in the tiny interval between
         # Thread construction and ``start()``.  References are cleared only by
@@ -1428,8 +1440,9 @@ def _finish_cancelled_session() -> None:
         return
     transcription_ui_session.cancel()
     _clear_waveform_buffers()
-    play_ui_cue(CueKind.CANCELLED)
-    _set_terminal_overlay_hide(1200)
+    if not _hold_gesture_tentative:
+        play_ui_cue(CueKind.CANCELLED)
+        _set_terminal_overlay_hide(1200)
     _refresh_tray_menu()
     schedule_management_refresh()
 
@@ -1438,6 +1451,8 @@ def cancel_active_transcription(_icon=None, _item=None) -> bool:
     """Stop capture/HTTP/insertion; retain busy ownership until it really exits."""
 
     global recording, transcription_thread
+    if _dictation_controller is not None and _dictation_controller.cancel():
+        return True
     _failed_recording.discard()
     reaper: Optional[threading.Thread] = None
     reaper_start_failed = False
@@ -1820,10 +1835,10 @@ def on_press(key):
                     if transcription_ui_session.phase is UiPhase.RECORDING:
                         transcription_ui_session.fail("microphone_failed")
                     _clear_waveform_buffers()
-            if start_error is None:
+            if start_error is None and not _hold_gesture_tentative:
                 _show_recording_overlay()
                 play_ui_cue(CueKind.RECORDING_STARTED)
-            else:
+            elif start_error is not None:
                 cleanup_recording_file(failed_path)
                 notify_error(
                     "Microphone recording failed to start",
@@ -1943,26 +1958,43 @@ def _refresh_best_server_async():
         pass
 
 def start_client_listener() -> None:
-    global listener, client_enabled
+    global listener, client_enabled, _dictation_controller
     with _client_state_lock:
         with listener_lock:
             if listener is not None:
                 return
+            if _dictation_controller is not None and not _dictation_controller.shutdown(timeout=0):
+                notify("Previous dictation is still closing. Wait before re-enabling the client.")
+                return
             client_enabled = True
+            candidate = None
             try:
+                from utils.dictation_integration import DesktopDictationController
+                _dictation_controller = DesktopDictationController(sys.modules[__name__])
                 candidate = create_global_listener(
-                    on_press=on_press,
-                    on_release=on_release,
+                    on_press=_dictation_controller.press,
+                    on_release=_dictation_controller.release,
                 )
                 candidate.start()
                 listener = candidate
+                _dictation_controller.start()
             except DesktopSessionError as exc:
                 client_enabled = False
+                if candidate is not None:
+                    candidate.stop()
+                listener = None
+                if _dictation_controller is not None:
+                    _dictation_controller.shutdown(timeout=0)
                 logger.warning("CtrlSpeak hotkey listener is unavailable: %s", exc)
                 notify(str(exc), title="CtrlSpeak desktop support")
                 return
             except Exception as exc:
                 client_enabled = False
+                if candidate is not None:
+                    candidate.stop()
+                listener = None
+                if _dictation_controller is not None:
+                    _dictation_controller.shutdown(timeout=0)
                 logger.exception("CtrlSpeak hotkey listener failed to start")
                 notify(
                     "The global hotkey listener could not start. On Ubuntu, use an Ubuntu on "
@@ -2002,6 +2034,7 @@ def cancel_and_wait_for_active_transcription(timeout_seconds: float = 2.5) -> bo
         path = recording_file_path
 
     deadline = time.monotonic() + timeout
+    continuous = _dictation_controller.session if _dictation_controller else None
     current = threading.current_thread()
     for worker in (recorder, transcriber):
         if worker is None or worker is current:
@@ -2011,6 +2044,8 @@ def cancel_and_wait_for_active_transcription(timeout_seconds: float = 2.5) -> bo
             worker.join(timeout=remaining)
         except RuntimeError:
             logger.debug("Shutdown encountered a worker that had not started")
+
+    continuous_stopped = continuous is None or continuous.done.wait(max(0.0, deadline - time.monotonic()))
 
     cleanup_path: Optional[Path] = None
     with _transcription_state_lock:
@@ -2036,7 +2071,7 @@ def cancel_and_wait_for_active_transcription(timeout_seconds: float = 2.5) -> bo
             "CtrlSpeak shutdown timed out waiting for active transcription workers"
         )
     _clear_waveform_buffers()
-    return stopped
+    return stopped and continuous_stopped
 
 
 def stop_client_listener() -> None:
@@ -2048,6 +2083,8 @@ def stop_client_listener() -> None:
             if listener is not None:
                 listener.stop(); listener = None
     had_active_work = is_transcription_busy()
+    if _dictation_controller is not None:
+        _dictation_controller.shutdown()
     cancel_and_wait_for_active_transcription()
     if had_active_work:
         try:
@@ -2056,6 +2093,77 @@ def stop_client_listener() -> None:
         except Exception:
             logger.exception("Failed to hide waveform overlay when stopping listener")
     schedule_management_refresh()
+
+
+def get_dictation_status() -> dict:
+    if _dictation_controller is not None:
+        return _dictation_controller.status()
+    return {"mode": "hold", "active": False, "muted": False, "editing": False,
+            "pending_count": 0, "queued_count": 0, "stage": "idle", "error": None,
+            "primary_label": "Right Ctrl", "secondary_label": "Left Ctrl"}
+
+
+def start_dictation_mode(mode: str) -> bool:
+    return bool(_dictation_controller and _dictation_controller.start_mode(mode))
+
+
+def toggle_dictation_mute() -> bool:
+    if _dictation_controller and _dictation_controller.busy():
+        muted = _dictation_controller.session.toggle_mute()
+        _clear_waveform_buffers()
+        return muted
+    return False
+
+
+def finish_dictation_mode() -> None:
+    if _dictation_controller and _dictation_controller.busy():
+        _dictation_controller.session.finish()
+
+
+def copy_pending_dictation() -> bool:
+    session = _dictation_controller.session if _dictation_controller else None
+    snapshot = session.pending_snapshot() if session else None
+    if snapshot and snapshot[1] and copy_to_clipboard("\n\n".join(snapshot[1])):
+        session.acknowledge_copied(snapshot)
+        return True
+    return False
+
+
+def discard_pending_dictation() -> None:
+    if _dictation_controller and _dictation_controller.session:
+        _dictation_controller.session.discard_pending()
+
+
+def configure_dictation_keys(primary: str, secondary: str) -> None:
+    from utils.dictation_integration import KEY_LABELS
+    from utils.dictation_modes import DictationGestures
+    if primary not in KEY_LABELS or secondary not in KEY_LABELS or primary == secondary:
+        raise ValueError("Choose two distinct keys: Left Ctrl, Right Ctrl, F8, F9 or F10.")
+    if is_transcription_busy():
+        raise ValueError("Finish the current dictation before changing shortcuts.")
+    with settings_lock:
+        previous = (settings.get("dictation_primary_key"), settings.get("dictation_secondary_key"))
+        settings["dictation_primary_key"] = primary
+        settings["dictation_secondary_key"] = secondary
+    if not save_settings():
+        with settings_lock:
+            settings["dictation_primary_key"], settings["dictation_secondary_key"] = previous
+        raise ValueError("Could not save dictation shortcuts; the previous keys remain active.")
+    if _dictation_controller:
+        with _dictation_controller.lock:
+            _dictation_controller.gestures = DictationGestures(primary_key=primary, secondary_key=secondary)
+
+
+def _start_mode_from_tray(mode: str) -> None:
+    def schedule():
+        from utils import gui
+        if gui.management_window is not None:
+            gui.management_window.close()
+        root = gui.ensure_management_ui_thread()
+        # The helper returns None; the module owns the actual Tk root.
+        root = root or gui.tk_root
+        root.after(3000, lambda: start_dictation_mode(mode))
+    enqueue_management_task(schedule)
 
 # ---------------- Server (HTTP) ----------------
 class TranscriptionRequestHandler(BaseHTTPRequestHandler):
@@ -2295,6 +2403,19 @@ def run_tray():
         pystray.MenuItem("Show / hide quick panel", open_tray_flyout, default=True),
         pystray.MenuItem("Open control centre", open_management_dialog),
         pystray.MenuItem("Submit correction…", submit_correction_from_tray),
+        pystray.MenuItem("Start hands-free (3 seconds)", lambda _i, _m: _start_mode_from_tray("hands_free"),
+                         enabled=lambda _m: not is_transcription_busy()),
+        pystray.MenuItem("Start live dictation (3 seconds)", lambda _i, _m: _start_mode_from_tray("live"),
+                         enabled=lambda _m: not is_transcription_busy()),
+        pystray.MenuItem(lambda _m: "Unmute dictation" if get_dictation_status().get("muted") else "Mute dictation",
+                         lambda _i, _m: toggle_dictation_mute(),
+                         enabled=lambda _m: get_dictation_status().get("active", False)),
+        pystray.MenuItem("Finish dictation", lambda _i, _m: finish_dictation_mode(),
+                         enabled=lambda _m: get_dictation_status().get("active", False)),
+        pystray.MenuItem("Copy pending text", lambda _i, _m: enqueue_management_task(copy_pending_dictation),
+                         enabled=lambda _m: bool(get_dictation_status().get("pending_count"))),
+        pystray.MenuItem("Discard pending text", lambda _i, _m: discard_pending_dictation(),
+                         enabled=lambda _m: bool(get_dictation_status().get("pending_count"))),
         pystray.MenuItem(
             "Copy last transcript",
             request_copy_last_transcript_from_tray,

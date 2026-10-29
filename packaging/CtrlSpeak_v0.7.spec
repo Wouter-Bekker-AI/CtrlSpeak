@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""Maintained cross-platform PyInstaller specification for CtrlSpeak v0.7."""
+"""Maintained cross-platform CtrlSpeak spec; its historical filename is stable."""
 import os
 import sys
 from pathlib import Path
@@ -92,6 +92,10 @@ common_hiddenimports = [
     'pynput',
     'requests',
     'utils.audio_cues',
+    'utils.dictation_modes',
+    'utils.dictation_runtime',
+    'utils.dictation_integration',
+    'utils.dictation_health',
     'utils.midnight_overlay',
     'utils.midnight_signal_ui',
     'utils.ui_state',

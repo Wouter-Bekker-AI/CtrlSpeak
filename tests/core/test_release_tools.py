@@ -10,15 +10,17 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, NoEncryption
 
 from scripts import release
+from utils.version import APP_VERSION
 
 
 pytestmark = pytest.mark.core_headless
 
 
-def test_release_version_gate_matches_current_patch():
-    assert release.read_app_version() == "0.7.7"
-    assert release.read_server_versions() == ("0.7.7", "0.7.7")
-    assert release.check_version("v0.7.7") == "0.7.7"
+def test_release_version_gate_matches_current_release():
+    assert APP_VERSION == "0.8.0"
+    assert release.read_app_version() == APP_VERSION
+    assert release.read_server_versions() == (APP_VERSION, APP_VERSION)
+    assert release.check_version(f"v{APP_VERSION}") == APP_VERSION
     with pytest.raises(SystemExit, match="tag/version mismatch"):
         release.check_version("v0.5.0")
 
@@ -53,14 +55,14 @@ def test_generate_and_verify_complete_release_set(tmp_path, monkeypatch):
     monkeypatch.setattr(release, "verify_signed_manifest", verify_with_test_key)
     release.generate(
         Namespace(
-            tag="v0.7.7",
+            tag=f"v{APP_VERSION}",
             windows=str(windows),
             linux=str(linux),
             output_dir=str(tmp_path),
             published_at="2026-08-18T12:00:00Z",
         )
     )
-    release.verify(Namespace(directory=str(tmp_path), tag="v0.7.7"))
+    release.verify(Namespace(directory=str(tmp_path), tag=f"v{APP_VERSION}"))
 
     assert (tmp_path / "update-manifest.json").is_file()
     assert (tmp_path / "update-manifest.sig").is_file()

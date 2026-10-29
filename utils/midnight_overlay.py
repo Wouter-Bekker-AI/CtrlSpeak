@@ -12,12 +12,12 @@ import math
 import sys
 import time
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 import tkinter as tk
 
 from utils.config_paths import app_icon_path
-from utils.ui_state import UiPhase, UiSnapshot
+from utils.ui_state import UiPhase, UiSnapshot, DictationPresentation, dictation_presentation
 
 
 CHROMA_KEY = "#010203"
@@ -582,12 +582,14 @@ class MidnightSignalOverlay:
         snapshot_provider: Callable[[], UiSnapshot],
         waveform_provider: Callable[[], object] | None = None,
         device_label_provider: Callable[[], str | None] | None = None,
+        dictation_status_provider: Callable[[], Mapping[str, object]] | None = None,
         reduced_motion: bool = False,
     ) -> None:
         self.root = root
         self.snapshot_provider = snapshot_provider
         self.waveform_provider = waveform_provider
         self.device_label_provider = device_label_provider
+        self.dictation_status_provider = dictation_status_provider
         self.reduced_motion = bool(reduced_motion)
         self.scale = display_scale(root)
         self._render_scale = self.scale
@@ -742,7 +744,12 @@ class MidnightSignalOverlay:
             fill=SURFACE, outline=OUTLINE, width=1,
         )
         phase = state.phase
-        if phase is UiPhase.RECORDING:
+        provider = getattr(self, "dictation_status_provider", None)
+        presentation = dictation_presentation(provider() if provider else None)
+        self._dictation_presentation = presentation
+        if presentation.active and presentation.mode != "hold":
+            self._draw_dictation_session(canvas, width, height, state, presentation)
+        elif phase is UiPhase.RECORDING:
             self._draw_recording(canvas, width, height, state)
         elif phase is UiPhase.PROCESSING:
             self._draw_processing(canvas, width, height, state)
@@ -756,6 +763,64 @@ class MidnightSignalOverlay:
             self._draw_idle(canvas, width, height)
         if render_scale != 1.0:
             canvas.scale("all", 0, 0, render_scale, render_scale)
+
+    def _draw_dictation_session(
+        self, canvas: tk.Canvas, width: float, height: float,
+        state: UiSnapshot, presentation: DictationPresentation,
+    ) -> None:
+        """Persistent mode/mute indication without taking keyboard focus."""
+        compact = width < 470
+        mic_x = 30.0
+        centre_y = height / 2
+        self._draw_microphone(canvas, mic_x, centre_y - 2)
+        if presentation.muted:
+            canvas.create_line(
+                mic_x - 18, centre_y + 16, mic_x + 18, centre_y - 20,
+                fill=AMBER, width=4, capstyle=tk.ROUND,
+                tags=("dictation-muted-microphone",),
+            )
+        color = AMBER if presentation.muted or presentation.editing else CYAN
+        text_x = 62.0
+        text_width = max(60.0, width - text_x - 14)
+        headline = fit_overlay_text(presentation.headline, pixel_width=text_width - (0 if compact else 56))
+        self._text(canvas, text_x, height * 0.26, headline,
+                   fill=color, font=("Segoe UI Semibold", 9),
+                   tags=("dictation-mode-status",))
+        self._text(canvas, text_x, height * 0.52,
+                   fit_overlay_text(presentation.hint, pixel_width=text_width),
+                   fill=TEXT, font=("Segoe UI Semibold", 9),
+                   tags=("dictation-shortcut-hint",))
+        self._text(canvas, text_x, height * 0.77,
+                   fit_overlay_text(presentation.detail, pixel_width=text_width),
+                   fill=TEXT_MUTED, font=("Segoe UI", 8),
+                   tags=("dictation-pending-status",))
+        if not compact:
+            self._text(canvas, width - 16, height * 0.26, state.elapsed_label,
+                       anchor="e", fill=TEXT_MUTED, font=("Segoe UI", 9))
+        # A muted session never asks the waveform provider for microphone data.
+        # Keep a fixed status bar, rather than animating a misleading live mic.
+        if presentation.freeze_waveform:
+            canvas.create_line(18, height - 13, 43, height - 13,
+                               fill=OUTLINE, width=2, tags=("dictation-waveform-frozen",))
+        else:
+            # Live phrase processing does not stop capture. Keep a real input
+            # meter here instead of replacing listening with a processing orbit.
+            samples: object = ()
+            if self.waveform_provider is not None:
+                try:
+                    samples = self.waveform_provider()
+                except Exception:
+                    samples = ()
+            levels = waveform_bar_levels(samples, count=5, fallback=getattr(state, "level_fraction", 0.0))
+            for index, activity in enumerate(levels):
+                x = 18 + index * 6
+                half_height = 1 + activity * 4
+                canvas.create_line(
+                    x, height - 13 - half_height, x, height - 13 + half_height,
+                    fill=CYAN if activity > 0.16 else OUTLINE, width=2,
+                    capstyle=tk.ROUND,
+                    tags=("dictation-listening-indicator", "dictation-waveform"),
+                )
 
     @staticmethod
     def _text(canvas: tk.Canvas, x: float, y: float, text: str, **kwargs) -> int:
@@ -824,6 +889,8 @@ class MidnightSignalOverlay:
         self, canvas: tk.Canvas, width: int, height: int, state: UiSnapshot
     ) -> None:
         layout = recording_capsule_layout(width, height)
+        presentation = getattr(self, "_dictation_presentation", None)
+        release_hint = presentation.hint if presentation and presentation.active and presentation.mode == "hold" else "Release Right Ctrl to transcribe"
         centre_y = height / 2.0
         self._draw_microphone(canvas, layout.mic_x, centre_y - 2)
         canvas.create_line(
@@ -860,8 +927,9 @@ class MidnightSignalOverlay:
                 capstyle=tk.ROUND, tags=("waveform",),
             )
         if layout.compact:
+            compact_release_hint = release_hint.removeprefix("Release ").removesuffix(" to transcribe")
             instruction = fit_overlay_text(
-                "LISTENING · release Right Ctrl",
+                f"LISTENING · release {compact_release_hint} to finish",
                 pixel_width=max(1.0, width - layout.status_x - 12.0),
             )
             self._text(
@@ -879,7 +947,7 @@ class MidnightSignalOverlay:
             fill=CYAN, font=("Segoe UI Semibold", 9),
         )
         self._text(
-            canvas, layout.status_x, 55, "Release Right Ctrl to transcribe",
+            canvas, layout.status_x, 55, release_hint,
             font=("Segoe UI Semibold", 10),
         )
         self._text(

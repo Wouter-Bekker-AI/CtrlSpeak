@@ -375,11 +375,13 @@ def _insert_text_with_tk_fallback(text: str, *, cancel_check: CancelCheck = None
 
 
 def insert_text_into_focus(text: str, *, preserve_formatting: bool = False,
-                           cancel_check: CancelCheck = None) -> None:
+                           cancel_check: CancelCheck = None, append_space: bool = False) -> None:
     check_insertion_cancelled(cancel_check)
     text = prepare_dictation_text(text, preserve_formatting=preserve_formatting)
     if not text:
         return
+    if append_space:
+        text += " "  # Literal coordinator-owned separator; never a model Enter.
     ensure_desktop_automation_supported()
     if not clipboard_tool_available():
         _insert_text_with_tk_fallback(text, cancel_check=cancel_check)

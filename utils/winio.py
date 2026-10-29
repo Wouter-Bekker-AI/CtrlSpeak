@@ -71,7 +71,10 @@ def snapshot_active_text_field(*, copy_wait_seconds: float = 0.08) -> Optional[s
 
 
 def insert_text_into_focus(text: str, *, preserve_formatting: bool = False,
-                           cancel_check: CancelCheck = None) -> None:
+                           cancel_check: CancelCheck = None, append_space: bool = False) -> None:
+    # Only the live coordinator can request this trusted separator. Do not
+    # interpret trailing whitespace returned by a transcription model as intent.
+    options = {"append_space": True} if append_space else {}
     _adapter().insert_text_into_focus(
-        text, preserve_formatting=preserve_formatting, cancel_check=cancel_check,
+        text, preserve_formatting=preserve_formatting, cancel_check=cancel_check, **options,
     )

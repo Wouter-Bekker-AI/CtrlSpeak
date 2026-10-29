@@ -6,6 +6,7 @@ from xml.etree import ElementTree
 import pytest
 
 from utils import system
+from utils.version import APP_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -33,7 +34,7 @@ def test_v07_pyinstaller_spec_uses_stable_artifact_and_platform_adapters() -> No
     assert "pynput._util.xorg" in spec
     assert "pynput.keyboard._xorg" in spec
     assert "pynput.mouse._xorg" in spec
-    assert system.APP_VERSION == "0.7.7"
+    assert system.APP_VERSION == APP_VERSION
 
 
 def test_build_helper_routes_windows_and_linux_to_v07_spec() -> None:
@@ -42,9 +43,9 @@ def test_build_helper_routes_windows_and_linux_to_v07_spec() -> None:
     linux = _resolve_build_config(False, platform_name="linux")
     windows = _resolve_build_config(False, platform_name="win32")
 
-    assert linux.name == "CtrlSpeak v0.7 Linux"
+    assert linux.name == f"CtrlSpeak v{APP_VERSION} Linux"
     assert linux.spec_path.name == "CtrlSpeak_v0.7.spec"
-    assert windows.name == "CtrlSpeak v0.7 Windows"
+    assert windows.name == f"CtrlSpeak v{APP_VERSION} Windows"
     assert windows.spec_path.name == "CtrlSpeak_v0.7.spec"
 
 
@@ -72,7 +73,7 @@ def test_desktop_launcher_template_and_appstream_metadata_are_consistent() -> No
     assert launchable.text == "ctrlspeak.desktop"
     release = component.find("releases/release")
     assert release is not None
-    assert release.attrib["version"] == "0.7.7"
+    assert release.attrib["version"] == APP_VERSION
 
     assert icon_path.is_file()
     assert icon_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
@@ -83,10 +84,11 @@ def test_v073_windows_and_hotfix_release_metadata_are_consistent() -> None:
     release_notes = (ROOT / "docs" / "V0.7.3_HOTFIX_RELEASE.md").read_text("utf-8")
     changelog = (ROOT / "CHANGELOG.md").read_text("utf-8")
 
-    assert "filevers=(0, 7, 7, 0)" in version_info
-    assert "prodvers=(0, 7, 7, 0)" in version_info
-    assert "StringStruct(u'FileVersion', u'0.7.7')" in version_info
-    assert "StringStruct(u'ProductVersion', u'0.7.7')" in version_info
+    version_tuple = tuple(map(int, APP_VERSION.split("."))) + (0,)
+    assert f"filevers={version_tuple}" in version_info
+    assert f"prodvers={version_tuple}" in version_info
+    assert f"StringStruct(u'FileVersion', u'{APP_VERSION}')" in version_info
+    assert f"StringStruct(u'ProductVersion', u'{APP_VERSION}')" in version_info
     assert "Target tag: `v0.7.3`" in release_notes
     assert "0.7.3 — 2026-08-18" in changelog
 

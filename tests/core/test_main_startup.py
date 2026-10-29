@@ -125,6 +125,25 @@ def test_packaged_health_check_file_exits_before_normal_startup(tmp_path, monkey
     assert isinstance(payload["frozen"], bool)
     assert payload["request_transport"]["ok"] is True
     assert payload["request_transport"]["async_dns"] is True
+    assert payload["dictation_modes"]["ok"] is True
+    assert payload["dictation_modes"]["pcm_bit_perfect"] is True
+    assert payload["dictation_modes"]["mute_capture_gate"] is True
+    assert payload["dictation_modes"]["delivery_epoch_guard"] is True
+
+
+def test_packaged_health_fails_closed_on_dictation_smoke_failure(tmp_path, monkeypatch) -> None:
+    app = _import_main_without_runtime_gui(monkeypatch)
+    from utils import dictation_health
+
+    def broken():
+        raise RuntimeError("Synthetic dictation smoke failure")
+
+    monkeypatch.setattr(dictation_health, "dictation_health_self_test", broken)
+    monkeypatch.setattr(app, "acquire_single_instance_lock",
+                        lambda: pytest.fail("Normal startup must not run during health check"))
+    target = tmp_path / "health.json"
+    assert app.main(["ctrlspeak", "--health-check-file", str(target)]) == 6
+    assert not target.exists()
 
 
 def test_version_mode_exits_before_normal_startup(monkeypatch, capsys) -> None:

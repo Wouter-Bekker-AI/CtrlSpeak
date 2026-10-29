@@ -1,8 +1,9 @@
-# CtrlSpeak v0.7.7
+# CtrlSpeak v0.8.0
 
 CtrlSpeak is a native Windows and Ubuntu/Linux speech-to-text client. Hold the **right Ctrl**
 key to record, release it to transcribe, and CtrlSpeak inserts the result into
-the active field. v0.5 adds signed in-application updates with a stable installed
+the active field. v0.8 adds optional Hands-free and Windows Live Dictation;
+ordinary Hold to Talk remains the default. v0.5 adds signed in-application updates with a stable installed
 filename. v0.5.1 adds an ordered output-language allowlist enforced by both the
 embedded model and maintained remote API, while preserving the v0.4 Linux and
 transcription-backend design. v0.6 adds capability-aware gateway routing and a
@@ -21,6 +22,50 @@ timings, and configurable peak-bounded feedback sounds.
 The legacy **Client + Server** and **Client Only** roles remain inside the
 embedded/local backend. Remote API mode is independent of those roles and does
 not start discovery, a local server, or a model download.
+
+## v0.8.0 dictation modes
+
+Choose how to dictate without changing your gateway, provider preference,
+OpenAI key or optional GPU S1 cleanup:
+
+| Mode | Default start | Finish | Output |
+| --- | --- | --- | --- |
+| Hold to Talk | Hold Right Ctrl | Release Right Ctrl | One transcript after release |
+| Hands-free Dictation | Double-tap Right Ctrl | Tap Right Ctrl by itself | One transcript after finishing |
+| Live Dictation — Windows, opt-in | Press Left Ctrl + Right Ctrl, then release both | Tap Right Ctrl by itself | Completed phrases appear while you continue |
+
+In Hands-free or Live, tap **Left Ctrl by itself** to mute/resume. The persistent
+capsule shows the mode, a crossed microphone and frozen meter while muted, and
+any held/queued results. **Escape** or **Cancel dictation** cancels; it cannot undo
+text already inserted. Normal Ctrl+C/Ctrl+V-style chords do not toggle mute or
+finish. A single short Right Ctrl tap while idle does not submit a recording.
+
+In **Capture**, enable Live only after reading its cost and safety warning.
+It sends separate ordinary transcription requests after about **650 ms of
+silence**, or at **8 seconds** of continuous speech. This is phrase-based output,
+not token streaming or guaranteed instant text. Network/model/S1 time adds to
+that delay, and a paid route can bill each phrase. Live is disabled on Linux;
+Hold and Hands-free remain supported on X11/Xorg.
+
+Live never rewrites already-inserted text. Keyboard/mouse editing pauses capture
+and insertion; earlier results are held for explicit **Copy pending** or
+**Discard pending**, not replayed into your edited field. Copy clears held results
+only after successful clipboard verification. Inspect the destination first if
+partial insertion was reported. Focus changes require an explicit resume; within
+AnyDesk, CtrlSpeak cannot identify every remote field or cursor change.
+
+Live always uses single-line safe text plus a trusted ordinary space between
+phrases, never an injected Enter. Hold and Hands-free retain the existing S1
+paragraph preference. Gateway/API and Nova/Telegram formatting are unchanged.
+
+The Capture page and tray provide start, mute/resume, finish and cancel controls.
+Starting from those surfaces gives you **three seconds to focus the destination**.
+Capture also remaps the primary/secondary keys to distinct choices from Left
+Ctrl, Right Ctrl, F8, F9 and F10; the gestures and visible hints follow the keys.
+
+The Updates page offers an explicit signed **Roll back to 0.7.7** path, retaining
+settings and saved credentials. See the [0.8.0 guide](docs/V0.8.0_RELEASE.md) for
+limits, privacy, safe first-use checks and release/deployment status.
 
 ## v0.7.7 reliability and responsiveness
 
@@ -305,6 +350,13 @@ the previous verified executable automatically if startup fails. Settings,
 models, CUDA files, logs, native credential-vault entries, and local
 corrections are not replaced.
 
+From 0.8.0, **Updates → Roll back to 0.7.7** selects only the signed 0.7.7
+release. It still requires an explicit download and restart/install; it is not
+an automatic downgrade. It is available for a writable packaged installation,
+not a source checkout. Settings and credential-vault entries are retained, and
+the new modes become unavailable on 0.7.7. See the
+[rollback procedure](docs/V0.8.0_RELEASE.md#return-to-077).
+
 A source checkout may check which release is published, but it cannot overwrite
 itself with a release binary. Update source checkouts through Git. v0.4 and
 earlier builds do not contain updater code, so v0.5.0 is the one final manual
@@ -324,6 +376,10 @@ leaves the listener stopped, and presents an actionable message instead of
 crashing or pretending that an XWayland window makes system-wide input work.
 Headless shells and services are also unsupported because there is no active
 field or desktop keyboard session.
+
+Hold to Talk and Hands-free Dictation are supported on X11. Live Dictation in
+0.8.0 requires Windows because reliable separation of physical input from
+CtrlSpeak's own injected input is required for its edit/mute safety contract.
 
 On X11:
 
@@ -493,6 +549,11 @@ Enter (for example Shift+Enter), key releases, and unrelated keys do not consume
 the pending item. Pending state is single-use, is replaced by the next
 injection, and expires after ten minutes. Set the feedback method to `disabled`
 when whole-field selection is unsuitable.
+
+Live Dictation does not register individual phrases for whole-field Enter
+feedback: the edited field is not necessarily the last phrase. Submit known-word
+corrections explicitly through **Submit correction…** instead. Hold and
+Hands-free retain the existing feedback workflow.
 
 ## CLI
 

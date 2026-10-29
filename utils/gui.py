@@ -704,7 +704,10 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
     with settings_lock:
         enabled = bool(settings.get("overlay_enabled", True))
         reduced_motion = bool(settings.get("reduced_motion", False))
-    if not enabled or tk_root is None or not tk_root.winfo_exists():
+    status_provider = getattr(sysmod, "get_dictation_status", lambda: {})
+    dictation_status = status_provider()
+    persistent_session = dictation_status.get("active") is True and dictation_status.get("mode") in {"hands_free", "live"}
+    if (not enabled and not persistent_session) or tk_root is None or not tk_root.winfo_exists():
         return
     try:
         from utils.midnight_overlay import MidnightSignalOverlay
@@ -717,6 +720,7 @@ def show_waveform_overlay(provider: Callable[[], "np.ndarray"]) -> None:
             snapshot_provider=sysmod.transcription_ui_session.snapshot,
             waveform_provider=provider,
             device_label_provider=sysmod.get_input_device_preference,
+            dictation_status_provider=status_provider,
             reduced_motion=reduced_motion,
         )
         _midnight_overlay.show()
@@ -3029,7 +3033,7 @@ class _LegacyManagementWindow:
             return
         details = (
             f"Current version: {APP_VERSION}\n"
-            f"New version: {release.version}\n"
+            f"Target version: {release.version}\n"
             f"Artifact: {release.asset.name}\n"
             f"Download: approximately {self._format_update_bytes(release.asset.size)}\n\n"
             "CtrlSpeak will verify the signed download before it closes. Settings, models, "

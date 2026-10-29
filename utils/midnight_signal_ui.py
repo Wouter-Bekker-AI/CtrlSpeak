@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import math
 import queue
+import sys
 import threading
 import time
 from typing import Callable, Mapping, Optional, Sequence
@@ -30,8 +31,10 @@ from utils.ui_state import (
     active_route_label,
     format_latency_ms,
     providers_from_capabilities,
+    dictation_presentation,
 )
 from utils.audio_cues import CueKind
+from utils.update_manager import SemanticVersion
 
 
 INK = "#0B1117"
@@ -45,6 +48,51 @@ CYAN = "#49D7E8"
 MINT = "#71E6BA"
 AMBER = "#F5C56B"
 CORAL = "#FF7A79"
+
+DICTATION_KEY_LABELS = {
+    "ctrl_r": "Right Ctrl", "ctrl_l": "Left Ctrl",
+    "f8": "F8", "f9": "F9", "f10": "F10",
+}
+
+
+def read_dictation_status() -> dict[str, object]:
+    """One public runtime snapshot; never copy transcript text into UI state."""
+    reader = getattr(sysmod, "get_dictation_status", None)
+    return dict(reader()) if reader else {}
+
+
+def confirm_live_dictation(parent: tk.Misc) -> bool:
+    """Live capture is a deliberate opt-in, including its existing paid route."""
+    if not sys.platform.startswith("win"):
+        messagebox.showinfo(
+            "Live Dictation requires Windows",
+            "Live Dictation currently needs Windows physical-input safeguards. "
+            "Hold to Talk and Hands-free Dictation remain available on supported X11 desktops.",
+            parent=parent,
+        )
+        return False
+    with settings_lock:
+        if settings.get("dictation_live_enabled") is True:
+            return True
+    if not messagebox.askyesno(
+        "Enable Live Dictation?",
+        "Live Dictation currently requires Windows. It inserts stable phrases, not revisable word-by-word text. "
+        "It uses your selected provider route; frequent cloud requests may incur API charges.\n\n"
+        "Mute stops new audio retention and text delivery. Editing can leave earlier results "
+        "held for Copy/Discard. AnyDesk cannot reveal every remote text field, so use a "
+        "blank editor for your first test. No Enter key is sent by live dictation.\n\n"
+        "Enable Live Dictation?",
+        parent=parent, default=messagebox.NO, icon=messagebox.WARNING,
+    ):
+        return False
+    with settings_lock:
+        settings["dictation_live_enabled"] = True
+    if not save_settings():
+        with settings_lock:
+            settings["dictation_live_enabled"] = False
+        messagebox.showerror("Preference not saved", "Live Dictation remains disabled. Check the CtrlSpeak log.", parent=parent)
+        return False
+    return True
 
 ROUTING_COLUMN_WEIGHTS = (3, 2)
 PROVIDER_CARD_SPECS: tuple[tuple[str, str, str, str], ...] = (
@@ -499,15 +547,17 @@ class MidnightSignalManagementMixin:
     def _build_capture_page(self, page: ttk.Frame) -> None:
         hero = _card(page, padding=(26, 22))
         hero.pack(fill=tk.X)
-        ttk.Label(hero, text="Hold Right Ctrl to speak", style="MS.Section.TLabel").pack(anchor=tk.W)
+        ttk.Label(hero, text="Your voice, three ways", style="MS.Section.TLabel").pack(anchor=tk.W)
         self.ms_capture_detail_var = tk.StringVar(value="Ready · release the key when you finish")
-        ttk.Label(hero, textvariable=self.ms_capture_detail_var, style="MS.CardMuted.TLabel").pack(anchor=tk.W, pady=(6, 0))
+        ttk.Label(hero, textvariable=self.ms_capture_detail_var, style="MS.CardMuted.TLabel", wraplength=880,
+                  justify=tk.LEFT).pack(anchor=tk.W, pady=(6, 0))
         meter_row = ttk.Frame(hero, style="MS.Card.TFrame")
         meter_row.pack(fill=tk.X, pady=(18, 0))
         self.ms_level_var = tk.DoubleVar(value=0.0)
         ttk.Progressbar(meter_row, variable=self.ms_level_var, maximum=100, style="MS.Horizontal.TProgressbar").pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.ms_dbfs_var = tk.StringVar(value="−60.0 dBFS")
         ttk.Label(meter_row, textvariable=self.ms_dbfs_var, style="MS.Card.TLabel", width=13, anchor=tk.E).pack(side=tk.RIGHT, padx=(16, 0))
+        self._build_dictation_controls(hero)
 
         columns = ttk.Frame(page, style="MS.Surface.TFrame")
         columns.pack(fill=tk.BOTH, expand=True, pady=(16, 0))
@@ -545,7 +595,8 @@ class MidnightSignalManagementMixin:
         self.ms_cue_volume_var = tk.IntVar(value=volume)
         self.ms_overlay_enabled_var = tk.BooleanVar(value=overlay)
         self.ms_reduced_motion_var = tk.BooleanVar(value=reduced)
-        ttk.Checkbutton(right, text="Show the recording capsule", variable=self.ms_overlay_enabled_var, style="MS.TCheckbutton", command=self._save_experience_preferences).pack(anchor=tk.W, pady=(14, 6))
+        ttk.Checkbutton(right, text="Show Hold to Talk capsule", variable=self.ms_overlay_enabled_var, style="MS.TCheckbutton", command=self._save_experience_preferences).pack(anchor=tk.W, pady=(14, 6))
+        _label(right, "Hands-free and Live always show their listening/mute status.", muted=True, wraplength=410).pack(anchor=tk.W)
         ttk.Checkbutton(right, text="Use reduced motion", variable=self.ms_reduced_motion_var, style="MS.TCheckbutton", command=self._save_experience_preferences).pack(anchor=tk.W, pady=6)
         ttk.Checkbutton(right, text="Play short audio cues", variable=self.ms_cues_enabled_var, style="MS.TCheckbutton", command=self._save_experience_preferences).pack(anchor=tk.W, pady=6)
         _label(right, "Cue volume", muted=True).pack(anchor=tk.W, pady=(16, 3))
@@ -557,6 +608,100 @@ class MidnightSignalManagementMixin:
         buttons.pack(fill=tk.X, pady=(14, 0))
         ttk.Button(buttons, text="Preview", style="MS.TButton", command=lambda: sysmod.play_ui_cue(CueKind.SUCCESS)).pack(side=tk.LEFT)
         _label(right, "Cues are low/mid frequency, peak-limited to −12 dBFS, and never loop.", muted=True, wraplength=410, justify=tk.LEFT).pack(anchor=tk.W, pady=(14, 0))
+
+    def _build_dictation_controls(self, parent: ttk.Frame) -> None:
+        self.ms_dictation_status_var = tk.StringVar(value="READY")
+        self.ms_dictation_label = ttk.Label(parent, textvariable=self.ms_dictation_status_var,
+                                           style="MS.Metric.TLabel", foreground=CYAN)
+        self.ms_dictation_label.pack(anchor=tk.W, pady=(14, 4))
+        with settings_lock:
+            primary = str(settings.get("dictation_primary_key", "ctrl_r"))
+            secondary = str(settings.get("dictation_secondary_key", "ctrl_l"))
+            live_enabled = settings.get("dictation_live_enabled") is True
+        self.ms_primary_key_var = tk.StringVar(value=DICTATION_KEY_LABELS.get(primary, "Right Ctrl"))
+        self.ms_secondary_key_var = tk.StringVar(value=DICTATION_KEY_LABELS.get(secondary, "Left Ctrl"))
+        self.ms_live_enabled_var = tk.BooleanVar(value=live_enabled)
+        self.ms_dictation_guide_var = tk.StringVar()
+        self._refresh_dictation_guide()
+        _label(parent, "Hold to Talk · Hands-free Dictation · Live Dictation", muted=True).pack(anchor=tk.W)
+        ttk.Label(parent, textvariable=self.ms_dictation_guide_var, style="MS.CardMuted.TLabel",
+                  wraplength=880, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 8))
+        actions = ttk.Frame(parent, style="MS.Card.TFrame")
+        actions.pack(fill=tk.X)
+        self.ms_hands_free_btn = ttk.Button(actions, text="Start hands-free", style="MS.TButton",
+                                            command=lambda: self._start_dictation_mode("hands_free"))
+        self.ms_hands_free_btn.pack(side=tk.LEFT)
+        self.ms_live_btn = ttk.Button(actions, text="Start live…", style="MS.Primary.TButton",
+                                      command=lambda: self._start_dictation_mode("live"))
+        self.ms_live_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.ms_mute_btn = ttk.Button(actions, text="Mute", style="MS.TButton", command=sysmod.toggle_dictation_mute)
+        self.ms_mute_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.ms_finish_btn = ttk.Button(actions, text="Finish", style="MS.TButton", command=sysmod.finish_dictation_mode)
+        self.ms_finish_btn.pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(actions, text="Cancel", style="MS.Danger.TButton", command=sysmod.cancel_active_transcription).pack(side=tk.LEFT, padx=(8, 0))
+        held = ttk.Frame(parent, style="MS.Card.TFrame")
+        held.pack(fill=tk.X, pady=(10, 0))
+        self.ms_pending_var = tk.StringVar(value="No held text")
+        ttk.Label(held, textvariable=self.ms_pending_var, style="MS.CardMuted.TLabel").pack(side=tk.LEFT)
+        self.ms_copy_pending_btn = ttk.Button(held, text="Copy pending", style="MS.Compact.TButton", command=sysmod.copy_pending_dictation)
+        self.ms_copy_pending_btn.pack(side=tk.LEFT, padx=(12, 6))
+        self.ms_discard_pending_btn = ttk.Button(held, text="Discard pending", style="MS.Compact.TButton", command=sysmod.discard_pending_dictation)
+        self.ms_discard_pending_btn.pack(side=tk.LEFT)
+        _label(parent, "Held results are never inserted automatically after you edit. Copy clears the held queue only after clipboard success; inspect the target and paste deliberately.", muted=True,
+               wraplength=880, justify=tk.LEFT).pack(anchor=tk.W, pady=(6, 8))
+        keys = ttk.Frame(parent, style="MS.Card.TFrame")
+        keys.pack(fill=tk.X)
+        _label(keys, "Record / finish key", muted=True).pack(side=tk.LEFT)
+        ttk.Combobox(keys, textvariable=self.ms_primary_key_var, values=tuple(DICTATION_KEY_LABELS.values()),
+                     state="readonly", width=12).pack(side=tk.LEFT, padx=(8, 16))
+        _label(keys, "Mute / live modifier", muted=True).pack(side=tk.LEFT)
+        ttk.Combobox(keys, textvariable=self.ms_secondary_key_var, values=tuple(DICTATION_KEY_LABELS.values()),
+                     state="readonly", width=12).pack(side=tk.LEFT, padx=(8, 8))
+        ttk.Button(keys, text="Apply keys", style="MS.Compact.TButton", command=self._apply_dictation_keys).pack(side=tk.LEFT)
+        ttk.Checkbutton(parent, text="Allow Live Dictation (Windows; phrase-by-phrase; uses the selected provider route)",
+                        variable=self.ms_live_enabled_var, style="MS.TCheckbutton",
+                        command=self._set_live_dictation_enabled).pack(anchor=tk.W, pady=(10, 0))
+        _label(parent, "Live starts in 3 seconds from these buttons. Focus your destination. Shortcuts only act on isolated taps; Ctrl+C/V remain editing shortcuts.",
+               muted=True, wraplength=880, justify=tk.LEFT).pack(anchor=tk.W, pady=(6, 0))
+
+    def _refresh_dictation_guide(self) -> None:
+        primary, secondary = self.ms_primary_key_var.get(), self.ms_secondary_key_var.get()
+        self.ms_dictation_guide_var.set(
+            f"Hold {primary}: Hold to Talk  ·  Double-tap {primary}: Hands-free\n"
+            f"{secondary} + {primary}: Live  ·  During hands-free/live, tap {secondary}: mute/resume; tap {primary}: finish"
+        )
+
+    def _apply_dictation_keys(self) -> None:
+        reverse = {label: key for key, label in DICTATION_KEY_LABELS.items()}
+        try:
+            result = sysmod.configure_dictation_keys(reverse[self.ms_primary_key_var.get()], reverse[self.ms_secondary_key_var.get()])
+            if result is False:
+                raise ValueError("Could not save dictation keys. Finish any active dictation and try again.")
+        except (ValueError, KeyError, RuntimeError) as exc:
+            messagebox.showwarning("Keys not changed", str(exc), parent=self.window)
+            return
+        self._refresh_dictation_guide()
+
+    def _set_live_dictation_enabled(self) -> None:
+        if self.ms_live_enabled_var.get():
+            self.ms_live_enabled_var.set(confirm_live_dictation(self.window))
+            return
+        with settings_lock:
+            previous = settings.get("dictation_live_enabled") is True
+            settings["dictation_live_enabled"] = False
+        if not save_settings():
+            with settings_lock:
+                settings["dictation_live_enabled"] = previous
+            self.ms_live_enabled_var.set(previous)
+            messagebox.showerror("Preference not saved", "Could not save the Live Dictation preference.", parent=self.window)
+
+    def _start_dictation_mode(self, mode: str) -> None:
+        if mode == "live" and not confirm_live_dictation(self.window):
+            return
+        root = self.window.master
+        self.close()
+        sysmod.notify("Focus the destination. Dictation starts in 3 seconds.", title="CtrlSpeak dictation")
+        root.after(3000, lambda: sysmod.start_dictation_mode(mode))
 
     def _build_transcription_page(self, page: ttk.Frame) -> None:
         top = _card(page)
@@ -866,7 +1011,37 @@ class MidnightSignalManagementMixin:
         self.ms_cancel_update_btn.pack(side=tk.LEFT, padx=(10, 0))
         ttk.Button(buttons, text="View release", style="MS.TButton", command=self._view_update_release).pack(side=tk.RIGHT)
         ttk.Button(buttons, text="Copy diagnostics", style="MS.TButton", command=self._copy_update_diagnostics).pack(side=tk.RIGHT, padx=(0, 10))
+        rollback = ttk.Frame(card, style="MS.Card.TFrame")
+        rollback.pack(fill=tk.X, pady=(24, 0))
+        self.ms_rollback_btn = ttk.Button(rollback, text="Roll back to 0.7.7…", style="MS.TButton", command=self._rollback_to_077)
+        self.ms_rollback_btn.pack(side=tk.LEFT)
+        self._set_button_enabled(self.ms_rollback_btn, self._update_runtime == "packaged_user_writable"
+                                 and SemanticVersion.parse(sysmod.APP_VERSION) > SemanticVersion.parse("0.7.7"))
+        _label(card, "Prefer the previous behaviour? Rollback selects the signed 0.7.7 release, then uses the same verified download/restart flow. Settings and credentials are retained; new dictation modes are unavailable on 0.7.7.",
+               muted=True, wraplength=920, justify=tk.LEFT).pack(anchor=tk.W, pady=(12, 0))
         _label(card, "Downloads are signed, SHA-256 verified, installed by a separate helper, and automatically rolled back if startup health fails.", muted=True, wraplength=920, justify=tk.LEFT).pack(anchor=tk.W, side=tk.BOTTOM)
+
+    def _rollback_to_077(self) -> None:
+        if self._update_runtime != "packaged_user_writable":
+            messagebox.showinfo("Packaged installation required", "Source checkouts are changed through Git. This rollback button applies to the installed CtrlSpeak executable.", parent=self.window)
+            return
+        if SemanticVersion.parse(sysmod.APP_VERSION) <= SemanticVersion.parse("0.7.7"):
+            self.update_status_var.set("CtrlSpeak is already on 0.7.7 or older.")
+            return
+        if sysmod.is_transcription_busy():
+            messagebox.showwarning("CtrlSpeak is busy", "Finish or cancel dictation before preparing a rollback.", parent=self.window)
+            return
+        if not messagebox.askyesno(
+            "Return to CtrlSpeak 0.7.7?",
+            "This will look up and verify the signed 0.7.7 release. You will still confirm its download and installation. "
+            "Your settings and saved credentials remain; hands-free/live modes will no longer be available. Continue?",
+            parent=self.window, default=messagebox.NO, icon=messagebox.QUESTION,
+        ):
+            return
+        try:
+            self._update_coordinator.rollback_to_077()
+        except Exception:
+            self.update_status_var.set("Rollback lookup could not start. Check the CtrlSpeak log; nothing was installed.")
 
     def _build_system_page(self, page: ttk.Frame) -> None:
         columns = ttk.Frame(page, style="MS.Surface.TFrame")
@@ -1394,6 +1569,27 @@ class MidnightSignalManagementMixin:
         self.ms_dbfs_var.set(snapshot.level_label)
         self.ms_route_level_var.set(snapshot.level_fraction * 100)
         self.ms_route_dbfs_var.set(snapshot.level_label)
+        presentation = dictation_presentation(read_dictation_status())
+        if hasattr(self, "ms_dictation_status_var"):
+            self.ms_dictation_status_var.set(presentation.headline)
+            self.ms_dictation_label.configure(foreground=AMBER if presentation.muted or presentation.editing else CYAN)
+            self.ms_pending_var.set(f"{presentation.pending_count} held · {presentation.queued_count} queued")
+            busy = sysmod.is_transcription_busy() or presentation.active
+            self._set_button_enabled(self.ms_hands_free_btn, not busy)
+            self._set_button_enabled(self.ms_live_btn, not busy)
+            self._set_button_enabled(self.ms_mute_btn, presentation.active and presentation.mode != "hold")
+            self.ms_mute_btn.configure(text="Resume mic" if presentation.muted else "Mute mic")
+            self._set_button_enabled(self.ms_finish_btn, presentation.active and presentation.mode != "hold")
+            self._set_button_enabled(self.ms_copy_pending_btn, presentation.pending_count > 0)
+            self._set_button_enabled(self.ms_discard_pending_btn, presentation.pending_count > 0)
+        if presentation.active or presentation.pending_count or presentation.notice:
+            self.ms_ready_var.set(presentation.headline)
+            self.ms_capture_detail_var.set(presentation.detail)
+            if presentation.freeze_waveform:
+                self.ms_level_var.set(0)
+                self.ms_dbfs_var.set("MUTED" if presentation.muted else "PAUSED")
+                self.ms_route_level_var.set(0)
+                self.ms_route_dbfs_var.set("MUTED" if presentation.muted else "PAUSED")
         if snapshot.provider:
             provider = snapshot.provider
             self.ms_last_provider_var.set(f"{provider.display_name} · {provider.latency_label}")
@@ -1417,12 +1613,16 @@ class MidnightSignalManagementMixin:
         busy = event.state in {"checking", "downloading", "verifying", "launching_updater"}
         self._set_button_enabled(self.ms_check_update_btn, not busy)
         self._set_button_enabled(self.ms_cancel_update_btn, event.state == "downloading")
+        if hasattr(self, "ms_rollback_btn"):
+            self._set_button_enabled(self.ms_rollback_btn, not busy and self._update_runtime == "packaged_user_writable"
+                                     and SemanticVersion.parse(sysmod.APP_VERSION) > SemanticVersion.parse("0.7.7"))
         install_eligible = self._update_runtime == "packaged_user_writable"
+        rollback = getattr(event.release, "operation", "update") == "rollback_077"
         if event.state == "ready_to_install" and install_eligible:
-            self.ms_install_update_btn.configure(text="Restart and install")
+            self.ms_install_update_btn.configure(text="Restart on 0.7.7" if rollback else "Restart and install")
             self._set_button_enabled(self.ms_install_update_btn, True)
         elif event.state == "available" and install_eligible:
-            self.ms_install_update_btn.configure(text="Download and install")
+            self.ms_install_update_btn.configure(text="Download 0.7.7" if rollback else "Download and install")
             self._set_button_enabled(self.ms_install_update_btn, True)
         else:
             self.ms_install_update_btn.configure(text="Download and install")
@@ -1552,6 +1752,12 @@ class MidnightTrayFlyout:
 
         def sync_scroll_region(_event=None) -> None:
             canvas.configure(scrollregion=canvas.bbox("all"))
+            # The mode controls make panel height dynamic. Keep its bottom
+            # actions reachable even when the original compact panel fit.
+            if frame.winfo_reqheight() > max(1, canvas.winfo_height()):
+                scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            else:
+                scrollbar.pack_forget()
 
         def sync_content_width(event) -> None:
             canvas.itemconfigure(content_id, width=max(1, int(event.width)))
@@ -1605,9 +1811,33 @@ class MidnightTrayFlyout:
 
         hero = ttk.Frame(frame, style="MS.Root.TFrame")
         hero.pack(pady=(11, 9))
-        ttk.Label(hero, text="Hold", style="MS.TLabel", font=("Segoe UI Semibold", 14)).pack(side=tk.LEFT)
-        ttk.Label(hero, text=" Right Ctrl ", style="MS.TLabel", foreground=CYAN, font=("Segoe UI Semibold", 14)).pack(side=tk.LEFT)
-        ttk.Label(hero, text="to speak", style="MS.TLabel", font=("Segoe UI Semibold", 14)).pack(side=tk.LEFT)
+        self.hold_guide_var = tk.StringVar(value="Hold Right Ctrl to speak")
+        ttk.Label(hero, textvariable=self.hold_guide_var, style="MS.TLabel", foreground=CYAN,
+                  font=("Segoe UI Semibold", 14)).pack(side=tk.LEFT)
+
+        modes = _card(frame, padding=(12, 10))
+        modes.pack(fill=tk.X, pady=(0, 10))
+        self.dictation_var = tk.StringVar(value="DICTATION MODES")
+        self.dictation_label = ttk.Label(modes, textvariable=self.dictation_var, style="MS.Section.TLabel")
+        self.dictation_label.pack(anchor=tk.W)
+        mode_actions = ttk.Frame(modes, style="MS.Card.TFrame")
+        mode_actions.pack(fill=tk.X, pady=(7, 0))
+        self.hands_free_button = ttk.Button(mode_actions, text="Hands-free", style="MS.Compact.TButton", command=lambda: self._start_dictation("hands_free"))
+        self.hands_free_button.pack(side=tk.LEFT)
+        self.live_button = ttk.Button(mode_actions, text="Live…", style="MS.Compact.TButton", command=lambda: self._start_dictation("live"))
+        self.live_button.pack(side=tk.LEFT, padx=(5, 0))
+        self.mute_button = ttk.Button(mode_actions, text="Mute", style="MS.Compact.TButton", command=sysmod.toggle_dictation_mute)
+        self.mute_button.pack(side=tk.LEFT, padx=(5, 0))
+        self.finish_button = ttk.Button(mode_actions, text="Finish", style="MS.Compact.TButton", command=sysmod.finish_dictation_mode)
+        self.finish_button.pack(side=tk.LEFT, padx=(5, 0))
+        self.pending_var = tk.StringVar(value="No held text")
+        ttk.Label(modes, textvariable=self.pending_var, style="MS.CardMuted.TLabel", wraplength=365).pack(anchor=tk.W, pady=(7, 3))
+        pending_actions = ttk.Frame(modes, style="MS.Card.TFrame")
+        pending_actions.pack(fill=tk.X)
+        self.copy_pending_button = ttk.Button(pending_actions, text="Copy pending", style="MS.Compact.TButton", command=sysmod.copy_pending_dictation)
+        self.copy_pending_button.pack(side=tk.LEFT)
+        self.discard_pending_button = ttk.Button(pending_actions, text="Discard pending", style="MS.Compact.TButton", command=sysmod.discard_pending_dictation)
+        self.discard_pending_button.pack(side=tk.LEFT, padx=(5, 0))
 
         provider_header = ttk.Frame(frame, style="MS.Root.TFrame")
         provider_header.pack(fill=tk.X, pady=(0, 4))
@@ -1680,6 +1910,13 @@ class MidnightTrayFlyout:
         self.close()
         self.open_control()
 
+    def _start_dictation(self, mode: str) -> None:
+        if mode == "live" and not confirm_live_dictation(self.window):
+            return
+        self.close()
+        sysmod.notify("Focus the destination. Dictation starts in 3 seconds.", title="CtrlSpeak dictation")
+        self.root.after(3000, lambda: sysmod.start_dictation_mode(mode))
+
     def _retry_recording(self) -> None:
         self.close()
         sysmod.request_retry_failed_recording()
@@ -1738,9 +1975,34 @@ class MidnightTrayFlyout:
             self.route_var.set(f"{snapshot.headline} · {snapshot.detail}")
         self.level_var.set(snapshot.level_fraction * 100)
         self.level_label_var.set(snapshot.level_label)
+        status = read_dictation_status()
+        presentation = dictation_presentation(status)
+        if hasattr(self, "dictation_var"):
+            primary = status.get("primary_label", "Right Ctrl")
+            primary = primary if primary in DICTATION_KEY_LABELS.values() else "Right Ctrl"
+            self.hold_guide_var.set(f"Hold {primary} to speak")
+            self.dictation_var.set(presentation.headline)
+            self.dictation_label.configure(foreground=AMBER if presentation.muted or presentation.editing else CYAN)
+            busy = presentation.active or sysmod.is_transcription_busy()
+            self.hands_free_button.state(["disabled"] if busy else ["!disabled"])
+            self.live_button.state(["disabled"] if busy else ["!disabled"])
+            self.mute_button.state(["!disabled"] if presentation.active and presentation.mode != "hold" else ["disabled"])
+            self.mute_button.configure(text="Resume" if presentation.muted else "Mute")
+            self.finish_button.state(["!disabled"] if presentation.active and presentation.mode != "hold" else ["disabled"])
+            self.pending_var.set(f"{presentation.pending_count} held · {presentation.queued_count} queued · {presentation.hint}")
+            if presentation.notice:
+                self.pending_var.set(f"{presentation.notice}\n{presentation.pending_count} held · {presentation.queued_count} queued")
+            self.copy_pending_button.state(["!disabled"] if presentation.pending_count else ["disabled"])
+            self.discard_pending_button.state(["!disabled"] if presentation.pending_count else ["disabled"])
+        if presentation.active:
+            self.status_var.set("MUTED" if presentation.muted else "EDITING" if presentation.editing else "ACTIVE")
+            self.route_var.set(presentation.headline)
+            if presentation.freeze_waveform:
+                self.level_var.set(0)
+                self.level_label_var.set("MUTED" if presentation.muted else "PAUSED")
         if snapshot.provider:
             self.last_var.set(f"{snapshot.provider.display_name} · {snapshot.provider.latency_label}{' · fallback' if snapshot.degraded else ''}")
-        self.cancel_button.state(["!disabled"] if snapshot.can_cancel else ["disabled"])
+        self.cancel_button.state(["!disabled"] if snapshot.can_cancel or presentation.active else ["disabled"])
         if hasattr(self, "recovery_var"):
             self.recovery_var.set(sysmod.failed_recording_status())
             self.retry_button.state(["!disabled"] if sysmod.can_retry_failed_recording() else ["disabled"])

@@ -51,6 +51,9 @@ DEFAULT_SETTINGS: Dict[str, object] = {
     "reduced_motion": False,
     "audio_cues_enabled": True,
     "audio_cue_volume": 30,
+    "dictation_live_enabled": False,
+    "dictation_primary_key": "ctrl_r",
+    "dictation_secondary_key": "ctrl_l",
 }
 
 settings_lock = threading.RLock()
@@ -110,6 +113,9 @@ _SETTING_VALIDATORS: Dict[str, Callable[[object], bool]] = {
     "reduced_motion": lambda value: isinstance(value, bool),
     "audio_cues_enabled": lambda value: isinstance(value, bool),
     "audio_cue_volume": lambda value: _is_plain_int(value) and 0 <= int(value) <= 100,
+    "dictation_live_enabled": lambda value: isinstance(value, bool),
+    "dictation_primary_key": lambda value: value in {"ctrl_r", "ctrl_l", "f8", "f9", "f10"},
+    "dictation_secondary_key": lambda value: value in {"ctrl_r", "ctrl_l", "f8", "f9", "f10"},
 }
 
 def get_config_dir() -> Path:

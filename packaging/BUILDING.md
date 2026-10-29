@@ -1,4 +1,4 @@
-# Building CtrlSpeak v0.7 for Windows and Linux
+# Building CtrlSpeak 0.8 for Windows and Linux
 
 This is the maintained standard CtrlSpeak packaging path. It produces the
 stable filename `dist/CtrlSpeak.exe` on Windows or `dist/CtrlSpeak` on Linux;
@@ -60,8 +60,9 @@ From the project root:
 python -m utils.build_exe
 ```
 
-The helper selects `packaging/CtrlSpeak_v0.7.spec`. The equivalent direct
-command is:
+The helper selects `packaging/CtrlSpeak_v0.7.spec`. This maintained spec retains
+its historical filename; the app and artifact versions come from
+`utils/version.py`, not the spec filename. The equivalent direct command is:
 
 ```bash
 pyinstaller --noconfirm --clean packaging/CtrlSpeak_v0.7.spec
@@ -72,7 +73,8 @@ audio/video/text assets, collects the Whisper/CTranslate2/HTTP runtime data,
 includes the Midnight Signal UI-state/audio-cue helpers, includes the X11
 `pynput` and Linux `pystray` backends, and explicitly excludes the irrelevant
 platform input adapter. Whisper weights and Linux system CUDA/cuDNN libraries
-are not bundled.
+are not bundled. Dictation gesture, segmentation, runtime, integration and pure
+health-check modules are explicitly included in the maintained spec.
 
 Expected artifact:
 
@@ -120,7 +122,7 @@ present in the repository.
 ## Linux CUDA boundary
 
 CPU is the default. CtrlSpeak detects `libcuda.so.1` and asks CTranslate2
-whether a CUDA device is usable. The v0.5 Linux app does not install NVIDIA
+whether a CUDA device is usable. The Linux app does not install NVIDIA
 drivers, CUDA, cuDNN, modify loader configuration, or change system services.
 Provide a driver/runtime combination compatible with the installed
 CTranslate2 build, then use **Recheck system CUDA** or:
@@ -146,9 +148,9 @@ actionable message if the system runtime is not usable.
 
 ## Stable cross-platform packaging and updates
 
-On Windows the same v0.7 specification produces `CtrlSpeak.exe` with
+On Windows the same maintained specification produces `CtrlSpeak.exe` with
 `console=False`; the executable does not have a console window. Windows version
-resources identify product/file version 0.7.4. The historical v0.2-v0.6
+resources identify the current release's product/file version (0.8.0). The historical v0.2-v0.6
 specs remain in the repository for reproducibility but are no longer selected
 by the standard build helper. The Watcher option remains Windows-only and does
 not use the standard CtrlSpeak updater identity.
@@ -161,6 +163,16 @@ native behaviours. Perform the real-microphone, cues-enabled right-Ctrl stress
 pass, Windows event-log check,
 and panel show/hide/reopen pass in `docs/TESTING.md` against the exact one-file
 candidate before publishing it.
+
+For 0.8.0, `--health-check-file <path>` also runs bounded pure dictation checks
+and reports `dictation_modes.ok`, `integration_import`, `gesture_recognizer`,
+`pcm_bit_perfect`, `mute_capture_gate` and `delivery_epoch_guard`. These checks
+use synthetic in-memory PCM and fake adapters: no capture/request threads,
+microphone, keyboard hook, text insertion, real desktop target or paid provider
+is started. A failed self-test exits non-zero and cannot count as a healthy
+build. The Windows and Linux release jobs require this evidence before signing.
+This proves bundling and pure safety logic, not real microphone quality,
+AnyDesk delivery, global shortcut compatibility or live end-to-end latency.
 
 Release assets use platform-qualified names, but an installed standard copy is
 always `CtrlSpeak.exe` on Windows or `CtrlSpeak` on Linux. The signed updater

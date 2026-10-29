@@ -4,6 +4,30 @@ CtrlSpeak follows semantic versioning. Published binaries are immutable; a
 consumed release is corrected by a newer patch rather than by moving its tag or
 replacing its assets.
 
+## 0.8.0 — release candidate
+
+- Keep Hold to Talk and add Hands-free Dictation (double-tap primary key) and
+  opt-in Windows Live Dictation (primary + secondary keys). Allow distinct
+  Left/Right Ctrl or F8/F9/F10 assignments with updated on-screen hints.
+- Add isolated secondary-key mute/resume, primary-key finish and explicit
+  cancellation, with persistent mode/mute/editing/processing indicators.
+- Send Live speech in bounded phrases after 650 ms silence or 8 seconds;
+  preserve lossless audio transport and the configured provider/S1 policy.
+- Pause Live around physical editing and focus changes. Hold stale or uncertain
+  results for verified Copy/Discard rather than automatically replaying them.
+  Never rewrite committed text or submit an Enter on a user's behalf.
+- Flatten formatting only in Live and add a trusted ordinary-space separator;
+  retain Hold/Hands-free paragraph preferences and API/Telegram formatting.
+- Bound session/audio/queue/held-text resources, discard muted audio, and report
+  backlog, partial insertion and failed requests without automatic retries.
+- Add signed, user-requested rollback to 0.7.7 with settings and native
+  credential-vault preservation. Keep coordinated gateway/worker/external-helper
+  deployment; Windows installation remains a user action.
+
+Verification, packaged interactive acceptance and deployment status are recorded
+separately in [the 0.8.0 release guide](docs/V0.8.0_RELEASE.md); this entry does not
+assert that a candidate is already published or deployed.
+
 ## 0.7.7 — 2026-10-22
 
 - Replace per-character Windows injection delays with bounded, surrogate-safe

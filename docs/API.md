@@ -1,4 +1,41 @@
-# CtrlSpeak API v0.7.7
+# CtrlSpeak API v0.8.0
+
+## Desktop dictation modes and compatibility (0.8.0)
+
+The new desktop modes do **not** introduce a streaming API, session socket,
+new authentication scheme or new transcription response schema. Hold to Talk
+and Hands-free submit a completed recording through the existing endpoint.
+Opt-in Windows Live Dictation segments speech locally after approximately
+650 ms silence, or at a maximum eight-second phrase, then submits one ordinary
+transcription request per phrase. Network and inference time are additional.
+
+Each phrase uses the existing lossless audio transport, caller identity,
+provider/strategy, caller-owned OpenAI key, language policy, correction rules
+and optional `cleanup` request. Paid-provider usage and cleanup overhead can
+occur per phrase. Requests are serialized by the desktop session with a bounded
+waiting queue; this does not remove server admission limits or imply zero
+latency. Cancellation cannot recall audio already accepted by a provider or
+guarantee that it will not be billed.
+
+Live's single-line formatting and trusted-space separator are **desktop-only**
+insertion policy, applied after normal validated selection of cleaned/ordinary
+text. The gateway does not flatten `text`, `normalized_text` or
+`s1_cleaned_text`, and the worker does not change S1 formatting. Hold/Hands-free
+continue using the saved desktop formatting preference. The client-side
+`live_chunk` metadata flag is not a new public multipart request field.
+
+Live phrases are not registered for automatic whole-field Enter feedback:
+a later edited field cannot safely be attributed to just the last phrase.
+Existing explicit correction and feedback API endpoints remain available.
+
+Nova/Hermes continues calling the external CtrlSpeak command helper for each
+complete voice note. It should keep selecting one validated cleaned transcript
+when applied, otherwise ordinary `text`; no new mode parameters or transcript
+echo logic are needed. The coordinated release updates gateway, Ubuntu worker
+and the external helper at the same signed revision without patching or
+restarting Hermes. Existing 0.7.7 clients remain API-compatible, including a
+desktop deliberately rolled back to 0.7.7. See the
+[0.8.0 release and operations guide](V0.8.0_RELEASE.md).
 
 ## Admission, deadlines and diagnostics (0.7.7)
 
@@ -212,7 +249,7 @@ loaded model/runtime:
 ```json
 {
   "status": "ready",
-  "version": "0.7.5",
+  "version": "0.8.0",
   "role": "worker",
   "model": "large-v3-turbo",
   "device": "cuda",
@@ -225,7 +262,7 @@ providers permitted for the caller:
 
 ```json
 {
-  "version": "0.7.5",
+  "version": "0.8.0",
   "role": "gateway",
   "accepts_client_transcriptions": true,
   "applies_corrections": true,
@@ -497,7 +534,7 @@ binds feedback to the original transcription ID, URL, and client bearer token.
   "rule_ids": [],
   "confirmed_text": "the user-confirmed final text",
   "capture_method": "active_field_on_enter",
-  "client_metadata": {"client": "CtrlSpeak", "version": "0.7.5"}
+  "client_metadata": {"client": "CtrlSpeak", "version": "0.8.0"}
 }
 ```
 

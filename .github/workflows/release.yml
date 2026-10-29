@@ -84,6 +84,7 @@ jobs:
           if ($health.product -ne 'ctrlspeak' -or $health.version -ne $expectedVersion -or -not $health.frozen) { throw "Invalid packaged health metadata" }
           if (-not $health.audio_transport.bit_perfect) { throw "Packaged FLAC codec failed" }
           if (-not $health.request_transport.ok -or -not $health.request_transport.async_dns) { throw "Packaged cancellable HTTP/DNS runtime failed" }
+          if (-not $health.dictation_modes.ok -or -not $health.dictation_modes.pcm_bit_perfect -or -not $health.dictation_modes.mute_capture_gate -or -not $health.dictation_modes.delivery_epoch_guard) { throw "Packaged dictation-mode safety self-test failed" }
           if ($health.request_transport.event_loop -ne 'ProactorEventLoop') { throw "Windows packaged HTTP runtime must use its native network event loop" }
           $versionInfo = (Get-Item -LiteralPath .\dist\CtrlSpeak.exe).VersionInfo
           if ($versionInfo.FileVersion -ne $expectedVersion -or $versionInfo.ProductVersion -ne $expectedVersion) { throw "Invalid packaged Windows version resource" }
@@ -100,6 +101,7 @@ jobs:
           python -c "import json,os; p=json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json')); assert p['product']=='ctrlspeak' and p['version']=='${GITHUB_REF_NAME#v}' and p['frozen'] is True"
           python -c "import json,os; assert json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json'))['audio_transport']['bit_perfect'] is True"
           python -c "import json,os; p=json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json'))['request_transport']; assert p['ok'] and p['async_dns'] and p['cancellable_http']"
+          python -c "import json,os; p=json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json'))['dictation_modes']; assert p['ok'] and p['pcm_bit_perfect'] and p['mute_capture_gate'] and p['delivery_epoch_guard']"
           cp dist/CtrlSpeak release/CtrlSpeak-linux-x86_64
           chmod 755 release/CtrlSpeak-linux-x86_64
 

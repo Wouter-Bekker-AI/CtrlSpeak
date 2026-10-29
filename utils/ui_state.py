@@ -120,6 +120,136 @@ class UiSnapshot:
     error_category: str | None
 
 
+@dataclass(frozen=True)
+class DictationPresentation:
+    """Public, transcript-free view of a persistent dictation session."""
+
+    mode: str
+    mode_label: str
+    active: bool
+    muted: bool
+    editing: bool
+    pending_count: int
+    queued_count: int
+    headline: str
+    detail: str
+    hint: str
+    freeze_waveform: bool
+    notice: str | None = None
+
+
+_DICTATION_ERROR_NOTICES = {
+    "Insertion interrupted; some text may already exist. Inspect before copying pending text.":
+        "Partial insertion: inspect existing text before copying pending text.",
+    "Text held safely. Copy or discard pending text before resuming.":
+        "Text waiting: copy or discard held text before resuming.",
+    "Copy or discard pending text before resuming.":
+        "Text waiting: copy or discard held text before resuming.",
+    "Target changed. Focus the intended field, then explicitly unmute.":
+        "Target changed: focus the intended field, then explicitly unmute.",
+    "Backlog full; capture paused. Finish or cancel before continuing.":
+        "Backlog full: microphone paused; finish or cancel this session.",
+    "Backlog paused capture. Earlier audio will finish into held text; copy/discard it before resuming.":
+        "Backlog paused capture: earlier audio is finishing into held text.",
+    "Transcription is falling behind. Microphone paused; wait, then unmute.":
+        "Transcription is behind: microphone paused; wait before resuming.",
+    "Transcription failed; session paused. No automatic retry was made.":
+        "Transcription failed: session paused; no automatic retry.",
+    "Microphone failed. Session stopped; no automatic retry.":
+        "Microphone failed: session stopped; no automatic retry.",
+    "Microphone has not closed. Recording stays blocked until its owner exits.":
+        "Microphone is still closing: new recording remains blocked.",
+    "Pending text exceeded its memory limit and was truncated. Finish this session.":
+        "Pending text was truncated at its memory limit. Finish this session.",
+    "Session limit reached; finish or cancel this dictation.":
+        "Session limit reached: finish or cancel this dictation.",
+    "Recording limit reached; finish this dictation.":
+        "Recording limit reached: finish this dictation.",
+}
+
+
+def dictation_error_notice(value: object) -> str | None:
+    """Render a fixed user notice, never raw exception or transcript content."""
+    if value is None or (isinstance(value, str) and not value):
+        return None
+    fallback = "Attention required: inspect this session before continuing."
+    return _DICTATION_ERROR_NOTICES.get(value, fallback) if isinstance(value, str) else fallback
+
+
+def dictation_presentation(status: Mapping[str, object] | None) -> DictationPresentation:
+    """Keep mute precedence and copy identical across tray, window and overlay.
+
+    Only allowlisted state is displayed. In particular, an exception string or
+    transcript in a runtime snapshot must never become a status label.
+    """
+    data = status or {}
+    mode = str(data.get("mode", "hold"))
+    if mode not in {"hold", "hands_free", "live"}:
+        mode = "hold"
+    label = {"hold": "HOLD TO TALK", "hands_free": "HANDS-FREE", "live": "LIVE"}[mode]
+    active = data.get("active") is True
+    muted = active and data.get("muted") is True
+    editing = active and data.get("editing") is True
+
+    def count(key: str) -> int:
+        value = data.get(key, 0)
+        return max(0, min(999, value)) if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    pending, queued = count("pending_count"), count("queued_count")
+    notice = dictation_error_notice(data.get("error"))
+    finishing = active and (data.get("finishing") is True or data.get("stage") == "finishing")
+    primary = str(data.get("primary_label", "Right Ctrl"))
+    secondary = str(data.get("secondary_label", "Left Ctrl"))
+    allowed_keys = {"Right Ctrl", "Left Ctrl", "F8", "F9", "F10"}
+    primary = primary if primary in allowed_keys else "Right Ctrl"
+    secondary = secondary if secondary in allowed_keys else "Left Ctrl"
+    hint = f"{secondary}: mute · {primary}: finish"
+    if muted:
+        state = "MUTED"
+        detail = "No new audio retained or sent · text delivery paused"
+        hint = f"{secondary}: resume · {primary}: finish"
+    elif editing:
+        state = "PAUSED FOR EDITING"
+        detail = "Your keyboard takes priority · earlier results are held"
+    elif finishing:
+        state = "FINISHING"
+        detail = "Finishing captured speech; no automatic replay"
+        hint = "Listening stopped · Cancel stops pending work"
+    elif active and notice:
+        state = "ATTENTION"
+        detail = "Inspect this session before continuing"
+    elif active:
+        state = "LISTENING"
+        detail = "Stable phrases appear as you speak" if mode == "live" else "Recording stays on until you finish"
+        if mode == "live" and (data.get("processing") is True or data.get("stage") in {"processing", "transcribing"}):
+            detail = "Processing phrase · microphone is still listening"
+        if mode == "hold":
+            detail = "Speak while holding the record key"
+            hint = f"Release {primary} to transcribe"
+    elif pending:
+        state = "TEXT WAITING"
+        detail = "Copy or discard held text in Capture; nothing is auto-inserted"
+        hint = "Copy pending · Discard pending"
+    else:
+        state = "ATTENTION" if notice else "READY"
+        detail = "Hold, hands-free or live dictation"
+        hint = f"Hold {primary} · double-tap for hands-free"
+    if active and pending:
+        detail = f"{pending} result(s) held safely · {detail}"
+    if active and queued:
+        detail += f" · {queued} queued"
+    if notice:
+        # Put uncertainty first so even a narrow capsule preserves the warning;
+        # the larger capture panel retains the complete explanation.
+        detail = f"{notice} · {detail}"
+    return DictationPresentation(
+        mode, label, active, muted, editing, pending, queued,
+        f"{label} · {state}" if active else state,
+        detail, hint, muted or editing or not active or finishing or notice is not None,
+        notice,
+    )
+
+
 _PROVIDER_PROFILES: dict[str, ProviderProfile] = {
     "ubuntu-gpu-large-v3-turbo": ProviderProfile(
         "Ubuntu GPU", "Whisper large-v3-turbo"

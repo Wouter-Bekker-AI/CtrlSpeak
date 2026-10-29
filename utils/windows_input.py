@@ -549,7 +549,7 @@ def _release_paste_keys() -> None:
 def send_unicode_input(
     text: str, *, preserve_formatting: bool = False,
     cancel_check: CancelCheck = None, target_hwnd: int | None = None,
-    remote: bool | None = None,
+    remote: bool | None = None, append_space: bool = False,
 ) -> bool:
     """Send paced Unicode batches, returning False ONLY before any accepted input.
 
@@ -562,6 +562,8 @@ def send_unicode_input(
     text = prepare_dictation_text(text, preserve_formatting=preserve_formatting)
     if not text:
         return True
+    if append_space:
+        text += " "  # Trusted live-phrase separator, after the last sanitization.
     hwnd = target_hwnd if target_hwnd is not None else get_focused_control()
     if not hwnd:
         raise InputInsertionError("There is no focused window for text insertion.")
@@ -736,14 +738,14 @@ def try_direct_text_insert(text: str, hwnd: Optional[int] = None, *,
 
 
 def insert_text_into_focus(text: str, *, preserve_formatting: bool = False,
-                           cancel_check: CancelCheck = None) -> None:
+                           cancel_check: CancelCheck = None, append_space: bool = False) -> None:
     check_insertion_cancelled(cancel_check)
     text = prepare_dictation_text(text, preserve_formatting=preserve_formatting)
     if not text:
         return
     if not sys.platform.startswith("win"):
         check_insertion_cancelled(cancel_check)
-        pyautogui.write(text)
+        pyautogui.write(text + (" " if append_space else ""))
         return
 
     hwnd = get_focused_control()
@@ -757,17 +759,23 @@ def insert_text_into_focus(text: str, *, preserve_formatting: bool = False,
     # A False return guarantees zero text events; partial/uncertain delivery
     # raises and must never fall through into another whole-transcript route.
     if hwnd and (_FORCE_SENDINPUT or anydesk_window or console_window or hosted_remote):
+        options = {"append_space": True} if append_space else {}
         if send_unicode_input(
             text, preserve_formatting=preserve_formatting,
             cancel_check=cancel_check, target_hwnd=hwnd,
             remote=anydesk_window or hosted_remote,
+            **options,
         ):
             return
 
-    # For normal local GUI controls, try direct insertion first
+    if append_space:
+        text += " "
+    # The legacy direct route moves selection to the end of an edit control.
+    # Live chunks must respect the user's current caret instead, so use the
+    # existing caret-respecting paste/typing routes for that explicit mode.
     check_insertion_cancelled(cancel_check)
     _check_insertion_target(hwnd)
-    if (not console_window and not anydesk_window and not hosted_remote
+    if (not append_space and not console_window and not anydesk_window and not hosted_remote
             and try_direct_text_insert(text, hwnd, cancel_check=cancel_check)):
         return
 

@@ -109,10 +109,16 @@ def create_global_listener(
                 f"{exc.__class__.__name__}: {exc}"
             ) from exc
         listener_factory = keyboard.Listener
+    options = {}
+    if (platform_name or sys.platform).lower().startswith("win"):
+        # LLKHF_INJECTED: our own SendInput must never toggle shortcuts or
+        # impersonate physical typing in the live editing guard.
+        options["win32_event_filter"] = lambda message, data: not (data.flags & 0x10)
     return listener_factory(
         on_press=on_press,
         on_release=on_release,
         suppress=False,
+        **options,
     )
 
 
