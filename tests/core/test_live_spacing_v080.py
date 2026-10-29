@@ -113,4 +113,3 @@ def test_linux_live_space_survives_clipboard_and_tk_routes(monkeypatch, clipboar
     lin.insert_text_into_focus("second\t\x1b\r", append_space=True)
     lin.insert_text_into_focus("\n\t\x1b", append_space=True)
     assert delivered == ["first ", "second "]
-

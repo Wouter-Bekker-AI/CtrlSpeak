@@ -219,4 +219,3 @@ def test_rollback_handoff_preserves_installed_binary_and_credentials(tmp_path, s
     # require editing or re-signing that immutable historical binary.
     request = json.loads(transaction.health_request_path.read_text())
     assert request["schema_version"] == 1 and request["expected_version"] == "0.7.7"
-
