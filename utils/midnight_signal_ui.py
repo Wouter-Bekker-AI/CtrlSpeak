@@ -35,6 +35,7 @@ from utils.ui_state import (
 )
 from utils.audio_cues import CueKind
 from utils.update_manager import SemanticVersion
+from utils.ui_preferences import microphone_level_label
 
 
 INK = "#0B1117"
@@ -559,7 +560,7 @@ class MidnightSignalManagementMixin:
         meter_row.pack(fill=tk.X, pady=(18, 0))
         self.ms_level_var = tk.DoubleVar(value=0.0)
         ttk.Progressbar(meter_row, variable=self.ms_level_var, maximum=100, style="MS.Horizontal.TProgressbar").pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.ms_dbfs_var = tk.StringVar(value="−60.0 dBFS")
+        self.ms_dbfs_var = tk.StringVar(value=microphone_level_label(-60))
         ttk.Label(meter_row, textvariable=self.ms_dbfs_var, style="MS.Card.TLabel", width=13, anchor=tk.E).pack(side=tk.RIGHT, padx=(16, 0))
         self._build_dictation_controls(hero)
 
@@ -595,13 +596,19 @@ class MidnightSignalManagementMixin:
             volume = int(settings.get("audio_cue_volume", 30))
             overlay = bool(settings.get("overlay_enabled", True))
             reduced = bool(settings.get("reduced_motion", False))
+            technical_meter = settings.get("microphone_level_dbfs") is True
         self.ms_cues_enabled_var = tk.BooleanVar(value=cues)
         self.ms_cue_volume_var = tk.IntVar(value=volume)
         self.ms_overlay_enabled_var = tk.BooleanVar(value=overlay)
         self.ms_reduced_motion_var = tk.BooleanVar(value=reduced)
+        self.ms_meter_dbfs_var = tk.BooleanVar(value=technical_meter)
         ttk.Checkbutton(right, text="Show Hold to Talk capsule", variable=self.ms_overlay_enabled_var, style="MS.TCheckbutton", command=self._save_experience_preferences).pack(anchor=tk.W, pady=(14, 6))
         _label(right, "Hands-free and Live always show their listening/mute status.", muted=True, wraplength=410).pack(anchor=tk.W)
         ttk.Checkbutton(right, text="Use reduced motion", variable=self.ms_reduced_motion_var, style="MS.TCheckbutton", command=self._save_experience_preferences).pack(anchor=tk.W, pady=6)
+        ttk.Checkbutton(right, text="Show technical mic level (RMS dBFS)", variable=self.ms_meter_dbfs_var,
+                        style="MS.TCheckbutton", command=self._save_meter_preference).pack(anchor=tk.W, pady=6)
+        _label(right, "Default: 0–100 mic level. This changes the display, not microphone gain or recording volume.",
+               muted=True, wraplength=410, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 6))
         ttk.Checkbutton(right, text="Play short audio cues", variable=self.ms_cues_enabled_var, style="MS.TCheckbutton", command=self._save_experience_preferences).pack(anchor=tk.W, pady=6)
         _label(right, "Cue volume", muted=True).pack(anchor=tk.W, pady=(16, 3))
         scale = ttk.Scale(right, from_=0, to=100, variable=self.ms_cue_volume_var)
@@ -917,7 +924,7 @@ class MidnightSignalManagementMixin:
         meter = ttk.Frame(microphone, style="MS.Card.TFrame")
         meter.pack(fill=tk.X, pady=(8, 0))
         self.ms_route_level_var = tk.DoubleVar(value=0.0)
-        self.ms_route_dbfs_var = tk.StringVar(value="−60.0 dBFS")
+        self.ms_route_dbfs_var = tk.StringVar(value=microphone_level_label(-60))
         ttk.Progressbar(meter, variable=self.ms_route_level_var, maximum=100, style="MS.Horizontal.TProgressbar").pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Label(meter, textvariable=self.ms_route_dbfs_var, style="MS.CardMuted.TLabel", width=12, anchor=tk.E).pack(side=tk.RIGHT, padx=(8, 0))
 
@@ -1128,6 +1135,17 @@ class MidnightSignalManagementMixin:
         footer.pack(fill=tk.X, side=tk.BOTTOM)
         ttk.Button(footer, text="Hide to tray", style="MS.TButton", command=self.close).pack(side=tk.RIGHT)
         ttk.Button(footer, text="Quit CtrlSpeak", style="MS.Danger.TButton", command=self.stop_everything).pack(side=tk.RIGHT, padx=(0, 8))
+
+    def _save_meter_preference(self) -> None:
+        requested = self.ms_meter_dbfs_var.get() is True
+        with settings_lock:
+            previous = settings.get("microphone_level_dbfs") is True
+            settings["microphone_level_dbfs"] = requested
+        if not save_settings():
+            with settings_lock:
+                settings["microphone_level_dbfs"] = previous
+            self.ms_meter_dbfs_var.set(previous)
+            messagebox.showerror("Preference not saved", "Could not save the microphone-level display preference. The previous setting was restored.", parent=self.window)
 
     def _save_experience_preferences(self) -> None:
         with settings_lock:
@@ -1605,9 +1623,9 @@ class MidnightSignalManagementMixin:
         self.ms_ready_var.set("● READY" if ready else f"● {snapshot.phase.value.upper()}")
         self.ms_capture_detail_var.set(f"{snapshot.headline} · {snapshot.detail}")
         self.ms_level_var.set(snapshot.level_fraction * 100)
-        self.ms_dbfs_var.set(snapshot.level_label)
+        self.ms_dbfs_var.set(microphone_level_label(snapshot.level_dbfs))
         self.ms_route_level_var.set(snapshot.level_fraction * 100)
-        self.ms_route_dbfs_var.set(snapshot.level_label)
+        self.ms_route_dbfs_var.set(microphone_level_label(snapshot.level_dbfs))
         presentation = dictation_presentation(read_dictation_status())
         if hasattr(self, "ms_dictation_status_var"):
             self.ms_dictation_status_var.set(presentation.headline)
@@ -1834,7 +1852,7 @@ class MidnightTrayFlyout:
         mic = _card(frame, padding=(13, 10))
         mic.pack(fill=tk.X)
         self.level_var = tk.DoubleVar(value=0)
-        self.level_label_var = tk.StringVar(value="−60.0 dBFS")
+        self.level_label_var = tk.StringVar(value=microphone_level_label(-60))
         mic_header = ttk.Frame(mic, style="MS.Card.TFrame")
         mic_header.pack(fill=tk.X)
         mic_name = sysmod.get_input_device_preference() or "System default"
@@ -2016,7 +2034,7 @@ class MidnightTrayFlyout:
         else:
             self.route_var.set(f"{snapshot.headline} · {snapshot.detail}")
         self.level_var.set(snapshot.level_fraction * 100)
-        self.level_label_var.set(snapshot.level_label)
+        self.level_label_var.set(microphone_level_label(snapshot.level_dbfs))
         status = read_dictation_status()
         presentation = dictation_presentation(status)
         if hasattr(self, "dictation_var"):

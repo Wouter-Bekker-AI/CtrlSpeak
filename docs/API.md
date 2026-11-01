@@ -1,4 +1,10 @@
-# CtrlSpeak API v0.8.3
+# CtrlSpeak API v0.8.4
+
+0.8.4 changes desktop microphone-level presentation and Windows shortcut tracking.
+The saved `microphone_level_dbfs` preference is desktop-only and is not sent to
+the gateway. All transcription/correction/cleanup/authentication and external
+helper contracts are unchanged; fleet version metadata reports 0.8.4. See
+[0.8.4 release details](V0.8.4_RELEASE.md).
 
 0.8.3 adds a simulation-only desktop keyboard guide. Gateway, worker and external
 helper report 0.8.3; no transcription endpoint, authentication, correction,
@@ -265,7 +271,7 @@ loaded model/runtime:
 ```json
 {
   "status": "ready",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "role": "worker",
   "model": "large-v3-turbo",
   "device": "cuda",
@@ -278,7 +284,7 @@ providers permitted for the caller:
 
 ```json
 {
-  "version": "0.8.3",
+  "version": "0.8.4",
   "role": "gateway",
   "accepts_client_transcriptions": true,
   "applies_corrections": true,
@@ -550,7 +556,7 @@ binds feedback to the original transcription ID, URL, and client bearer token.
   "rule_ids": [],
   "confirmed_text": "the user-confirmed final text",
   "capture_method": "active_field_on_enter",
-  "client_metadata": {"client": "CtrlSpeak", "version": "0.8.3"}
+  "client_metadata": {"client": "CtrlSpeak", "version": "0.8.4"}
 }
 ```
 

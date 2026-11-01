@@ -89,6 +89,7 @@ jobs:
           if (-not $health.dictation_modes.ok -or -not $health.dictation_modes.pcm_bit_perfect -or -not $health.dictation_modes.mute_capture_gate -or -not $health.dictation_modes.delivery_epoch_guard) { throw "Packaged dictation-mode safety self-test failed" }
           if (-not $health.differential_updates.ok -or -not $health.differential_updates.byte_identical) { throw "Packaged differential-update roundtrip failed" }
           if (-not $health.keyboard_guide.ok -or -not $health.keyboard_guide.simulation_only -or $health.keyboard_guide.modes -ne 3) { throw "Packaged keyboard guide self-test failed" }
+          if (-not $health.microphone_meter.ok -or $health.microphone_meter.default_scale -ne '0-100' -or -not $health.dictation_modes.stable_key_identity) { throw "Packaged meter/key identity self-test failed" }
           if ($health.request_transport.event_loop -ne 'ProactorEventLoop') { throw "Windows packaged HTTP runtime must use its native network event loop" }
           $versionInfo = (Get-Item -LiteralPath .\dist\CtrlSpeak.exe).VersionInfo
           if ($versionInfo.FileVersion -ne $expectedVersion -or $versionInfo.ProductVersion -ne $expectedVersion) { throw "Invalid packaged Windows version resource" }
@@ -108,6 +109,7 @@ jobs:
           python -c "import json,os; p=json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json'))['dictation_modes']; assert p['ok'] and p['pcm_bit_perfect'] and p['mute_capture_gate'] and p['delivery_epoch_guard']"
           python -c "import json,os; p=json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json'))['differential_updates']; assert p['ok'] and p['byte_identical']"
           python -c "import json,os; p=json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json'))['keyboard_guide']; assert p['ok'] and p['simulation_only'] and p['modes']==3"
+          python -c "import json,os; p=json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json')); assert p['microphone_meter']['ok'] and p['microphone_meter']['default_scale']=='0-100' and p['dictation_modes']['stable_key_identity']"
           cp dist/CtrlSpeak release/CtrlSpeak-linux-x86_64
           chmod 755 release/CtrlSpeak-linux-x86_64
 

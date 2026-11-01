@@ -374,6 +374,17 @@ def dbfs_to_fraction(value: object, *, floor: float = DBFS_FLOOR) -> float:
     return clamp((clamp(dbfs, floor, 0.0) - floor) / -floor, 0.0, 1.0)
 
 
+def format_microphone_level(value: object, *, show_dbfs: bool = False) -> str:
+    """Friendly 0–100 position on the existing -60..0 RMS-dBFS meter.
+
+    This is a display scale, not percentage amplitude, gain or calibrated SPL.
+    Preserve the underlying RMS measurement and smoothing for both readouts.
+    """
+    if show_dbfs:
+        return format_dbfs(value)
+    return f"{int(dbfs_to_fraction(value) * 100 + 0.5)} / 100"
+
+
 def pcm16_dbfs(frames: bytes | bytearray | memoryview, *, floor: float = DBFS_FLOOR) -> float:
     """Return RMS dBFS for interleaved signed 16-bit PCM without NumPy.
 

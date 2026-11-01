@@ -4,6 +4,21 @@ CtrlSpeak follows semantic versioning. Published binaries are immutable; a
 consumed release is corrected by a newer patch rather than by moving its tag or
 replacing its assets.
 
+## 0.8.4 — 2026-11-02
+
+- Default numeric microphone readouts to 0–100, with a saved Capture checkbox
+  for RMS dBFS. Apply it live across Hold capsules, Capture/Routing and flyout.
+  Keep audio gain, waveform, RMS smoothing, VAD and transcription unchanged.
+- Fix a reproduced Windows gesture bug: modifier-dependent character changes
+  between press/release could strand phantom held keys and block Right Ctrl.
+  Track stable virtual-key identities only for gestures; preserve translated
+  feedback events, injected-input filtering and editing-chord safeguards.
+- Give a rate-limited readiness notice when a committed hold cannot start,
+  instead of silently dropping it. Never start later automatically.
+- Add formatter/settings/overlay/key regression checks, native Tk persistence
+  and layout QA, and packaged meter/physical-key identity health gates.
+- Preserve differential updates, coordinated fleet versions and 0.7.7 rollback.
+
 ## 0.8.3 — 2026-11-02
 
 - Add a Midnight Signal Guide page and Capture shortcut with native vector

@@ -138,3 +138,25 @@ def key_name(key: Any) -> str:
 
 def is_right_control(key: Any) -> bool:
     return key_name(key) == "ctrl_r"
+
+
+def gesture_key_name(key: Any, *, platform_name: str | None = None) -> str:
+    """Stable press/release identity, separate from translated feedback text.
+
+    Windows pynput translates a printable key using the *current* modifiers on
+    each event. Releasing Ctrl/Shift before the letter can therefore change its
+    char (Ctrl+C's '\\x03' -> 'c', '!' -> '1'). Tracking that char strands a
+    phantom held key and blocks subsequent gestures. Use VK identity for the
+    recognizer only; feedback still receives the original key object.
+    """
+    name = key_name(key)
+    if not (platform_name or sys.platform).startswith("win"):
+        return name
+    vk = getattr(key, "vk", None)
+    if vk is None:
+        vk = getattr(getattr(key, "value", None), "vk", None)
+    if not isinstance(vk, int) or isinstance(vk, bool) or not 0 < vk <= 255:
+        return name
+    controls = {0x11: "ctrl_l", 0xA2: "ctrl_l", 0xA3: "ctrl_r",
+                0x77: "f8", 0x78: "f9", 0x79: "f10", 0x1B: "esc"}
+    return controls.get(vk, f"vk:{vk}")

@@ -737,7 +737,7 @@ def test_recording_capsule_has_ordered_regions_and_real_ten_bar_waveform() -> No
     ]
     assert len(waveform_lines) == 10
     text = [call[2].get("text") for call in canvas.calls if call[0] == "text"]
-    assert {"4.2s", "LISTENING", "Release Right Ctrl to transcribe", "-18.0 dBFS"} <= set(text)
+    assert {"4.2s", "LISTENING", "Release Right Ctrl to transcribe", "70 / 100"} <= set(text)
 
 
 def test_processing_capsule_uses_long_double_orbit_and_never_a_provider_orbit(
@@ -826,7 +826,7 @@ def test_compact_recording_and_processing_keep_required_truthful_copy(
     assert "LISTENING" in recording_text
     assert "release Right Ctrl" in recording_text
     assert "4.2s" in recording_text
-    assert "-18.0 dBFS" in recording_text
+    assert "70 / 100" in recording_text
     assert len(
         [
             call

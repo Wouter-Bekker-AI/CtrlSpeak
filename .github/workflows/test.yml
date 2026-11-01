@@ -2,7 +2,7 @@ name: CtrlSpeak tests
 
 on:
   push:
-    branches: [v0.7, 'codex/lossless-transport-*', 'codex/safe-dictation-*', 'codex/reliability-*', 'codex/dictation-modes-*', 'codex/differential-updates-*', 'codex/keyboard-guide-*']
+    branches: [v0.7, 'codex/lossless-transport-*', 'codex/safe-dictation-*', 'codex/reliability-*', 'codex/dictation-modes-*', 'codex/differential-updates-*', 'codex/keyboard-guide-*', 'codex/mic-level-*']
   pull_request:
     branches: [v0.7]
 
@@ -46,12 +46,16 @@ jobs:
 
       - name: Native Windows keyboard guide smoke check
         if: runner.os == 'Windows'
-        run: python scripts/preview_keyboard_guide.py --verify
+        run: |
+          python scripts/preview_keyboard_guide.py --verify
+          python scripts/verify_microphone_meter.py
         timeout-minutes: 2
 
       - name: Native Linux keyboard guide smoke check
         if: runner.os == 'Linux'
-        run: xvfb-run -a python scripts/preview_keyboard_guide.py --verify
+        run: |
+          xvfb-run -a python scripts/preview_keyboard_guide.py --verify
+          xvfb-run -a python scripts/verify_microphone_meter.py
         timeout-minutes: 2
 
       - name: Check diff whitespace

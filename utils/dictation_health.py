@@ -29,12 +29,16 @@ def dictation_health_self_test() -> dict[str, object]:
     # Deliberately import the wiring module too. Missing PyInstaller inclusion
     # must fail the build rather than first appearing when a user presses Ctrl.
     from utils.dictation_integration import DesktopDictationController, KEY_LABELS
-    from utils.hotkeys import key_name
+    from utils.hotkeys import key_name, gesture_key_name
+    from types import SimpleNamespace
 
     _require(callable(DesktopDictationController), "controller import")
     _require(KEY_LABELS.get("ctrl_r") == "Right Ctrl", "key labels")
     _require(key_name("Key.ctrl") == "ctrl_l" and key_name("Key.ctrl_r") == "ctrl_r",
              "generic Control normalization")
+    _require(gesture_key_name(SimpleNamespace(char="\x03", vk=67), platform_name="win32")
+             == gesture_key_name(SimpleNamespace(char="c", vk=67), platform_name="win32"),
+             "stable physical key identity")
 
     gestures = DictationGestures()
     _require(gestures.press("ctrl_r", now=0) == (), "provisional hold")
@@ -102,4 +106,5 @@ def dictation_health_self_test() -> dict[str, object]:
              "no capture or request worker")
     return {"schema": 1, "ok": True, "integration_import": True,
             "gesture_recognizer": True, "pcm_bit_perfect": True,
-            "mute_capture_gate": True, "delivery_epoch_guard": True}
+            "mute_capture_gate": True, "delivery_epoch_guard": True,
+            "stable_key_identity": True}

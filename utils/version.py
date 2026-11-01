@@ -1,3 +1,3 @@
 """Single source of truth for the CtrlSpeak application version."""
 
-APP_VERSION = "0.8.3"
+APP_VERSION = "0.8.4"

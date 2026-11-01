@@ -24,7 +24,8 @@ def test_packaged_dictation_smoke_has_no_runtime_side_effects(monkeypatch):
     result = dictation_health_self_test()
     assert result == {"schema": 1, "ok": True, "integration_import": True,
                       "gesture_recognizer": True, "pcm_bit_perfect": True,
-                      "mute_capture_gate": True, "delivery_epoch_guard": True}
+                      "mute_capture_gate": True, "delivery_epoch_guard": True,
+                      "stable_key_identity": True}
 
 
 def test_packaged_smoke_detects_broken_gesture_recognition(monkeypatch):

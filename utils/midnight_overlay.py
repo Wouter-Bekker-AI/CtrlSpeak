@@ -18,6 +18,7 @@ import tkinter as tk
 
 from utils.config_paths import app_icon_path
 from utils.ui_state import UiPhase, UiSnapshot, DictationPresentation, dictation_presentation
+from utils.ui_preferences import microphone_level_label
 
 
 CHROMA_KEY = "#010203"
@@ -966,7 +967,7 @@ class MidnightSignalOverlay:
                 width=max(1.0, width - layout.status_x - 12.0),
             )
             self._text(
-                canvas, layout.dbfs_x, timer_y, state.level_label,
+                canvas, layout.dbfs_x, timer_y, microphone_level_label(state.level_dbfs),
                 anchor="e", fill=TEXT_MUTED, font=("Segoe UI", 8),
             )
             return
@@ -979,7 +980,7 @@ class MidnightSignalOverlay:
             font=("Segoe UI Semibold", 10),
         )
         self._text(
-            canvas, layout.dbfs_x, 31, state.level_label,
+            canvas, layout.dbfs_x, 31, microphone_level_label(state.level_dbfs),
             anchor="e", fill=TEXT_MUTED, font=("Segoe UI", 9),
         )
 

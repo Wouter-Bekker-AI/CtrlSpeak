@@ -106,6 +106,7 @@ common_hiddenimports = [
     'utils.midnight_overlay',
     'utils.midnight_signal_ui',
     'utils.ui_state',
+    'utils.ui_preferences',
     'utils.ui_theme',
     'utils.update_manager',
     'utils.update_helper',

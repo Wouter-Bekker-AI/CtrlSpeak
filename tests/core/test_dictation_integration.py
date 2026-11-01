@@ -181,6 +181,36 @@ def test_normal_hold_commits_once_and_uses_existing_release_pipeline(build_contr
     assert not controller.hold_committed
 
 
+@pytest.mark.parametrize("before,after,vk", [("\x03","c",67),("!","1",49),("é","e",69)])
+def test_character_changes_on_release_never_leave_phantom_keys_blocking_ctrl(build_controller,before,after,vk):
+    controller,host,clock=build_controller()
+    controller.press("ctrl_l")
+    controller.press(SimpleNamespace(char=before,vk=vk))
+    controller.release("ctrl_l")
+    controller.release(SimpleNamespace(char=after,vk=vk))
+    assert controller.gestures.keys_down==frozenset()
+    controller.press("ctrl_r")
+    commit_hold(controller,clock)
+    assert host.recording and controller.hold_committed
+    controller.release("ctrl_r")
+    assert host.releases==["Key.ctrl_r"]
+
+
+def test_blocked_hold_reports_busy_once_without_auto_starting_later(build_controller):
+    controller,host,clock=build_controller()
+    host.cleanup_pending=True
+    controller.press("ctrl_r")
+    commit_hold(controller,clock)
+    assert not host.recording and not controller.hold_committed
+    assert "still finishing" in host.notifications[-1]
+    host.cleanup_pending=False
+    commit_hold(controller,clock)
+    assert len(host.notifications)==1 and not host.recording
+    controller.release("ctrl_r")
+    controller.press("ctrl_r");commit_hold(controller,clock)
+    assert host.recording and controller.hold_committed
+
+
 def test_double_tap_queues_hands_free_while_first_capture_is_being_reaped(build_controller):
     controller, host, clock = build_controller()
     tap(controller, clock, "ctrl_r")

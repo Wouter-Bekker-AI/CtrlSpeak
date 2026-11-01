@@ -155,6 +155,7 @@ def test_recording_and_processing_use_the_same_loaded_ctrlspeak_artwork(monkeypa
         SimpleNamespace(
             elapsed_label="1.0s",
             level_fraction=0.5,
+            level_dbfs=-24.0,
             level_label="-24.0 dBFS",
         ),
     )
@@ -198,6 +199,7 @@ def test_recording_and_processing_fail_safe_to_brand_silhouette(monkeypatch) -> 
         SimpleNamespace(
             elapsed_label="1.0s",
             level_fraction=0.5,
+            level_dbfs=-24.0,
             level_label="-24.0 dBFS",
         ),
     )

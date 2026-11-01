@@ -9,7 +9,7 @@ import wave
 
 from utils.dictation_modes import DictationGestures, DictationMode, GestureAction
 from utils.dictation_runtime import DictationSession
-from utils.hotkeys import key_name
+from utils.hotkeys import gesture_key_name
 from utils.request_control import request_control
 
 
@@ -68,6 +68,7 @@ class DesktopDictationController:
         self.hold_committed = False
         self.provisional = False
         self.pending_start: tuple[str, float] | None = None
+        self._last_start_notice = float("-inf")
         self.stop = threading.Event()
         self.mouse = None
         self.mouse_ready = False
@@ -130,7 +131,7 @@ class DesktopDictationController:
         if self.sending.is_set() and not sys.platform.startswith("win"):
             return
         self.host._observe_pynput_press(key)
-        name = key_name(key)
+        name = gesture_key_name(key)
         with self.lock:
             if self._closed or not self.host.client_enabled:
                 return
@@ -156,7 +157,7 @@ class DesktopDictationController:
         if self.sending.is_set() and not sys.platform.startswith("win"):
             return
         self.host._observe_pynput_release(key)
-        name = key_name(key)
+        name = gesture_key_name(key)
         with self.lock:
             if self._closed:
                 return
@@ -188,6 +189,17 @@ class DesktopDictationController:
                     self.host._hold_gesture_tentative = False
                     self.host._show_recording_overlay()
                     self.host.play_ui_cue(self.host.CueKind.RECORDING_STARTED)
+                else:
+                    # Do not start belatedly when a previous request releases
+                    # the mic. Explain the rejected hold, with bounded noise.
+                    now = time.monotonic()
+                    if now - self._last_start_notice >= 2.0:
+                        self._last_start_notice = now
+                        busy = self.host.is_transcription_busy()
+                        self.host.logger.warning("Recording shortcut ignored [%s]", "busy" if busy else "not_ready")
+                        self.host.notify(
+                            "The previous transcription or microphone cleanup is still finishing. Release the recording key and try again when ready."
+                            if busy else "Recording could not start. Check Capture for client/microphone status, then release the recording key and try again.")
             elif action in {GestureAction.START_HANDS_FREE, GestureAction.START_LIVE}:
                 mode = "live" if action == GestureAction.START_LIVE else "hands_free"
                 self.pending_start = (mode, time.monotonic() + 1.0)

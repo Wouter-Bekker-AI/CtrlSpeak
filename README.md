@@ -1,4 +1,19 @@
-# CtrlSpeak v0.8.3
+# CtrlSpeak v0.8.4
+
+## Friendly microphone levels and steadier shortcuts
+
+Microphone readouts now default to **0–100**, matching the existing meter bar.
+In **Capture → Capture feedback**, check **Show technical mic level (RMS dBFS)**
+for the technical readout. The choice is saved and applies to the recording
+capsule, Capture/Routing meters and tray flyout. Muted/paused status stays clear.
+This is a display scale, not a gain control: 0 maps to −60 dBFS or quieter,
+50 to −30 dBFS and 100 to 0 dBFS. Audio, transcription and input gain are unchanged.
+
+Windows gesture tracking now uses stable physical key identities, preventing
+Ctrl/Shift-dependent characters from leaving phantom held keys that block the
+next recording shortcut. A hold rejected while processing/cleanup is busy now
+gets a short readiness notice; recording does not start belatedly on its own.
+See [0.8.4 evidence and rollout](docs/V0.8.4_RELEASE.md).
 
 ## Animated keyboard guide
 
