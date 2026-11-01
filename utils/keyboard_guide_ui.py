@@ -31,7 +31,7 @@ class KeyboardGuide(ttk.Frame):
         self._seen = False
         self.mode_buttons = {}
         ttk.Label(self, text="Your keys. Your flow.", style="MS.Title.TLabel", background="#111A22").pack(anchor="w")
-        ttk.Label(self, text="Learn the gestures without recording a word.", style="MS.Surface.TLabel",
+        ttk.Label(self, text="Watch the demo here. Practice in your destination text field.", style="MS.Surface.TLabel",
                   foreground=MUTED).pack(anchor="w", pady=(5, 16))
         modes = ttk.Frame(self, style="MS.Surface.TFrame")
         modes.pack(fill="x", pady=(0, 14))
@@ -199,7 +199,7 @@ class KeyboardGuide(ttk.Frame):
             self.detail_var.set(step.detail)
             self.counter_var.set(f"{self.playback.index+1:02d} / {len(lesson.steps):02d}")
             self.availability_var.set(lesson.availability)
-            self.safety_var.set(lesson.safety)
+            self.safety_var.set("Use the playback buttons here; real keyboard shortcuts still control CtrlSpeak globally. " + lesson.safety)
         for mode, button in self.mode_buttons.items():
             button.configure(style="MS.Primary.TButton" if mode == lesson.mode else "MS.TButton")
         self.play_button.configure(text="Pause" if self.playback.playing else "Play demo",
