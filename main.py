@@ -71,10 +71,12 @@ def main(argv: list[str]) -> int:
             from utils.cancellable_http import request_transport_self_test
             from utils.dictation_health import dictation_health_self_test
             from utils.binary_delta import self_test as delta_self_test
+            from utils.keyboard_guide import guide_self_test
             audio_transport = self_test()
             request_transport = request_transport_self_test()
             dictation_modes = dictation_health_self_test()
             differential_updates = delta_self_test()
+            keyboard_guide = guide_self_test()
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(
                 json.dumps(
@@ -87,6 +89,7 @@ def main(argv: list[str]) -> int:
                         "request_transport": request_transport,
                         "dictation_modes": dictation_modes,
                         "differential_updates": differential_updates,
+                        "keyboard_guide": keyboard_guide,
                     },
                     sort_keys=True,
                 )

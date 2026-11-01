@@ -101,6 +101,8 @@ common_hiddenimports = [
     'utils.dictation_runtime',
     'utils.dictation_integration',
     'utils.dictation_health',
+    'utils.keyboard_guide',
+    'utils.keyboard_guide_ui',
     'utils.midnight_overlay',
     'utils.midnight_signal_ui',
     'utils.ui_state',

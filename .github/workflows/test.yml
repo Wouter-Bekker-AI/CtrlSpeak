@@ -2,7 +2,7 @@ name: CtrlSpeak tests
 
 on:
   push:
-    branches: [v0.7, 'codex/lossless-transport-*', 'codex/safe-dictation-*', 'codex/reliability-*', 'codex/dictation-modes-*', 'codex/differential-updates-*']
+    branches: [v0.7, 'codex/lossless-transport-*', 'codex/safe-dictation-*', 'codex/reliability-*', 'codex/dictation-modes-*', 'codex/differential-updates-*', 'codex/keyboard-guide-*']
   pull_request:
     branches: [v0.7]
 
@@ -28,7 +28,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-tk portaudio19-dev libportaudio2 xclip libx11-6 libxtst6 libxinerama1 libxrandr2 libxi6
+          sudo apt-get install -y python3-tk portaudio19-dev libportaudio2 xclip libx11-6 libxtst6 libxinerama1 libxrandr2 libxi6 xvfb
 
       - name: Install Python dependencies
         run: |
@@ -43,6 +43,16 @@ jobs:
 
       - name: Compile Python sources
         run: python -m compileall main.py utils scripts tests
+
+      - name: Native Windows keyboard guide smoke check
+        if: runner.os == 'Windows'
+        run: python scripts/preview_keyboard_guide.py --verify
+        timeout-minutes: 2
+
+      - name: Native Linux keyboard guide smoke check
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python scripts/preview_keyboard_guide.py --verify
+        timeout-minutes: 2
 
       - name: Check diff whitespace
         run: git diff --check

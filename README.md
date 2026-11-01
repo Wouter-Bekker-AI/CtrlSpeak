@@ -1,4 +1,18 @@
-# CtrlSpeak v0.8.2
+# CtrlSpeak v0.8.3
+
+## Animated keyboard guide
+
+Open **Control center → Guide**, or **Animated keyboard guide** on Capture.
+Choose Hold to Talk, Hands-free or Live to watch the configured keys press and
+release alongside simulated listening, mute/resume, processing and text output.
+Use Play/Pause, Replay or Previous/Next to learn at your pace. Remapped F8/F9/F10
+keys are reflected too. Reduced motion uses manually stepped still frames.
+The guide never records audio, sends real keystrokes or calls a provider.
+
+Live remains a Windows-only opt-in, with committed phrases rather than streaming
+words; the guide shows its actual availability. It also explains editing/held
+results, AnyDesk limitations and paid-provider usage. No dictation shortcut or
+capture behavior changes in this release. See [0.8.3 details](docs/V0.8.3_RELEASE.md).
 
 ## Smaller updates from 0.8.2 onward
 
@@ -10,7 +24,7 @@ the fallback. The Updates page shows the selected method, transfer size and a
 redacted receipt for the last installed update.
 
 **Installing 0.8.2 from 0.8.1 is still a full download:** this installs the patch
-decoder. The planned 0.8.3 animated mode guide will be the first user acceptance
+decoder. 0.8.3's animated mode guide is the first user acceptance
 test of upgrading from 0.8.2 using a smaller patch. Skipping releases is allowed;
 direct patches cover up to three recent patch-aware bases, otherwise download
 the full release. See [0.8.2 details](docs/V0.8.2_RELEASE.md).

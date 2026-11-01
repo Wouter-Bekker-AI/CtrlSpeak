@@ -1,5 +1,12 @@
 # Building CtrlSpeak 0.8 for Windows and Linux
 
+0.8.3 includes `utils.keyboard_guide` and its native Tk widget in the standard
+package. `--health-check-file` must report `keyboard_guide.ok`, three modes and
+`simulation_only: true`. The source native UI verifier is
+`python scripts/preview_keyboard_guide.py --verify` (use `xvfb-run -a` on a
+headless Linux host); it creates an isolated temporary profile and no input or
+audio adapters. Real user GUI patch-install acceptance remains a separate step.
+
 This is the maintained standard CtrlSpeak packaging path. It produces the
 stable filename `dist/CtrlSpeak.exe` on Windows or `dist/CtrlSpeak` on Linux;
 it does not install the result, create a desktop

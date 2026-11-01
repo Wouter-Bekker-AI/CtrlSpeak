@@ -446,7 +446,7 @@ class MidnightSignalManagementMixin:
         self.ms_page_tabs: dict[str, ttk.Frame] = {}
         self.ms_page_canvases: dict[str, tk.Canvas] = {}
         self.ms_page_horizontal_scrollbars: dict[str, ttk.Scrollbar] = {}
-        for name in ("Capture", "Transcription", "Routing", "Corrections", "Updates", "System"):
+        for name in ("Capture", "Guide", "Transcription", "Routing", "Corrections", "Updates", "System"):
             tab = ttk.Frame(self.ms_notebook, style="MS.Surface.TFrame")
             tab.rowconfigure(0, weight=1)
             tab.columnconfigure(0, weight=1)
@@ -493,11 +493,13 @@ class MidnightSignalManagementMixin:
             self.ms_page_horizontal_scrollbars[name] = horizontal
             self.ms_notebook.add(tab, text=name.upper())
         self._build_capture_page(self.ms_pages["Capture"])
+        self._build_keyboard_guide_page(self.ms_pages["Guide"])
         self._build_transcription_page(self.ms_pages["Transcription"])
         self._build_routing_page(self.ms_pages["Routing"])
         self._build_corrections_page(self.ms_pages["Corrections"])
         self._build_updates_page(self.ms_pages["Updates"])
         self._build_system_page(self.ms_pages["System"])
+        self.ms_notebook.bind("<<NotebookTabChanged>>", self._keyboard_guide_visibility, add="+")
         self.window.bind("<MouseWheel>", self._scroll_management_wheel, add="+")
         self.window.bind("<Shift-MouseWheel>", self._scroll_management_horizontal, add="+")
         self.window.bind("<Button-4>", lambda _event: self._scroll_active_management_page(-3), add="+")
@@ -548,6 +550,8 @@ class MidnightSignalManagementMixin:
         hero = _card(page, padding=(26, 22))
         hero.pack(fill=tk.X)
         ttk.Label(hero, text="Your voice, three ways", style="MS.Section.TLabel").pack(anchor=tk.W)
+        ttk.Button(hero, text="Animated keyboard guide →", style="MS.Compact.TButton",
+                   command=lambda: self.ms_notebook.select(self.ms_page_tabs["Guide"])).pack(anchor=tk.E)
         self.ms_capture_detail_var = tk.StringVar(value="Ready · release the key when you finish")
         ttk.Label(hero, textvariable=self.ms_capture_detail_var, style="MS.CardMuted.TLabel", wraplength=880,
                   justify=tk.LEFT).pack(anchor=tk.W, pady=(6, 0))
@@ -670,6 +674,37 @@ class MidnightSignalManagementMixin:
             f"Hold {primary}: Hold to Talk  ·  Double-tap {primary}: Hands-free\n"
             f"{secondary} + {primary}: Live  ·  During hands-free/live, tap {secondary}: mute/resume; tap {primary}: finish"
         )
+        self._sync_keyboard_guide()
+
+    def _build_keyboard_guide_page(self, page: ttk.Frame) -> None:
+        from utils.keyboard_guide_ui import KeyboardGuide
+        from utils.keyboard_guide import effective_keys
+        with settings_lock:
+            primary = str(settings.get("dictation_primary_key", "ctrl_r"))
+            secondary = str(settings.get("dictation_secondary_key", "ctrl_l"))
+            reduced = bool(settings.get("reduced_motion", False))
+            live = settings.get("dictation_live_enabled") is True
+        primary, secondary = effective_keys(primary, secondary)
+        self.ms_keyboard_guide = KeyboardGuide(page, primary=primary, secondary=secondary,
+                                               reduced_motion=reduced, live_enabled=live)
+        self.ms_keyboard_guide.pack(fill=tk.BOTH, expand=True)
+
+    def _sync_keyboard_guide(self) -> None:
+        from utils.keyboard_guide import effective_keys
+        guide = getattr(self, "ms_keyboard_guide", None)
+        if guide is not None:
+            with settings_lock:
+                primary, secondary = effective_keys(str(settings.get("dictation_primary_key", "ctrl_r")),
+                                                    str(settings.get("dictation_secondary_key", "ctrl_l")))
+                guide.configure_keys(primary, secondary,
+                                     reduced_motion=bool(settings.get("reduced_motion", False)),
+                                     live_enabled=settings.get("dictation_live_enabled") is True)
+
+    def _keyboard_guide_visibility(self, _event=None) -> None:
+        guide = getattr(self, "ms_keyboard_guide", None)
+        if guide is not None:
+            self._sync_keyboard_guide()
+            guide.set_visible(self.ms_notebook.select() == str(self.ms_page_tabs["Guide"]))
 
     def _apply_dictation_keys(self) -> None:
         reverse = {label: key for key, label in DICTATION_KEY_LABELS.items()}
@@ -685,6 +720,7 @@ class MidnightSignalManagementMixin:
     def _set_live_dictation_enabled(self) -> None:
         if self.ms_live_enabled_var.get():
             self.ms_live_enabled_var.set(confirm_live_dictation(self.window))
+            self._sync_keyboard_guide()
             return
         with settings_lock:
             previous = settings.get("dictation_live_enabled") is True
@@ -694,6 +730,7 @@ class MidnightSignalManagementMixin:
                 settings["dictation_live_enabled"] = previous
             self.ms_live_enabled_var.set(previous)
             messagebox.showerror("Preference not saved", "Could not save the Live Dictation preference.", parent=self.window)
+        self._sync_keyboard_guide()
 
     def _start_dictation_mode(self, mode: str) -> None:
         if mode == "live" and not confirm_live_dictation(self.window):
@@ -1099,6 +1136,7 @@ class MidnightSignalManagementMixin:
             settings["audio_cues_enabled"] = bool(self.ms_cues_enabled_var.get())
             settings["audio_cue_volume"] = max(0, min(100, int(round(self.ms_cue_volume_var.get()))))
         save_settings()
+        self._sync_keyboard_guide()
         if hasattr(self, "ms_route_cue_var"):
             enabled = bool(self.ms_cues_enabled_var.get())
             volume = max(0, min(100, int(round(self.ms_cue_volume_var.get()))))
@@ -1650,6 +1688,9 @@ class MidnightSignalManagementMixin:
     def close(self) -> None:
         from utils import gui as gui_module
 
+        guide = getattr(self, "ms_keyboard_guide", None)
+        if guide is not None:
+            guide.shutdown()
         self._capability_generation += 1
         self._corrections_generation += 1
         self._correction_mutation_generation += 1

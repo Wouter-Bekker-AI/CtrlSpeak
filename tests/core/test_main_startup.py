@@ -129,6 +129,7 @@ def test_packaged_health_check_file_exits_before_normal_startup(tmp_path, monkey
     assert payload["dictation_modes"]["pcm_bit_perfect"] is True
     assert payload["dictation_modes"]["mute_capture_gate"] is True
     assert payload["dictation_modes"]["delivery_epoch_guard"] is True
+    assert payload["keyboard_guide"] == {"ok": True, "modes": 3, "simulation_only": True}
     assert payload["differential_updates"]["ok"] is True
     assert payload["differential_updates"]["byte_identical"] is True
 

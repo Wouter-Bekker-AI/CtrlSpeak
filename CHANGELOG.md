@@ -4,6 +4,24 @@ CtrlSpeak follows semantic versioning. Published binaries are immutable; a
 consumed release is corrected by a newer patch rather than by moving its tag or
 replacing its assets.
 
+## 0.8.3 — 2026-11-02
+
+- Add a Midnight Signal Guide page and Capture shortcut with native vector
+  keyboard animations for Hold to Talk, Hands-free and Live Dictation.
+- Demonstrate configured primary/secondary keys, press/release sequences,
+  listening, mute/resume, stable live phrases, editing/held results and finish.
+  The preview never records, injects input or calls a transcription provider.
+- Add Play/Pause, Replay and step controls; respect reduced motion, pause on
+  tab changes, and cancel owned timers when the control center closes.
+- Show actual Live availability and explain opt-in, cloud costs, editing
+  shortcuts, cancellation and AnyDesk limitations without changing capture.
+- Publish signed direct 0.8.2 → 0.8.3 executable patches for the first GUI
+  patching acceptance trial; keep verified full fallback and 0.7.7 rollback.
+- Coordinate gateway, worker and external Nova helper version metadata. The
+  transcription API and Hermes integration contract remain unchanged.
+
+See [verification and deployment status](docs/V0.8.3_RELEASE.md).
+
 ## 0.8.2 — 2026-10-29
 
 - Add signed VCDIFF executable patches, exact base-version/size/SHA-256

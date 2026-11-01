@@ -22,6 +22,9 @@
     <category>Accessibility</category>
   </categories>
   <releases>
+    <release version="0.8.3" date="2026-11-02">
+      <description><p>Adds a safe animated keyboard guide for Hold to Talk, Hands-free and Live Dictation, with configured keys, mute/resume, playback controls and reduced-motion still frames. Supports signed differential updating from 0.8.2.</p></description>
+    </release>
     <release version="0.8.2" date="2026-10-29">
       <description><p>Adds signed differential executable updates with exact-base checks, local reconstruction and full-download fallback. Existing update rollback and installation health checks remain in place.</p></description>
     </release>

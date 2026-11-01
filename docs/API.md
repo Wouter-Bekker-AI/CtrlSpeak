@@ -1,4 +1,9 @@
-# CtrlSpeak API v0.8.2
+# CtrlSpeak API v0.8.3
+
+0.8.3 adds a simulation-only desktop keyboard guide. Gateway, worker and external
+helper report 0.8.3; no transcription endpoint, authentication, correction,
+cleanup or Hermes integration contract changed. The guide does not call the API.
+See [0.8.3 guide and patch-update acceptance](V0.8.3_RELEASE.md).
 
 0.8.2 introduces desktop differential updates, not a transcription API change.
 Gateway, worker and external-helper version metadata is aligned; requests,
@@ -260,7 +265,7 @@ loaded model/runtime:
 ```json
 {
   "status": "ready",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "role": "worker",
   "model": "large-v3-turbo",
   "device": "cuda",
@@ -273,7 +278,7 @@ providers permitted for the caller:
 
 ```json
 {
-  "version": "0.8.2",
+  "version": "0.8.3",
   "role": "gateway",
   "accepts_client_transcriptions": true,
   "applies_corrections": true,
@@ -545,7 +550,7 @@ binds feedback to the original transcription ID, URL, and client bearer token.
   "rule_ids": [],
   "confirmed_text": "the user-confirmed final text",
   "capture_method": "active_field_on_enter",
-  "client_metadata": {"client": "CtrlSpeak", "version": "0.8.2"}
+  "client_metadata": {"client": "CtrlSpeak", "version": "0.8.3"}
 }
 ```
 
