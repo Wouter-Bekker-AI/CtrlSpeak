@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - "v*.*.*"
+      - "!v*-release-tools.*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing immutable release tag to build and publish
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
 
 permissions:
   contents: read
@@ -16,8 +26,18 @@ jobs:
   service-tests:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
+    outputs:
+      revision: ${{ steps.source.outputs.revision }}
     steps:
+      - name: Validate requested release tag
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
       - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+      - name: Pin source for all release artifacts
+        id: source
+        run: echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -26,6 +46,7 @@ jobs:
       - run: python scripts/run_bounded_tests.py --timeout 180 --cwd server/whisper_transcription -q
 
   build:
+    needs: service-tests
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -40,6 +61,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.service-tests.outputs.revision }}
 
       - uses: actions/setup-python@v5
         with:
@@ -59,7 +82,8 @@ jobs:
           python -m pip install pytest==8.4.2
 
       - name: Verify tag and application version
-        run: python scripts/release.py check-version --tag "${{ github.ref_name }}"
+        shell: bash
+        run: python scripts/release.py check-version --tag "$RELEASE_TAG"
 
       - name: Provision pinned patch test tool
         run: python scripts/fetch_patch_tool.py
@@ -85,7 +109,7 @@ jobs:
           }
           if ($process.ExitCode -ne 0) { throw "CtrlSpeak.exe health check failed" }
           $health = Get-Content -Raw "$env:RUNNER_TEMP\ctrlspeak-health.json" | ConvertFrom-Json
-          $expectedVersion = ('${{ github.ref_name }}').Substring(1)
+          $expectedVersion = $env:RELEASE_TAG.Substring(1)
           if ($health.product -ne 'ctrlspeak' -or $health.version -ne $expectedVersion -or -not $health.frozen) { throw "Invalid packaged health metadata" }
           if (-not $health.audio_transport.bit_perfect) { throw "Packaged FLAC codec failed" }
           if (-not $health.request_transport.ok -or -not $health.request_transport.async_dns) { throw "Packaged cancellable HTTP/DNS runtime failed" }
@@ -106,7 +130,7 @@ jobs:
           mkdir -p release
           chmod +x dist/CtrlSpeak
           timeout 90 dist/CtrlSpeak --health-check-file "$RUNNER_TEMP/ctrlspeak-health.json"
-          python -c "import json,os; p=json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json')); assert p['product']=='ctrlspeak' and p['version']=='${GITHUB_REF_NAME#v}' and p['frozen'] is True"
+          python -c "import json,os; p=json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json')); assert p['product']=='ctrlspeak' and p['version']==os.environ['RELEASE_TAG'][1:] and p['frozen'] is True"
           python -c "import json,os; assert json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json'))['audio_transport']['bit_perfect'] is True"
           python -c "import json,os; p=json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json'))['request_transport']; assert p['ok'] and p['async_dns'] and p['cancellable_http']"
           python -c "import json,os; p=json.load(open(os.environ['RUNNER_TEMP']+'/ctrlspeak-health.json'))['dictation_modes']; assert p['ok'] and p['pcm_bit_perfect'] and p['mute_capture_gate'] and p['delivery_epoch_guard']"
@@ -120,6 +144,7 @@ jobs:
         shell: bash
         run: |
           python --version > release/${{ matrix.platform }}-build-provenance.txt
+          git rev-parse HEAD >> release/${{ matrix.platform }}-build-provenance.txt
           python -m PyInstaller --version >> release/${{ matrix.platform }}-build-provenance.txt
           cat resolved-release-requirements.txt >> release/${{ matrix.platform }}-build-provenance.txt
 
@@ -135,6 +160,7 @@ jobs:
   manifest:
     needs: [build, service-tests]
     runs-on: ubuntu-22.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -159,9 +185,12 @@ jobs:
       - name: Generate and sign canonical update manifest
         env:
           CTRLSPEAK_UPDATE_SIGNING_KEY: ${{ secrets.CTRLSPEAK_UPDATE_SIGNING_KEY }}
+          RELEASE_REVISION: ${{ needs.service-tests.outputs.revision }}
         run: |
-          python scripts/release.py generate \
-            --tag "${{ github.ref_name }}" \
+          grep -Fx "$RELEASE_REVISION" <(tr -d '\r' < release/windows-build-provenance.txt)
+          grep -Fx "$RELEASE_REVISION" release/linux-build-provenance.txt
+          GITHUB_SHA="$RELEASE_REVISION" python scripts/release.py generate \
+            --tag "$RELEASE_TAG" \
             --windows release/CtrlSpeak-windows-x86_64.exe \
             --linux release/CtrlSpeak-linux-x86_64 \
             --output-dir release \
@@ -170,7 +199,7 @@ jobs:
       - name: Independently verify release set
         run: |
           chmod +x release/CtrlSpeak-linux-x86_64
-          python scripts/release.py verify --directory release --tag "${{ github.ref_name }}"
+          python scripts/release.py verify --directory release --tag "$RELEASE_TAG"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -191,7 +220,7 @@ jobs:
             release/delta-evidence.json
 
   publish:
-    needs: manifest
+    needs: [manifest, service-tests]
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     environment: ctrlspeak-production
@@ -214,9 +243,13 @@ jobs:
           merge-multiple: true
 
       - name: Verify assembled release set before upload
+        env:
+          RELEASE_REVISION: ${{ needs.service-tests.outputs.revision }}
         run: |
+          git fetch --depth=1 origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$RELEASE_REVISION"
           chmod +x release/CtrlSpeak-linux-x86_64
-          python scripts/release.py verify --directory release --tag "${{ github.ref_name }}"
+          python scripts/release.py verify --directory release --tag "$RELEASE_TAG"
 
       - name: Create or reconcile immutable draft release
         env:
@@ -224,15 +257,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             shopt -s nullglob
             assets=(release/CtrlSpeak-windows-x86_64.exe release/CtrlSpeak-linux-x86_64 release/update-manifest.json release/update-manifest.sig release/SHA256SUMS release/*.vcdiff)
-            gh release create "$GITHUB_REF_NAME" \
+            gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --draft \
             --generate-notes \
-            --title "CtrlSpeak ${GITHUB_REF_NAME#v}" \
+            --title "CtrlSpeak ${RELEASE_TAG#v}" \
             "${assets[@]}"
           fi
 
@@ -264,9 +297,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir audit
-          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir audit
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir audit
           chmod +x audit/CtrlSpeak-linux-x86_64
-          python scripts/release.py verify --directory audit --tag "$GITHUB_REF_NAME" --exact-assets
+          python scripts/release.py verify --directory audit --tag "$RELEASE_TAG" --exact-assets
           cmp release/update-manifest.json audit/update-manifest.json
           cmp release/update-manifest.sig audit/update-manifest.sig
 
@@ -288,8 +321,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "true" ]; then
-            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          if [ "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "true" ]; then
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
           fi
 
       - name: Reconcile installed Ubuntu desktop companion

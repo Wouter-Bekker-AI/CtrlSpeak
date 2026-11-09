@@ -97,3 +97,36 @@ def test_future_patch_generation_chooses_recent_patch_aware_bases_only(monkeypat
     assert generator.recent_bases('0.8.2')==['0.8.1']
     assert generator.recent_bases('0.8.4')==['0.8.3','0.8.2']
     assert generator.recent_bases('0.8.4',limit=1)==['0.8.3']
+
+
+def test_build_reads_exact_asset_id_through_github_api(monkeypatch):
+    from scripts import generate_deltas as generator
+
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    calls = []
+
+    def request(session, url, accept, *, asset_redirect):
+        calls.append((url, accept, asset_redirect))
+        return "response"
+
+    monkeypatch.setattr(generator, "_github_response", request)
+    base_assets = [{"name": "update-manifest.sig", "id": 42}]
+    assert generator._base_asset_response(None, base_assets, "update-manifest.sig") == "response"
+    assert calls == [
+        (f"{generator.RELEASES_API}/assets/42?download=1", "application/octet-stream", True)
+    ]
+    with pytest.raises(RuntimeError, match="ambiguous"):
+        generator._base_asset_response(None, base_assets * 2, "update-manifest.sig")
+
+
+def test_build_checks_redirect_before_contacting_asset_host(monkeypatch):
+    from types import SimpleNamespace
+    from scripts import generate_deltas as generator
+
+    redirect = SimpleNamespace(is_redirect=True, headers={"Location": "https://example.test/file"},
+                               close=lambda: None)
+    session = SimpleNamespace(get=lambda *args, **kwargs: redirect)
+    monkeypatch.setattr(generator, "_request", lambda *args, **kwargs: pytest.fail("unsafe redirect followed"))
+    with pytest.raises(RuntimeError, match="unapproved"):
+        generator._github_response(session, generator.RELEASES_API, "application/octet-stream",
+                                   asset_redirect=True)

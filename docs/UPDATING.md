@@ -63,7 +63,7 @@ outside the executable and are not replaced. Transaction state is under
 2. Run the [test gates](TESTING.md) and the native Windows/Linux checks relevant
    to the change. Validate the tag before pushing:
    `python scripts/release.py check-version --tag v<version>`.
-3. Push reviewed source and create an annotated `v<version>` tag on the exact
+3. Push reviewed source and create an immutable `v<version>` tag on the exact
    tested commit. The tag starts the
    [signed release workflow](../.github/workflows/release.yml); it is not a
    dry run. Preflight the configured fleet and ensure rollback is available.
@@ -82,6 +82,16 @@ outside the executable and are not replaced. Transaction state is under
    Preserve the fleet receipt and note any physical acceptance not performed.
    Advance `stable` to the verified source. Do not move published tags or
    replace released assets; issue a new patch version for corrections.
+
+If build infrastructure fails before publication, rerun the failed jobs
+first. When a fix to the workflow itself is required, tag the reviewed release
+tooling as `v<version>-release-tools.<n>` and dispatch the release workflow
+from that tooling tag with the existing product release tag as input.
+Tooling tags do not start automatic releases or become update releases. This
+preserves the production environment's tag-only policy. The workflow rebuilds
+the exact product tag, checks both build provenance records before signing its
+revision, and applies the same deployment/publication gates. It does not move
+the product tag or replace published assets.
 
 The private Ed25519 key stays in the GitHub Actions signing secret. Never put
 it in source, logs or the binary. Key rotation needs a release that trusts both
