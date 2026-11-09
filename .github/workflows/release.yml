@@ -61,10 +61,12 @@ jobs:
       - name: Verify tag and application version
         run: python scripts/release.py check-version --tag "${{ github.ref_name }}"
 
+      - name: Provision pinned patch test tool
+        run: python scripts/fetch_patch_tool.py
+        timeout-minutes: 2
+
       - name: Run required tests
-        run: |
-          python scripts/fetch_patch_tool.py
-          python scripts/run_bounded_tests.py --timeout 180 -m core_headless
+        run: python scripts/run_bounded_tests.py --timeout 180 -m core_headless
 
       - name: Build one-file application
         run: python -m utils.build_exe

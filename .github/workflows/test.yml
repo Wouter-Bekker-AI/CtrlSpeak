@@ -35,11 +35,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pytest==8.4.2
 
+      - name: Provision pinned patch test tool
+        # Fail here, including on Windows, rather than running tests without it.
+        run: python scripts/fetch_patch_tool.py
+        timeout-minutes: 2
+
       - name: Run core headless tests
-        # Native roundtrips are offline tests; fetch only the pinned build tool here.
-        run: |
-          python scripts/fetch_patch_tool.py
-          python scripts/run_bounded_tests.py --timeout 180 -m core_headless
+        run: python scripts/run_bounded_tests.py --timeout 180 -m core_headless
 
       - name: Compile Python sources
         run: python -m compileall main.py utils scripts tests
