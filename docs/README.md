@@ -15,7 +15,7 @@ verified at that version, not instructions to redeploy those versions.
 | Update, publish, verify or roll back a release | [Update and release guide](UPDATING.md) |
 | See what changed in each version | [Changelog](../CHANGELOG.md) |
 
-The current maintenance release record is [0.8.5](V0.8.5_RELEASE.md).
+The current maintenance release record is [0.8.6](V0.8.6_RELEASE.md).
 The design rationale for the desktop is preserved in the
 [Midnight Signal record](V0.7_MIDNIGHT_SIGNAL_RELEASE.md) and the
 [Handy investigation](HANDY_PROJECT_LESSONS.md). Use the latest API and

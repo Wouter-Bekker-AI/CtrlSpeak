@@ -22,6 +22,9 @@
     <category>Accessibility</category>
   </categories>
   <releases>
+    <release version="0.8.6" date="2026-11-09">
+      <description><p>Opens Midnight Signal directly, simplifies Updates and makes the control centre easier to use in smaller windows.</p></description>
+    </release>
     <release version="0.8.5" date="2026-11-09">
       <description><p>Removes inactive overlay and audio-loop code, trims build dependencies, and refreshes current documentation without adding features.</p></description>
     </release>

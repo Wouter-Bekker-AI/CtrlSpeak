@@ -13,6 +13,19 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from utils import update_helper, update_manager
 
 
+@pytest.mark.parametrize(("operation", "target", "error"), [
+    ("rollback_077", "0.7.7", "invalid_operation"),
+    ("update", "0.7.7", "downgrade_not_allowed"),
+    ("update", "0.8.6", "downgrade_not_allowed"),
+])
+def test_helper_rejects_old_downgrade_journals(operation, target, error):
+    with pytest.raises(update_manager.UpdateError, match=error):
+        update_helper._validate_transaction_identity({
+            "product": "ctrlspeak", "channel": "stable", "operation": operation,
+            "version": target, "source_version": "0.8.6",
+        })
+
+
 pytestmark = pytest.mark.core_headless
 _TEST_PUBLIC_KEYS = {}
 

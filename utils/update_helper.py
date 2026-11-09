@@ -15,8 +15,6 @@ from typing import Callable, Mapping, Optional
 from utils.config_paths import get_logger
 from utils.update_manager import (
     PRODUCT_ID,
-    ROLLBACK_OPERATION,
-    ROLLBACK_VERSION,
     SemanticVersion,
     UPDATE_CHANNEL,
     UPDATE_VARIANT,
@@ -86,45 +84,32 @@ def _validate_transaction_identity(journal: Mapping[str, object]) -> None:
         raise UpdateError("wrong_product", "The update transaction belongs to a different product.")
     if journal.get("channel") != UPDATE_CHANNEL:
         raise UpdateError("wrong_channel", "The update transaction belongs to a different channel.")
-    operation = journal.get("operation", "update")
-    if operation not in {"update", ROLLBACK_OPERATION}:
+    if journal.get("operation", "update") != "update":
         raise UpdateError("invalid_operation", "The update transaction operation is not recognised.")
     source_version = journal.get("source_version")
-    if operation == ROLLBACK_OPERATION:
-        if (journal.get("version") != ROLLBACK_VERSION
-                or journal.get("tag") != f"v{ROLLBACK_VERSION}"
-                or journal.get("explicit_rollback_target") != ROLLBACK_VERSION
-                or source_version is None
-                or SemanticVersion.parse(source_version) <= SemanticVersion.parse(ROLLBACK_VERSION)):
-            raise UpdateError("wrong_rollback_target", "The explicit rollback must target signed CtrlSpeak 0.7.7 from a newer version.")
-    elif source_version is not None:
+    if source_version is not None:
         if SemanticVersion.parse(journal.get("version")) <= SemanticVersion.parse(source_version):
             raise UpdateError("downgrade_not_allowed", "An ordinary update cannot downgrade CtrlSpeak.")
 
 
 def _verify_transaction_manifest(transaction: UpdateTransaction, journal: Mapping[str, object]) -> None:
-    """Revalidate signed target binding at handoff and replacement boundaries.
-
-    Schema 1 and health fields remain compatible with the unchanged 0.7.7
-    executable. The running 0.8 helper also covers ordinary full and delta updates.
-    """
+    """Revalidate the signed target at handoff and replacement boundaries."""
     try:
         manifest_bytes = transaction.manifest_path.read_bytes()
         signature_bytes = transaction.signature_path.read_bytes()
     except OSError as exc:
-        raise UpdateError("missing_manifest", "The signed rollback metadata is missing.") from exc
+        raise UpdateError("missing_manifest", "The signed update metadata is missing.") from exc
     manifest, asset, version, minimum = verify_signed_manifest(
         manifest_bytes, signature_bytes,
         platform_name=str(journal.get("platform", "")),
         architecture=str(journal.get("architecture", "")),
     )
-    expected_version = ROLLBACK_VERSION if journal.get("operation") == ROLLBACK_OPERATION else journal.get("version")
+    expected_version = journal.get("version")
     if (str(version) != expected_version or manifest.get("tag") != f"v{expected_version}"
             or asset != _asset_from_journal(journal)
             or sha256_file(transaction.manifest_path) != journal.get("manifest_sha256")
             or journal.get("source_version") is not None and SemanticVersion.parse(journal.get("source_version")) < minimum):
-        raise UpdateError("rollback_manifest_mismatch" if journal.get("operation") == ROLLBACK_OPERATION else "manifest_mismatch",
-                          "The update journal does not match its signed executable target.")
+        raise UpdateError("manifest_mismatch", "The update journal does not match its signed executable target.")
 
 
 def resolve_transaction_argument(value: str) -> UpdateTransaction:

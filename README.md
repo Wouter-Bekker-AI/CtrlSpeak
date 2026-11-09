@@ -1,10 +1,10 @@
-# CtrlSpeak v0.8.5
+# CtrlSpeak v0.8.6
 
 CtrlSpeak records speech and inserts the transcript into the active text field.
 Use it on Windows or an Ubuntu **X11/Xorg** desktop, with local Whisper or a
-configured CtrlSpeak gateway. **0.8.5 is a maintenance release**: no new
-dictation modes, settings, or API behavior. See the
-[cleanup and verification record](docs/V0.8.5_RELEASE.md).
+configured CtrlSpeak gateway. **0.8.6 polishes the Midnight Signal control
+centre** without changing dictation modes or the API. See the
+[release record](docs/V0.8.6_RELEASE.md).
 
 ## Get started
 
@@ -78,8 +78,8 @@ exact supported base can download a smaller differential patch; otherwise the
 verified full download is used. **Restart and install** needs your confirmation.
 The helper restores the previous executable if the new one fails its startup
 health check. Settings, credentials, models, and corrections stay in their
-existing locations. A separate signed **Roll back to 0.7.7** action remains
-available. A source checkout updates through Git, not through the GUI.
+existing locations. The stable updater only installs newer versions. A source
+checkout updates through Git, not through the GUI.
 
 See [Updating and releasing](docs/UPDATING.md) for exact steps, patch space
 requirements, diagnostics, and rollback.

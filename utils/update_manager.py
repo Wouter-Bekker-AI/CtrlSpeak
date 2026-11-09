@@ -35,8 +35,6 @@ GITHUB_REPOSITORY = "CtrlSpeak"
 PRODUCT_ID = "ctrlspeak"
 UPDATE_CHANNEL = "stable"
 UPDATE_VARIANT = "standard"
-ROLLBACK_VERSION = "0.7.7"
-ROLLBACK_OPERATION = "rollback_077"
 MANIFEST_SCHEMA_VERSION = 1
 MANIFEST_ASSET_NAME = "update-manifest.json"
 SIGNATURE_ASSET_NAME = "update-manifest.sig"
@@ -137,7 +135,6 @@ class VerifiedRelease:
     manifest_bytes: bytes
     signature_bytes: bytes
     # Local, explicit user intent; never supplied by unsigned GitHub metadata.
-    operation: str = "update"
     deltas: tuple[DeltaAsset, ...] = ()
     selected_delta: Optional[DeltaAsset] = None
 
@@ -354,7 +351,7 @@ def parse_deltas(manifest: Mapping[str, object], target: UpdateAsset) -> tuple[D
 def select_delta(release: VerifiedRelease, current_version: str | None, installation_path: Path) -> VerifiedRelease:
     """Select by exact version, size AND SHA-256, not version text alone."""
     selected = None
-    if release.operation == "update" and current_version:
+    if current_version:
         path = Path(installation_path)
         for delta in release.deltas:
             if delta.base_version != current_version or SemanticVersion.parse(APP_VERSION) < SemanticVersion.parse(delta.minimum_updater_version):
@@ -523,37 +520,7 @@ def discover_update(
     architecture: Optional[str] = None,
 ) -> UpdateCheckResult:
     """Check latest stable only; this path never offers a downgrade."""
-    return _discover_release(
-        current_version, session=session, platform_name=platform_name,
-        architecture=architecture, rollback_077=False,
-    )
-
-
-def discover_rollback_077(
-    current_version: str,
-    *,
-    session: Optional[requests.Session] = None,
-    platform_name: Optional[str] = None,
-    architecture: Optional[str] = None,
-) -> UpdateCheckResult:
-    """Discover only the explicitly selected, signed 0.7.7 rollback target."""
-    if SemanticVersion.parse(current_version) <= SemanticVersion.parse(ROLLBACK_VERSION):
-        raise UpdateError("rollback_not_applicable", "Rollback requires a version newer than 0.7.7.")
-    return _discover_release(
-        current_version, session=session, platform_name=platform_name,
-        architecture=architecture, rollback_077=True,
-    )
-
-
-def _discover_release(
-    current_version: str, *, session: Optional[requests.Session],
-    platform_name: Optional[str], architecture: Optional[str], rollback_077: bool,
-) -> UpdateCheckResult:
     current = SemanticVersion.parse(current_version)
-    api_url = (
-        f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPOSITORY}/releases/tags/v{ROLLBACK_VERSION}"
-        if rollback_077 else GITHUB_API_URL
-    )
     client = session or requests.Session()
     client.headers.setdefault("User-Agent", f"CtrlSpeak/{current_version} updater")
     client.headers.setdefault("Accept", "application/vnd.github+json")
@@ -561,7 +528,7 @@ def _discover_release(
     try:
         try:
             response = client.get(
-                api_url,
+                GITHUB_API_URL,
                 timeout=(CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS),
                 allow_redirects=False,
             )
@@ -593,8 +560,6 @@ def _discover_release(
             raise UpdateError("unstable_release", "GitHub's latest release is not a stable published release.")
 
         tag = _require_string(release_payload, "tag_name")
-        if rollback_077 and tag != f"v{ROLLBACK_VERSION}":
-            raise UpdateError("wrong_rollback_target", "GitHub did not return the requested 0.7.7 release.")
         release_version = SemanticVersion.parse(tag[1:] if tag.startswith("v") else "")
         manifest_url = _find_release_asset(release_payload, MANIFEST_ASSET_NAME, tag)
         signature_url = _find_release_asset(release_payload, SIGNATURE_ASSET_NAME, tag)
@@ -625,7 +590,6 @@ def _discover_release(
             asset=asset,
             manifest_bytes=manifest_bytes,
             signature_bytes=signature_bytes,
-            operation=ROLLBACK_OPERATION if rollback_077 else "update",
             deltas=parse_deltas(manifest, asset),
         )
         checked_at = utc_now_iso()
@@ -635,11 +599,6 @@ def _discover_release(
                 "This release requires a newer updater. Open the verified GitHub Release to install it manually.",
                 checked_at,
                 release,
-            )
-        if rollback_077:
-            return UpdateCheckResult(
-                "available", "Signed CtrlSpeak 0.7.7 is available for explicit rollback. Settings and saved credentials are retained.",
-                checked_at, release,
             )
         if release_version > current:
             return UpdateCheckResult("available", f"CtrlSpeak {release_version} is available.", checked_at, release)
@@ -714,7 +673,7 @@ def create_transaction(
     root: Optional[Path] = None,
     source_version: Optional[str] = None,
 ) -> UpdateTransaction:
-    _validate_version_operation(release, source_version)
+    _validate_upgrade(release, source_version)
     transaction = _transaction_paths(uuid.uuid4().hex, root)
     transaction.directory.mkdir(parents=False, exist_ok=False)
     _atomic_write_bytes(transaction.manifest_path, release.manifest_bytes)
@@ -747,23 +706,15 @@ def create_transaction(
         "asset_size": release.asset.size,
         "asset_sha256": release.asset.sha256,
         "installation_path": str(Path(installation_path or sys.executable).resolve()),
-        "operation": release.operation,
+        "operation": "update",
         "source_version": source_version,
-        "explicit_rollback_target": ROLLBACK_VERSION if release.operation == ROLLBACK_OPERATION else None,
     }
     _atomic_write_json(transaction.journal_path, journal)
     return transaction
 
 
-def _validate_version_operation(release: VerifiedRelease, source_version: Optional[str]) -> None:
-    if release.operation not in {"update", ROLLBACK_OPERATION}:
-        raise UpdateError("invalid_operation", "The update operation is not recognised.")
-    if release.operation == ROLLBACK_OPERATION:
-        if (str(release.version) != ROLLBACK_VERSION or release.tag != f"v{ROLLBACK_VERSION}"
-                or source_version is None
-                or SemanticVersion.parse(source_version) <= release.version):
-            raise UpdateError("wrong_rollback_target", "Only an explicit rollback from a newer version to 0.7.7 is permitted.")
-    elif source_version is not None and release.version <= SemanticVersion.parse(source_version):
+def _validate_upgrade(release: VerifiedRelease, source_version: Optional[str]) -> None:
+    if source_version is not None and release.version <= SemanticVersion.parse(source_version):
         raise UpdateError("downgrade_not_allowed", "Check for updates does not install an older or identical version.")
 
 
@@ -791,7 +742,6 @@ def prune_completed_update_payloads(*, root: Optional[Path] = None, keep: int = 
 
     No recursive deletion, no glob removal, no directory removal, no user
     settings/models. Failed, active, unrecognised and symlinked entries stay.
-    Keep the most recent explicit 0.7.7 rollback in addition to recent installs.
     """
     directory = Path(root or get_updates_dir()).resolve()
     if not directory.is_dir():
@@ -810,15 +760,13 @@ def prune_completed_update_payloads(*, root: Optional[Path] = None, keep: int = 
                 continue
             journal = json.loads(journal_path.read_text(encoding="utf-8"))
             if (journal.get("transaction_id") == child.name and journal.get("product") == PRODUCT_ID
+                    and journal.get("operation", "update") == "update"
                     and journal.get("state") == "installed" and journal.get("health_confirmed") is True):
                 completed.append((str(journal.get("installed_at", journal.get("updated_at", ""))), child, journal))
         except (OSError, ValueError, AttributeError):
             continue
     completed.sort(key=lambda item: item[0], reverse=True)
     retained = {item[1].name for item in completed[:max(2, keep)]} | set(protected)
-    last_rollback = next((item[1].name for item in completed if item[2].get("operation") == ROLLBACK_OPERATION), None)
-    if last_rollback:
-        retained.add(last_rollback)
     stats = {"files": 0, "bytes": 0}
     names = ("artifact.partial", "verified-candidate", "previous-executable",
              "ctrlspeak-updater-helper.exe", "ctrlspeak-updater-helper", "delta.partial", "delta.vcdiff")
@@ -855,6 +803,8 @@ def latest_completed_transfer(*, root: Optional[Path] = None) -> dict[str, objec
                 continue
             row = json.loads(path.read_text(encoding="utf-8"))
             if row.get("state") != "installed" or row.get("health_confirmed") is not True or row.get("product") != PRODUCT_ID or row.get("transaction_id") != child.name:
+                continue
+            if row.get("operation", "update") != "update":
                 continue
             version = str(SemanticVersion.parse(row.get("version")))
             full, downloaded = row.get("asset_size"), row.get("transfer_bytes", row.get("asset_size"))
@@ -933,9 +883,10 @@ def _download_full_release(
         "asset_url": release.asset.url,
         "asset_size": release.asset.size,
         "asset_sha256": release.asset.sha256,
-        "operation": release.operation,
     }
-    if any(journal.get(key) != value for key, value in expected_binding.items()):
+    if journal.get("operation", "update") != "update" or any(
+        journal.get(key) != value for key, value in expected_binding.items()
+    ):
         raise UpdateError("stale_partial", "The partial download belongs to a different release.")
 
     client = session or requests.Session()
@@ -1105,12 +1056,12 @@ def download_release(
                 "manifest_sha256": release.manifest_sha256,
                 "asset_name": release.asset.name, "asset_size": release.asset.size,
                 "asset_sha256": release.asset.sha256, "asset_url": release.asset.url,
-                "product": PRODUCT_ID, "operation": release.operation}
-    if any(journal.get(k) != v for k, v in expected.items()):
+                "product": PRODUCT_ID}
+    if journal.get("operation", "update") != "update" or any(journal.get(k) != v for k, v in expected.items()):
         raise UpdateError("stale_partial", "The staged update does not match the selected signed release.")
     selected = None
     base = Path(str(journal.get("installation_path", "")))
-    if release.deltas and release.operation == "update":
+    if release.deltas:
         # Revalidate the signed bytes at use time, not a mutable dataclass or
         # transaction's proposed patch/hash. A full candidate remains mandatory.
         signed, asset, version, _ = verify_signed_manifest(
@@ -1191,13 +1142,11 @@ class UpdateCoordinator:
         discoverer: Callable[..., UpdateCheckResult] = discover_update,
         downloader: Callable[..., Path] = download_release,
         transaction_factory: Callable[..., UpdateTransaction] = create_transaction,
-        rollback_discoverer: Callable[..., UpdateCheckResult] = discover_rollback_077,
     ):
         self.current_version = current_version
         self._discoverer = discoverer
         self._downloader = downloader
         self._transaction_factory = transaction_factory
-        self._rollback_discoverer = rollback_discoverer
         self._lock = threading.RLock()
         self._listeners: list[Callable[[UpdateEvent], None]] = []
         self._generation = 0
@@ -1291,15 +1240,6 @@ class UpdateCoordinator:
         return True
 
     def check_async(self) -> int:
-        return self._check_async(rollback_077=False)
-
-    def rollback_to_077(self) -> int:
-        """Select the rollback target only; download/install still need user actions."""
-        if SemanticVersion.parse(self.current_version) <= SemanticVersion.parse(ROLLBACK_VERSION):
-            raise UpdateError("rollback_not_applicable", "Rollback requires a version newer than 0.7.7.")
-        return self._check_async(rollback_077=True)
-
-    def _check_async(self, *, rollback_077: bool) -> int:
         with self._lock:
             if self._state in {"downloading", "applying_patch", "falling_back", "verifying"} or (self._download_worker is not None and self._download_worker.is_alive()):
                 raise UpdateError("update_busy", "Cancel the active download and wait for its patch worker to close before checking again.")
@@ -1308,22 +1248,15 @@ class UpdateCoordinator:
             # leave it installable after a failed/superseded check.
             self._release = None
             self._transaction = None
-        message = ("Checking the signed 0.7.7 rollback release…" if rollback_077
-                   else "Checking GitHub for a signed stable release…")
-        self._publish(UpdateEvent(generation, "checking", message))
+        self._publish(UpdateEvent(generation, "checking", "Checking GitHub for a signed stable release…"))
 
         def worker() -> None:
             try:
-                discoverer = self._rollback_discoverer if rollback_077 else self._discoverer
-                result = discoverer(self.current_version)
+                result = self._discoverer(self.current_version)
                 if result.release is not None and result.status == "available":
                     planned = select_delta(result.release, self.current_version, Path(sys.executable))
                     result = replace(result, release=planned,
                         message=result.message + f" {planned.transfer_description}: {planned.download_size / (1024*1024):.1f} MB.")
-                if result.release is not None and rollback_077:
-                    _validate_version_operation(result.release, self.current_version)
-                    if result.release.operation != ROLLBACK_OPERATION:
-                        raise UpdateError("wrong_rollback_target", "The selected release is not an explicit rollback.")
                 self._publish(
                     UpdateEvent(
                         generation,
@@ -1364,7 +1297,7 @@ class UpdateCoordinator:
             existing_transaction = self._transaction
             if release is None:
                 raise UpdateError("no_update", "No verified update is ready to download.")
-            _validate_version_operation(release, self.current_version)
+            _validate_upgrade(release, self.current_version)
             release = select_delta(release, self.current_version, Path(installation_path or sys.executable))
             generation = self._next_generation("downloading")
             cancel_event = self._cancel_event

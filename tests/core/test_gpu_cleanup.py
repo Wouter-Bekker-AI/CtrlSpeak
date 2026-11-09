@@ -57,7 +57,6 @@ def test_ui_status_and_checkbox_contract():
     assert cleanup_result_label({'client_cleanup_requested':True,'client_cleanup_applied':True})=='S1 GPU cleanup applied'
     assert 'secret' not in cleanup_result_label({'client_cleanup_requested':True,'normalization':{'status':'secret'}})
     source=(Path(__file__).parents[2]/'utils/gui.py').read_text('utf-8')
-    assert 'Use S1 Mini cleanup when using the Ubuntu GPU' in source
     assert 'gpu_cleanup_enabled=self.gpu_cleanup_var.get()' in source
     visible=(Path(__file__).parents[2]/'utils/midnight_signal_ui.py').read_text('utf-8')
     assert 'Use S1 Mini cleanup when using the Ubuntu GPU' in visible

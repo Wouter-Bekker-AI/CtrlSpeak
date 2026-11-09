@@ -21,14 +21,10 @@ verified standard executable under the stable name.
 4. Check the running version in the tray or control center. The Updates page
    reports the last installed transfer method, bytes and any fallback reason.
 
-A small patch still needs disk space for the reconstructed executable, startup
-extraction and rollback. Successful payload caches retain two recent installs
-and the most recent explicit rollback to 0.7.7. Logs and audit metadata stay;
-active, failed and unrecognized transactions are not automatically pruned.
-
-**Updates → Roll back to 0.7.7** is a separate, explicit signed install for a
-writable packaged copy. It retains settings and credentials but removes access
-to newer dictation modes. See the [rollback details](V0.8.0_RELEASE.md#return-to-077).
+A small patch still needs disk space for reconstruction, startup extraction
+and failed-start recovery. Successful update payload caches retain two recent
+installs. Logs and audit metadata stay; active, failed and unrecognized
+transactions are not automatically pruned. The updater offers upgrades only.
 Source checkouts can discover releases but must use Git to update themselves.
 
 ## Trust and safety model

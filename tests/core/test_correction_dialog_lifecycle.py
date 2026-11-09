@@ -341,6 +341,8 @@ def test_latest_runtime_config_wins_when_settings_change_back_during_submission(
 def test_gateway_error_never_displays_or_logs_submitted_phrases_or_tokens(
     monkeypatch,
 ) -> None:
+    from utils.transcription_backend import ApiBackendError
+
     dialog = _headless_dialog()
     secret_source = "private source phrase"
     secret_replacement = "private replacement phrase"
@@ -362,7 +364,7 @@ def test_gateway_error_never_displays_or_logs_submitted_phrases_or_tokens(
 
         def create_correction(self, _source, _replacement, *, scope):
             assert scope == "user"
-            raise gui.ApiBackendError(
+            raise ApiBackendError(
                 "HTTP 422 validation input="
                 f"{secret_source}|{secret_replacement}|{secret_token}"
             )

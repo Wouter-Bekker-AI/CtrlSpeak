@@ -310,11 +310,9 @@ def test_management_close_and_ui_teardown_reset_ownership_without_quitting(
     )
 
     visible = _FakeWindow()
-    legacy = _FakeWindow()
-    controller = object.__new__(midnight_ui.MidnightSignalManagementMixin)
+    controller = object.__new__(gui.ManagementWindow)
     controller._icon = SimpleNamespace(stop=lambda: quit_calls.append(True))
     controller.window = visible
-    controller._legacy_window = legacy
     controller._capability_generation = 0
     controller._corrections_generation = 0
     controller._correction_mutation_generation = 0
@@ -328,7 +326,6 @@ def test_management_close_and_ui_teardown_reset_ownership_without_quitting(
     controller.close()
 
     assert visible.destroyed is True
-    assert legacy.destroyed is True
     assert gui.management_window is None
     assert quit_calls == []
     assert cancel_calls == []

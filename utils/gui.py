@@ -23,13 +23,12 @@ import utils.net_discovery as net_discovery
 # ---- System-layer pieces (lifecycle, discovery, status) ----
 from utils.system import (
     APP_VERSION,
-    CLIENT_ONLY_BUILD,
     settings, settings_lock, load_settings,
     detect_client_only_build, save_settings, notify,
     start_client_listener, stop_client_listener,
     manual_discovery_refresh,
     enqueue_management_task,
-    start_server, shutdown_server, initiate_self_uninstall,
+    shutdown_server,
     list_input_audio_devices, get_input_device_preference, set_input_device_preference,
 )
 # IMPORTANT: import the module so we always see the *current* values
@@ -46,7 +45,6 @@ from utils.models import (
     get_current_model_name,
     model_store_path_for, model_files_present,
     download_model_with_gui,              # orchestrates welcome window and downloads model
-    ensure_model_ready_for_local_server,
     trace_model_download_step,
 )
 
@@ -56,15 +54,11 @@ from utils.ui_theme import (
     ACCENT,
     BACKGROUND,
     DANGER,
-    TEXT_PRIMARY,
-    OUTLINE,
 )
 
 from utils.config_paths import app_icon_path, asset_path, get_logger
 from utils.cuda_probe import automatic_runtime_install_supported
 from utils.transcription_backend import (
-    BACKEND_DISPLAY_NAMES,
-    ApiBackendError,
     ApiTranscriptionClient,
     BackendConfig,
     BackendPersistenceError,
@@ -80,7 +74,6 @@ from utils.transcription_backend import (
     save_backend_config,
     secure_storage_available,
 )
-from utils.languages import language_choices
 from utils.update_helper import prepare_update_handoff
 from utils.update_manager import (
     UpdateError,
@@ -2122,576 +2115,56 @@ class CorrectionSubmissionDialog:
     # Compatibility for callers that treated the former window as disposable.
     close = hide
 
-class _LegacyManagementWindow:
+class _ManagementController:
+    """State and actions used by the Midnight Signal pages."""
+
     def __init__(self, icon: pystray.Icon):
         self._icon = icon
-        self.window = tk.Toplevel(tk_root)
-        self.window.title(f"CtrlSpeak Control v{APP_VERSION}")
-        self.window.geometry("640x620")
-        self.window.minsize(580, 560)
-        self.window.resizable(True, True)
-        self.window.protocol("WM_DELETE_WINDOW", self.close)
-        self.window.bind("<Escape>", lambda _e: self.close())
-        apply_modern_theme(self.window)
+        self.window = tk.Toplevel(tk_root, class_="CtrlSpeak")
+        self.window.withdraw()
         try:
             _set_window_icon(self.window)
         except Exception:
-            logger.exception("Failed to set management window icon")
-
-        body = ttk.Frame(self.window, style="Modern.TFrame")
-        body.pack(fill=tk.BOTH, expand=True)
-
-        self._scroll_canvas = tk.Canvas(
-            body,
-            highlightthickness=0,
-            background=BACKGROUND,
-        )
-        self._scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self._scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self._scroll_canvas.yview)
-        self._scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self._scroll_canvas.configure(yscrollcommand=self._scrollbar.set)
-
-        self._scroll_content = ttk.Frame(
-            self._scroll_canvas,
-            style="Modern.TFrame",
-            padding=(30, 26),
-        )
-        self._scroll_window = self._scroll_canvas.create_window(
-            (0, 0),
-            window=self._scroll_content,
-            anchor="nw",
-        )
-
-        self._scroll_content.bind("<Configure>", self._update_scroll_region)
-        self._scroll_canvas.bind("<Configure>", self._sync_scroll_width)
-
-        self._mousewheel_bound = False
-        self._scroll_content.bind("<Enter>", self._bind_mousewheel)
-        self._scroll_content.bind("<Leave>", self._unbind_mousewheel)
-
-        container = self._scroll_content
-
-        header = ttk.Frame(container, style="ModernCard.TFrame", padding=(26, 24))
-        header.pack(fill=tk.X)
-        ttk.Label(header, text="CtrlSpeak Control", style="Title.TLabel").pack(anchor=tk.W)
-        build_label = "Client Only" if CLIENT_ONLY_BUILD else "Client + Server"
-        ttk.Label(header, text=f"Build {APP_VERSION} · {build_label}", style="Subtitle.TLabel").pack(anchor=tk.W, pady=(10, 0))
-        header_accent = ttk.Frame(header, style="AccentLine.TFrame")
-        header_accent.configure(height=2)
-        header_accent.pack(fill=tk.X, pady=(18, 0))
-
-        # Status overview
-        status_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
-        status_card.pack(fill=tk.X, pady=(18, 12))
-        ttk.Label(status_card, text="System status", style="SectionHeading.TLabel").pack(anchor=tk.W)
-        status_accent = ttk.Frame(status_card, style="AccentLine.TFrame")
-        status_accent.configure(height=2)
-        status_accent.pack(fill=tk.X, pady=(12, 12))
-        badges = ttk.Frame(status_card, style="ModernCardInner.TFrame")
-        badges.pack(fill=tk.X)
-        self.mode_badge = ttk.Label(badges, text="", style="PillMuted.TLabel")
-        self.mode_badge.pack(side=tk.LEFT)
-        self.network_badge = ttk.Label(badges, text="", style="PillMuted.TLabel")
-        self.network_badge.pack(side=tk.LEFT, padx=(12, 0))
-        self.status_var = tk.StringVar()
-        self.server_status_var = tk.StringVar()
-        ttk.Label(status_card, textvariable=self.status_var, style="Body.TLabel",
-                  justify=tk.LEFT).pack(fill=tk.X, pady=(12, 10))
-        ttk.Label(status_card, textvariable=self.server_status_var, style="Caption.TLabel",
-                  justify=tk.LEFT).pack(anchor=tk.W)
-
-        # Signed application updates
-        self._build_update_card(container)
-
-        # Transcription backend selection
-        backend_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
-        backend_card.pack(fill=tk.X, pady=(0, 12))
-        ttk.Label(backend_card, text="Transcription backend", style="SectionHeading.TLabel").pack(anchor=tk.W)
-        backend_accent = ttk.Frame(backend_card, style="AccentLine.TFrame")
-        backend_accent.configure(height=2)
-        backend_accent.pack(fill=tk.X, pady=(10, 12))
-        active_backend = get_backend_config()
-        self.backend_var = tk.StringVar(value=backend_display_name(active_backend.backend))
-        self.api_url_var = tk.StringVar(value=active_backend.api_url)
+            logger.exception("Failed to set control centre icon")
+        active = get_backend_config()
+        self.backend_var = tk.StringVar(value=backend_display_name(active.backend))
+        self.api_url_var = tk.StringVar(value=active.api_url)
         with settings_lock:
             saved_token = settings.get("api_token")
+            last_checked = settings.get("last_update_check_at")
         self.api_token_var = tk.StringVar(value=str(saved_token) if saved_token else "")
-        self.feedback_capture_var = tk.StringVar(value=active_backend.feedback_capture_method)
-        self.provider_strategy_var = tk.StringVar(value=active_backend.provider_strategy)
-        self.gpu_cleanup_var = tk.BooleanVar(value=active_backend.gpu_cleanup_enabled)
-        self.gpu_formatting_var = tk.BooleanVar(value=active_backend.gpu_cleanup_preserve_formatting)
+        self.feedback_capture_var = tk.StringVar(value=active.feedback_capture_method)
+        self.provider_strategy_var = tk.StringVar(value=active.provider_strategy)
+        self.gpu_cleanup_var = tk.BooleanVar(value=active.gpu_cleanup_enabled)
+        self.gpu_formatting_var = tk.BooleanVar(value=active.gpu_cleanup_preserve_formatting)
         self.openai_api_key_var = tk.StringVar(value=get_session_openai_api_key() or "")
         self._secure_key_storage_available = secure_storage_available()
-        self.remember_openai_key_var = tk.BooleanVar(
-            value=self._secure_key_storage_available
-        )
-
-        backend_row = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
-        backend_row.pack(fill=tk.X, pady=(8, 6))
-        ttk.Label(backend_row, text="Backend", style="Body.TLabel", width=18).pack(side=tk.LEFT)
-        ttk.Combobox(
-            backend_row,
-            textvariable=self.backend_var,
-            values=list(BACKEND_DISPLAY_NAMES.values()),
-            state="readonly", width=24, style="Modern.TCombobox",
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        language_frame = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
-        language_frame.pack(fill=tk.X, pady=(10, 4))
-        ttk.Label(
-            language_frame,
-            text="Allowed output languages",
-            style="Body.TLabel",
-            width=18,
-        ).pack(side=tk.LEFT, anchor=tk.N)
-        language_list_frame = ttk.Frame(language_frame, style="ModernCardInner.TFrame")
-        language_list_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        choices = language_choices()
-        self._output_language_codes = tuple(code for code, _name in choices)
-        self.output_language_list = tk.Listbox(
-            language_list_frame,
-            selectmode=tk.MULTIPLE,
-            exportselection=False,
-            height=7,
-            background=ELEVATED_SURFACE,
-            foreground=TEXT_PRIMARY,
-            selectbackground=ACCENT,
-            selectforeground=BACKGROUND,
-            highlightbackground=OUTLINE,
-            highlightcolor=ACCENT,
-            relief=tk.FLAT,
-            borderwidth=1,
-        )
-        language_scroll = ttk.Scrollbar(
-            language_list_frame,
-            orient=tk.VERTICAL,
-            command=self.output_language_list.yview,
-        )
-        self.output_language_list.configure(yscrollcommand=language_scroll.set)
-        self.output_language_list.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        language_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        for code, name in choices:
-            self.output_language_list.insert(tk.END, f"{name} ({code})")
-        self._set_output_language_selection(active_backend.allowed_output_languages)
-
-        language_buttons = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
-        language_buttons.pack(fill=tk.X, pady=(4, 0))
-        ttk.Button(
-            language_buttons,
-            text="English only",
-            style="Subtle.TButton",
-            command=lambda: self._set_output_language_selection(("en",)),
-        ).pack(side=tk.LEFT)
-        ttk.Button(
-            language_buttons,
-            text="Clear (automatic)",
-            style="Subtle.TButton",
-            command=lambda: self._set_output_language_selection(()),
-        ).pack(side=tk.LEFT, padx=(12, 0))
-
-        api_url_row = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
-        api_url_row.pack(fill=tk.X, pady=6)
-        ttk.Label(api_url_row, text="API base URL", style="Body.TLabel", width=18).pack(side=tk.LEFT)
-        ttk.Entry(api_url_row, textvariable=self.api_url_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        token_row = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
-        token_row.pack(fill=tk.X, pady=6)
-        ttk.Label(token_row, text="Bearer token", style="Body.TLabel", width=18).pack(side=tk.LEFT)
-        ttk.Entry(token_row, textvariable=self.api_token_var, show="•").pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        strategy_row = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
-        strategy_row.pack(fill=tk.X, pady=6)
-        ttk.Label(strategy_row, text="Gateway route", style="Body.TLabel", width=18).pack(side=tk.LEFT)
-        self.provider_strategy_combo = ttk.Combobox(
-            strategy_row,
-            textvariable=self.provider_strategy_var,
-            values=tuple(dict.fromkeys(("server-default", active_backend.provider_strategy))),
-            state="readonly",
-            width=24,
-            style="Modern.TCombobox",
-        )
-        self.provider_strategy_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.capabilities_button = ttk.Button(
-            strategy_row,
-            text="Check gateway",
-            style="Subtle.TButton",
-            command=self._refresh_gateway_capabilities,
-        )
-        self.capabilities_button.pack(side=tk.LEFT, padx=(12, 0))
-
-        ttk.Checkbutton(
-            backend_card, text="Use S1 Mini cleanup when using the Ubuntu GPU",
-            variable=self.gpu_cleanup_var,
-        ).pack(anchor=tk.W, pady=(8, 4))
-        formatting_options = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
-        formatting_options.pack(anchor=tk.W, fill=tk.X)
-        formatting_toggle = ttk.Checkbutton(
-            formatting_options, text="Preserve paragraphs and line breaks",
-            variable=self.gpu_formatting_var,
-        )
-        def update_formatting_visibility(*_args):
-            if self.gpu_cleanup_var.get():
-                formatting_toggle.pack(anchor=tk.W, padx=(20, 0), pady=4)
-            else:
-                formatting_toggle.pack_forget()
-        self.gpu_cleanup_var.trace_add("write", update_formatting_visibility)
-        update_formatting_visibility()
-        ttk.Label(
-            backend_card, style="Caption.TLabel", wraplength=520,
-            text="English GPU transcripts only. OpenAI, Tiny and unavailable cleanup return "
-                 "ordinary corrected text. Off skips cleanup entirely. Save and restart to apply.",
-        ).pack(anchor=tk.W, pady=(0, 8))
-
-        openai_row = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
-        openai_row.pack(fill=tk.X, pady=6)
-        ttk.Label(openai_row, text="OpenAI API key", style="Body.TLabel", width=18).pack(side=tk.LEFT)
-        ttk.Entry(openai_row, textvariable=self.openai_api_key_var, show="*").pack(
-            side=tk.LEFT, fill=tk.X, expand=True
-        )
-        self.forget_openai_key_button = ttk.Button(
-            openai_row,
-            text="Forget key",
-            style="Subtle.TButton",
-            command=self._forget_openai_key,
-        )
-        self.forget_openai_key_button.pack(side=tk.LEFT, padx=(12, 0))
-        remember_key = ttk.Checkbutton(
-            backend_card,
-            text="Remember securely on this computer",
-            variable=self.remember_openai_key_var,
-        )
-        remember_key.pack(anchor=tk.W, pady=(0, 4))
-        if not self._secure_key_storage_available:
-            remember_key.state(["disabled"])
-        ttk.Label(
-            backend_card,
-            text=(
-                "On Windows, the key is stored in your user-scoped Credential Manager "
-                "vault when remembering is enabled. It is never written to settings.json "
-                "or retained by the gateway, and is sent only for transcription requests."
-                if self._secure_key_storage_available
-                else "Secure native key storage is unavailable here; the OpenAI key "
-                     "will remain in this CtrlSpeak process only."
-            ),
-            style="Caption.TLabel",
-            wraplength=520,
-            justify=tk.LEFT,
-        ).pack(anchor=tk.W, pady=(0, 6))
-
-        feedback_row = ttk.Frame(backend_card, style="ModernCardInner.TFrame")
-        feedback_row.pack(fill=tk.X, pady=6)
-        ttk.Label(feedback_row, text="Edit feedback", style="Body.TLabel", width=18).pack(side=tk.LEFT)
-        ttk.Combobox(
-            feedback_row,
-            textvariable=self.feedback_capture_var,
-            values=["active_field_on_enter", "disabled"],
-            state="readonly",
-            width=24,
-            style="Modern.TCombobox",
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Label(
-            backend_card,
-            text=("Select no languages for automatic detection. Select one to force it, or "
-                  "select up to five; CtrlSpeak accepts automatic detection only within that "
-                  "list and uses the first selected language as its safe fallback. "
-                  "Automatic capture snapshots the active field when you press bare Enter, "
-                  "then restores the clipboard and submits only changed text. Saving any "
-                  "backend setting requires a CtrlSpeak restart. Environment variables "
-                  "override saved API values."),
-            style="Caption.TLabel",
-            wraplength=520,
-            justify=tk.LEFT,
-        ).pack(anchor=tk.W, pady=(8, 0))
-        ttk.Button(
-            backend_card, text="Save backend and languages", style="Accent.TButton", command=self._apply_backend,
-        ).pack(anchor=tk.W, pady=(12, 0))
-        self.backend_status_var = tk.StringVar(value=get_backend_status(active_backend))
-        ttk.Label(
-            backend_card, textvariable=self.backend_status_var, style="Caption.TLabel",
-            wraplength=520, justify=tk.LEFT,
-        ).pack(anchor=tk.W, pady=(10, 0))
-
-        # Device preferences
-        device_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
-        device_card.pack(fill=tk.X, pady=(0, 12))
-        ttk.Label(device_card, text="Device preference", style="SectionHeading.TLabel").pack(anchor=tk.W)
-        device_accent = ttk.Frame(device_card, style="AccentLine.TFrame")
-        device_accent.configure(height=2)
-        device_accent.pack(fill=tk.X, pady=(10, 12))
-        pref = get_device_preference()
-        if pref not in {"cpu", "cuda"}:
-            pref = "cpu"
+        self.remember_openai_key_var = tk.BooleanVar(value=self._secure_key_storage_available)
+        self.backend_status_var = tk.StringVar(value=get_backend_status(active))
         self.cuda_supported = cuda_driver_available()
         self.cuda_auto_install_supported = automatic_runtime_install_supported()
-        if pref == "cuda" and not self.cuda_supported:
-            try:
-                set_device_preference("cpu")
-            except Exception:
-                logger.exception("Failed to reset device preference to CPU when CUDA is unavailable")
-            pref = "cpu"
-        self.device_var = tk.StringVar(value=pref)
-        device_row = ttk.Frame(device_card, style="ModernCardInner.TFrame")
-        device_row.pack(fill=tk.X, pady=(14, 10))
-        ttk.Radiobutton(device_row, text="CPU", variable=self.device_var, value="cpu",
-                        style="Modern.TRadiobutton").pack(side=tk.LEFT, padx=(0, 18))
-        self.cuda_radio: Optional[ttk.Radiobutton] = None
-        if self.cuda_supported:
-            self.cuda_radio = ttk.Radiobutton(device_row, text="GPU (CUDA)", variable=self.device_var, value="cuda",
-                                             style="Modern.TRadiobutton")
-            self.cuda_radio.pack(side=tk.LEFT)
+        self.device_var = tk.StringVar()
         self.cuda_status = tk.StringVar()
-        if not self.cuda_supported:
-            self.cuda_status.set("CUDA acceleration is unavailable on this system (no compatible GPU detected).")
-        ttk.Label(device_card, textvariable=self.cuda_status, style="Caption.TLabel").pack(anchor=tk.W, pady=(4, 0))
-        device_buttons = ttk.Frame(device_card, style="ModernCardInner.TFrame")
-        device_buttons.pack(fill=tk.X, pady=(16, 0))
-        self.apply_device_btn = ttk.Button(device_buttons, text="Apply device", style="Accent.TButton",
-                                           command=self._apply_device)
-        self.apply_device_btn.pack(side=tk.LEFT)
-        cuda_button_text = (
-            "Install or repair CUDA"
-            if self.cuda_auto_install_supported
-            else "Recheck system CUDA"
-        )
-        self.install_cuda_btn = ttk.Button(device_buttons, text=cuda_button_text, style="Subtle.TButton",
-                                           command=self._install_cuda)
-        self.install_cuda_btn.pack(side=tk.LEFT, padx=(12, 0))
-        if not self.cuda_supported:
-            try:
-                self.install_cuda_btn.state(["disabled"])
-            except Exception:
-                self.install_cuda_btn.configure(state="disabled")
-
-        # Model selection
-        model_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
-        model_card.pack(fill=tk.X, pady=(0, 12))
-        ttk.Label(model_card, text="Speech model", style="SectionHeading.TLabel").pack(anchor=tk.W)
-        model_accent = ttk.Frame(model_card, style="AccentLine.TFrame")
-        model_accent.configure(height=2)
-        model_accent.pack(fill=tk.X, pady=(10, 12))
-        self.model_var = tk.StringVar(value=get_current_model_name())
-        model_row = ttk.Frame(model_card, style="ModernCardInner.TFrame")
-        model_row.pack(fill=tk.X, pady=(14, 12))
-        ttk.Label(model_row, text="Whisper model", style="Body.TLabel").pack(side=tk.LEFT)
-        ttk.Combobox(
-            model_row,
-            textvariable=self.model_var,
-            values=["small", "large-v3"],
-            state="readonly",
-            width=18,
-            style="Modern.TCombobox",
-        ).pack(side=tk.LEFT, padx=(12, 0))
-
-        model_badges = ttk.Frame(model_row, style="ModernCardInner.TFrame")
-        model_badges.pack(side=tk.LEFT, padx=(16, 0))
-        self.model_small_badge = ttk.Label(model_badges, text="", style="PillMuted.TLabel")
-        self.model_small_badge.pack(anchor=tk.W)
-        self.model_large_badge = ttk.Label(model_badges, text="", style="PillMuted.TLabel")
-        self.model_large_badge.pack(anchor=tk.W, pady=(8, 0))
-        model_buttons = ttk.Frame(model_card, style="ModernCardInner.TFrame")
-        model_buttons.pack(fill=tk.X, pady=(4, 0))
-        self.apply_model_btn = ttk.Button(model_buttons, text="Activate model", style="Accent.TButton",
-                                          command=self._apply_model)
-        self.apply_model_btn.pack(side=tk.LEFT)
-        self.download_model_btn = ttk.Button(model_buttons, text="Download or update", style="Subtle.TButton",
-                                             command=self._download_model)
-        self.download_model_btn.pack(side=tk.LEFT, padx=(12, 0))
+        self.model_var = tk.StringVar()
         self.model_status = tk.StringVar()
-        ttk.Label(model_card, textvariable=self.model_status, style="Caption.TLabel").pack(anchor=tk.W, pady=(10, 0))
-
-        # Input audio device selection
-        audio_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
-        audio_card.pack(fill=tk.X, pady=(0, 12))
-        ttk.Label(audio_card, text="Input audio device", style="SectionHeading.TLabel").pack(anchor=tk.W)
-        audio_accent = ttk.Frame(audio_card, style="AccentLine.TFrame")
-        audio_accent.configure(height=2)
-        audio_accent.pack(fill=tk.X, pady=(10, 12))
-        audio_row = ttk.Frame(audio_card, style="ModernCardInner.TFrame")
-        audio_row.pack(fill=tk.X, pady=(14, 12))
         self.audio_device_var = tk.StringVar()
-        self.audio_device_combo = ttk.Combobox(
-            audio_row,
-            textvariable=self.audio_device_var,
-            state="readonly",
-            style="Modern.TCombobox",
-            width=40,
-        )
-        self.audio_device_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(
-            audio_row,
-            text="Refresh list",
-            style="Subtle.TButton",
-            command=self._refresh_audio_devices,
-        ).pack(side=tk.LEFT, padx=(12, 0))
-        audio_buttons = ttk.Frame(audio_card, style="ModernCardInner.TFrame")
-        audio_buttons.pack(fill=tk.X, pady=(4, 0))
-        self.apply_audio_device_btn = ttk.Button(
-            audio_buttons,
-            text="Apply input device",
-            style="Accent.TButton",
-            command=self._apply_audio_device,
-        )
-        self.apply_audio_device_btn.pack(side=tk.LEFT)
         self.audio_device_status = tk.StringVar()
-        ttk.Label(audio_card, textvariable=self.audio_device_status, style="Caption.TLabel").pack(anchor=tk.W, pady=(10, 0))
+        self.server_status_var = tk.StringVar()
         self._audio_device_map: dict[str, Optional[str]] = {}
-        self._refresh_audio_devices(initial=True)
-
-        # Client/server controls
-        control_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
-        control_card.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(control_card, text="Client & server", style="SectionHeading.TLabel").pack(anchor=tk.W)
-        control_accent = ttk.Frame(control_card, style="AccentLine.TFrame")
-        control_accent.configure(height=2)
-        control_accent.pack(fill=tk.X, pady=(10, 12))
-        controls = ttk.Frame(control_card, style="ModernCardInner.TFrame")
-        controls.pack(fill=tk.X, pady=(14, 0))
-        self.start_button = ttk.Button(controls, text="Start client", style="Accent.TButton",
-                                       command=self.start_client)
-        self.start_button.pack(fill=tk.X, pady=4)
-        self.stop_button = ttk.Button(controls, text="Stop client", style="Danger.TButton",
-                                      command=self.stop_client)
-        self.stop_button.pack(fill=tk.X, pady=4)
-        self.refresh_button = ttk.Button(controls, text="Refresh servers", style="Subtle.TButton",
-                                         command=self.refresh_servers)
-        self.refresh_button.pack(fill=tk.X, pady=4)
-        self.change_mode_button = ttk.Button(controls, text="Change mode", style="Subtle.TButton",
-                                             command=self.change_mode)
-        self.change_mode_button.pack(fill=tk.X, pady=4)
-        if CLIENT_ONLY_BUILD:
-            try:
-                self.change_mode_button.state(["disabled"])
-            except Exception:
-                logger.exception("Failed to disable change mode button for client-only build")
-        exit_label = "Exit CtrlSpeak" if CLIENT_ONLY_BUILD else "Stop everything"
-        self.stop_all_button = ttk.Button(controls, text=exit_label, style="Danger.TButton",
-                                          command=self.stop_everything)
-        self.stop_all_button.pack(fill=tk.X, pady=(12, 4))
-
-        # Footer actions
-        footer = ttk.Frame(container, style="Modern.TFrame")
-        footer.pack(fill=tk.X, pady=(18, 0))
-        ttk.Button(footer, text="Close control center", style="Accent.TButton",
-                   command=self.close).pack(fill=tk.X)
-        uninstall_label = (
-            "Delete CtrlSpeak"
-            if sys.platform.startswith("win")
-            else "Linux uninstall information"
-        )
-        ttk.Button(footer, text=uninstall_label, style="Danger.TButton",
-                   command=self.delete_ctrlspeak).pack(fill=tk.X, pady=(10, 0))
-
-        self.window.after(120, self.refresh_status)
-
-        # --- Auto-size window to fit content once everything is laid out ---
-        self.window.update_idletasks()
-        req_w = max(self.window.winfo_reqwidth(), 580)
-        self.window.minsize(req_w, 560)
-
-        self.bring_to_front()
-
-    def _build_update_card(self, container: ttk.Frame) -> None:
-        update_card = ttk.Frame(container, style="ModernCard.TFrame", padding=(24, 22))
-        update_card.pack(fill=tk.X, pady=(0, 12))
-        ttk.Label(update_card, text="Application updates", style="SectionHeading.TLabel").pack(anchor=tk.W)
-        update_accent = ttk.Frame(update_card, style="AccentLine.TFrame")
-        update_accent.configure(height=2)
-        update_accent.pack(fill=tk.X, pady=(10, 12))
-
+        self._raise_job: str | None = None
         self._update_runtime = classify_runtime()
         self._update_release = None
         self._update_transaction = None
         self._update_event = UpdateEvent(0, "idle", "Updates have not been checked in this session.")
         self._last_recorded_check_generation = -1
         self.update_status_var = tk.StringVar()
-        self.update_last_checked_var = tk.StringVar()
-        self.update_last_transfer_var = tk.StringVar(value="")
+        self.update_last_checked_var = tk.StringVar(
+            value=f"Last checked: {last_checked}" if last_checked else "Last checked: Never",
+        )
+        self.update_last_transfer_var = tk.StringVar()
         self.update_progress_var = tk.DoubleVar(value=0.0)
-
-        ttk.Label(
-            update_card,
-            text=f"CtrlSpeak {APP_VERSION}  ·  Stable channel",
-            style="Body.TLabel",
-        ).pack(anchor=tk.W)
-        ttk.Label(
-            update_card,
-            textvariable=self.update_status_var,
-            style="Caption.TLabel",
-            wraplength=520,
-            justify=tk.LEFT,
-        ).pack(anchor=tk.W, pady=(10, 0))
-        ttk.Label(
-            update_card,
-            textvariable=self.update_last_checked_var,
-            style="Caption.TLabel",
-        ).pack(anchor=tk.W, pady=(6, 0))
-        ttk.Label(update_card, textvariable=self.update_last_transfer_var,
-                  style="Caption.TLabel", wraplength=520).pack(anchor=tk.W, pady=(6, 0))
-
-        self.update_progress = ttk.Progressbar(
-            update_card,
-            variable=self.update_progress_var,
-            maximum=100.0,
-            mode="determinate",
-        )
-        self.update_progress.pack(fill=tk.X, pady=(12, 0))
-        self.update_progress_text_var = tk.StringVar(value="")
-        ttk.Label(
-            update_card,
-            textvariable=self.update_progress_text_var,
-            style="Caption.TLabel",
-        ).pack(anchor=tk.W, pady=(4, 0))
-
-        buttons = ttk.Frame(update_card, style="ModernCardInner.TFrame")
-        buttons.pack(fill=tk.X, pady=(14, 0))
-        self.check_update_btn = ttk.Button(
-            buttons,
-            text="Check for updates",
-            style="Accent.TButton",
-            command=self.check_for_updates,
-        )
-        self.check_update_btn.pack(side=tk.LEFT)
-        self.install_update_btn = ttk.Button(
-            buttons,
-            text="Download and install",
-            style="Subtle.TButton",
-            command=self._download_or_install_update,
-        )
-        self.install_update_btn.pack(side=tk.LEFT, padx=(10, 0))
-        self.cancel_update_btn = ttk.Button(
-            buttons,
-            text="Cancel",
-            style="Subtle.TButton",
-            command=self._cancel_update,
-        )
-        self.cancel_update_btn.pack(side=tk.LEFT, padx=(10, 0))
-
-        secondary = ttk.Frame(update_card, style="ModernCardInner.TFrame")
-        secondary.pack(fill=tk.X, pady=(10, 0))
-        self.view_release_btn = ttk.Button(
-            secondary,
-            text="View release",
-            style="Subtle.TButton",
-            command=self._view_update_release,
-        )
-        self.view_release_btn.pack(side=tk.LEFT)
-        self.copy_update_diagnostics_btn = ttk.Button(
-            secondary,
-            text="Copy diagnostics",
-            style="Subtle.TButton",
-            command=self._copy_update_diagnostics,
-        )
-        self.copy_update_diagnostics_btn.pack(side=tk.LEFT, padx=(10, 0))
-
+        self.update_progress_text_var = tk.StringVar()
         self._update_coordinator = get_update_coordinator(APP_VERSION)
-        self._update_coordinator.add_listener(self._on_update_event)
-        with settings_lock:
-            last_checked = settings.get("last_update_check_at")
-        self.update_last_checked_var.set(
-            f"Last checked: {last_checked}" if last_checked else "Last checked: Never"
-        )
-        self._apply_update_event(self._update_coordinator.snapshot())
 
     @staticmethod
     def _set_button_enabled(button: ttk.Button, enabled: bool) -> None:
@@ -2715,7 +2188,7 @@ class _LegacyManagementWindow:
         )
 
     def _apply_update_event(self, event: UpdateEvent) -> None:
-        if not self.is_open():
+        if not self.is_open() or event.generation < self._update_event.generation:
             return
         if hasattr(self, "update_last_transfer_var") and event.state in {"idle", "available", "up_to_date", "newer_than_release"}:
             receipt = latest_completed_transfer()
@@ -2726,10 +2199,8 @@ class _LegacyManagementWindow:
                     f"{self._format_update_bytes(receipt['download_bytes'])} downloaded · "
                     f"{self._format_update_bytes(receipt['full_bytes'])} full application")
         self._update_event = event
-        if event.release is not None:
-            self._update_release = event.release
-        if event.transaction is not None:
-            self._update_transaction = event.transaction
+        self._update_release = event.release
+        self._update_transaction = event.transaction
 
         message = event.message
         if self._update_runtime == "source_checkout" and event.state in {
@@ -2938,65 +2409,28 @@ class _LegacyManagementWindow:
         return bool(self.window and self.window.winfo_exists())
 
     def bring_to_front(self) -> None:
-        if not self.is_open(): return
-        self.window.deiconify(); self.window.lift(); self.window.focus_force()
-        self.window.attributes("-topmost", True)
-        self.window.after(150, lambda: self.window.attributes("-topmost", False))
-
-    def _update_scroll_region(self, _event: Optional[tk.Event] = None) -> None:
         if not self.is_open():
             return
-        try:
-            self._scroll_canvas.configure(scrollregion=self._scroll_canvas.bbox("all"))
-        except Exception:
-            logger.exception("Failed to update management window scroll region")
+        self._cancel_raise()
+        window = self.window
+        window.deiconify()
+        window.lift()
+        window.focus_force()
+        window.attributes("-topmost", True)
 
-    def _sync_scroll_width(self, event: tk.Event) -> None:
-        if not self.is_open():
-            return
-        try:
-            self._scroll_canvas.itemconfigure(self._scroll_window, width=event.width)
-        except Exception:
-            logger.exception("Failed to sync management window scroll width")
+        def release_topmost() -> None:
+            self._raise_job = None
+            if window.winfo_exists():
+                window.attributes("-topmost", False)
 
-    def _on_mousewheel(self, event: tk.Event) -> None:
-        if not self.is_open():
-            return
+        self._raise_job = window.after(150, release_topmost)
 
-        delta = 0
-        if hasattr(event, "delta") and event.delta:
-            delta = int(event.delta)
-        elif getattr(event, "num", None) in (4, 5):
-            delta = 120 if event.num == 4 else -120
+    def _cancel_raise(self) -> None:
+        if self._raise_job is not None:
+            self.window.after_cancel(self._raise_job)
+            self._raise_job = None
 
-        if delta == 0:
-            return
-
-        direction = -1 if delta > 0 else 1
-        self._scroll_canvas.yview_scroll(direction, "units")
-
-    def _bind_mousewheel(self, _event: tk.Event) -> None:
-        if self._mousewheel_bound:
-            return
-        widget = self.window
-        widget.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
-        widget.bind_all("<Button-4>", self._on_mousewheel, add="+")
-        widget.bind_all("<Button-5>", self._on_mousewheel, add="+")
-        self._mousewheel_bound = True
-
-    def _unbind_mousewheel(self, _event: Optional[tk.Event]) -> None:
-        if not self._mousewheel_bound:
-            return
-        widget = self.window
-        widget.unbind_all("<MouseWheel>")
-        widget.unbind_all("<Button-4>")
-        widget.unbind_all("<Button-5>")
-        self._mousewheel_bound = False
-
-    # --- state refresh ---
     def refresh_status(self) -> None:
-        with settings_lock:
-            mode = settings.get("mode") or "unknown"
         device_pref = get_device_preference()
         if device_pref not in {"cpu", "cuda"}:
             device_pref = "cpu"
@@ -3016,38 +2450,9 @@ class _LegacyManagementWindow:
             cuda_ready = cuda_runtime_ready(ignore_preference=True, quiet=True)
         model_name = get_current_model_name()
         backend_config = get_runtime_backend_config()
-        if backend_config.backend == "api":
-            self.mode_badge.configure(text="BACKEND · API", style="PillAccent.TLabel")
-            network_label = f"API configured: {backend_config.api_url}"
-        else:
-            self.mode_badge.configure(text=f"MODE · {mode.upper()}", style="PillAccent.TLabel")
-            network_label = describe_server_status()
-        if backend_config.backend == "api":
-            badge_style = "PillMuted.TLabel"
-            badge_text = "API · CONFIGURED"
-        elif "Not connected" in network_label:
-            badge_style = "PillDanger.TLabel"
-            badge_text = "NETWORK · OFFLINE"
-        elif network_label.startswith("Serving"):
-            badge_style = "PillAccent.TLabel"
-            badge_text = "SERVER · ONLINE"
-        elif network_label.startswith("Connected") or network_label.startswith("Discovered"):
-            badge_style = "PillAccent.TLabel"
-            badge_text = "NETWORK · LINKED"
-        else:
-            badge_style = "PillMuted.TLabel"
-            badge_text = "NETWORK · READY"
-        self.network_badge.configure(text=badge_text, style=badge_style)
-        mode_status = f"{mode}" if backend_config.backend == "bundled" else "not used by API backend"
-        status_parts = [
-            f"\u2022 Mode: {mode_status}",
-            f"\u2022 Client: {'active' if sysmod.client_enabled else 'stopped'}",
-            f"\u2022 Server thread: {'running' if sysmod.server_thread and sysmod.server_thread.is_alive() else 'not running'}",
-            f"\u2022 Device: {device_pref}",
-            f"\u2022 Backend: {backend_config.backend}",
-        ]
-        self.status_var.set("\n".join(status_parts))
-        self.server_status_var.set(f"Network: {network_label}")
+        self.server_status_var.set(
+            "Remote API configured" if backend_config.backend == "api" else describe_server_status()
+        )
         configured_backend = get_backend_config()
         if configured_backend != backend_config:
             self.backend_status_var.set(
@@ -3078,60 +2483,9 @@ class _LegacyManagementWindow:
             cuda_text = "CUDA runtime not staged."
         self.cuda_status.set(cuda_text)
 
-        model_statuses: dict[str, dict[str, object]] = {}
-        for candidate, display in (("small", "Small"), ("large-v3", "Large V3")):
-            candidate_present = model_files_present(model_store_path_for(candidate))
-            if not candidate_present:
-                state = "Not downloaded"
-                style = "PillDanger.TLabel"
-            elif model_name == candidate:
-                state = "Active"
-                style = "PillAccent.TLabel"
-            else:
-                state = "Available"
-                style = "PillMuted.TLabel"
-            model_statuses[candidate] = {
-                "display": display,
-                "state": state,
-                "style": style,
-                "present": candidate_present,
-            }
+        present = model_files_present(model_store_path_for(model_name))
+        self.model_status.set(f"{model_name}: {'available locally' if present else 'not downloaded'}.")
 
-        def format_state_text(state: str) -> str:
-            return "not downloaded" if state == "Not downloaded" else state.lower()
-
-        small_info = model_statuses.get("small")
-        if small_info:
-            self.model_small_badge.configure(
-                text=f"{small_info['display']}: {format_state_text(small_info['state'])}",
-                style=str(small_info["style"]),
-            )
-
-        large_info = model_statuses.get("large-v3")
-        if large_info:
-            self.model_large_badge.configure(
-                text=f"{large_info['display']}: {format_state_text(large_info['state'])}",
-                style=str(large_info["style"]),
-            )
-
-        active_info = model_statuses.get(model_name)
-        if active_info:
-            state = str(active_info["state"])
-            display = str(active_info["display"])
-            if state == "Not downloaded":
-                message = f"{display} model is not downloaded."
-            elif state == "Active":
-                message = f"{display} model is active."
-            else:
-                message = f"{display} model is available locally."
-        else:
-            present = model_files_present(model_store_path_for(model_name))
-            message = (
-                f"{model_name} model is ready." if present else f"{model_name} model status unknown."
-            )
-        self.model_status.set(message)
-
-        self.device_var.set(device_pref)
         if model_name in {"small", "large-v3"}:
             self.model_var.set(model_name)
         else:
@@ -3222,59 +2576,6 @@ class _LegacyManagementWindow:
             "The OpenAI key is no longer stored or active in CtrlSpeak.",
             parent=self.window,
         )
-
-    def _refresh_gateway_capabilities(self) -> None:
-        api_url = self.api_url_var.get().strip()
-        api_token = self.api_token_var.get().strip() or None
-        probe_config = BackendConfig("api", api_url, api_token, "disabled")
-        self.capabilities_button.state(["disabled"])
-
-        def finish_error(message: str) -> None:
-            self.capabilities_button.state(["!disabled"])
-            messagebox.showerror("Gateway check failed", message, parent=self.window)
-
-        def finish_success(capabilities: dict[str, object]) -> None:
-            self.capabilities_button.state(["!disabled"])
-            raw_strategies = capabilities.get("strategies")
-            strategy_ids = [
-                str(item["id"])
-                for item in raw_strategies
-                if isinstance(item, dict) and item.get("id")
-            ] if isinstance(raw_strategies, list) else []
-            values = tuple(dict.fromkeys(["server-default", *strategy_ids]))
-            self.provider_strategy_combo.configure(values=values)
-            if self.provider_strategy_var.get() not in values:
-                self.provider_strategy_var.set("server-default")
-            raw_providers = capabilities.get("providers")
-            provider_lines = [
-                f"{item.get('id')}: {item.get('status')}"
-                for item in raw_providers
-                if isinstance(item, dict)
-            ] if isinstance(raw_providers, list) else []
-            messagebox.showinfo(
-                "CtrlSpeak gateway ready",
-                f"Gateway version: {capabilities.get('version', 'unknown')}\n\n"
-                + "\n".join(provider_lines),
-                parent=self.window,
-            )
-
-        def probe() -> None:
-            try:
-                capabilities = ApiTranscriptionClient(
-                    probe_config,
-                    timeout_seconds=10.0,
-                ).get_capabilities()
-            except (ApiBackendError, ValueError) as exc:
-                error_message = str(exc)
-                self.window.after(0, lambda: finish_error(error_message))
-                return
-            self.window.after(0, lambda: finish_success(capabilities))
-
-        threading.Thread(
-            target=probe,
-            name="ctrlspeak-capability-probe",
-            daemon=True,
-        ).start()
 
     def _selected_output_languages(self) -> tuple[str, ...]:
         return tuple(
@@ -3615,121 +2916,11 @@ class _LegacyManagementWindow:
 
     def _on_refresh_finished(self) -> None:
         if not self.is_open(): return
-        self.refresh_button.state(["!disabled"]); self.refresh_button.config(text="Refresh Servers")
+        self.refresh_button.state(["!disabled"]); self.refresh_button.config(text="Refresh servers")
         self.refresh_status()
 
-    def change_mode(self) -> None:
-        if CLIENT_ONLY_BUILD:
-            messagebox.showinfo(
-                "Mode",
-                "This build only supports the client mode.",
-                parent=self.window,
-            )
-            return
-
-        if not self.is_open():
-            return
-
-        try:
-            self.change_mode_button.state(["disabled"])
-        except Exception:
-            logger.exception("Failed to disable change mode button before dialog")
-
-        with settings_lock:
-            current_mode = settings.get("mode")
-
-        try:
-            choice = prompt_initial_mode(self.window)
-        finally:
-            try:
-                self.change_mode_button.state(["!disabled"])
-            except Exception:
-                logger.exception("Failed to re-enable change mode button after dialog")
-
-        if not choice or choice == current_mode:
-            return
-
-        if choice == "client_server":
-            if not ensure_model_ready_for_local_server():
-                messagebox.showwarning(
-                    "Mode not changed",
-                    "CtrlSpeak could not prepare the local transcription engine.",
-                    parent=self.window,
-                )
-                return
-            start_server()
-            if not (sysmod.server_thread and sysmod.server_thread.is_alive()):
-                messagebox.showerror(
-                    "Mode not changed",
-                    "CtrlSpeak could not start the local server.",
-                    parent=self.window,
-                )
-                return
-        else:
-            shutdown_server()
-            try:
-                manual_discovery_refresh()
-            except Exception:
-                logger.exception("Failed to refresh discovery after switching to client mode")
-
-        with settings_lock:
-            settings["mode"] = choice
-        save_settings()
-
-        try:
-            self._icon.title = f"CtrlSpeak {APP_VERSION} ({choice})"
-        except Exception:
-            logger.exception("Failed to update tray icon title after mode change")
-
-        self.refresh_status()
-
-        mode_label = "Client + Server" if choice == "client_server" else "Client Only"
-        messagebox.showinfo(
-            "Mode updated",
-            f"CtrlSpeak will now operate in {mode_label} mode.",
-            parent=self.window,
-        )
-
-    def stop_everything(self) -> None:
-        stop_client_listener(); shutdown_server()
-        self.refresh_status()
-        self.window.after(200, self._icon.stop)
-        self.close()
-
-    def delete_ctrlspeak(self) -> None:
-        if not sys.platform.startswith("win"):
-            messagebox.showinfo(
-                "Linux uninstall",
-                "CtrlSpeak does not remove manually installed Linux files. Remove the "
-                "executable, desktop entry, icon, and XDG CtrlSpeak data explicitly; see "
-                "packaging/BUILDING.md.",
-                parent=self.window,
-            )
-            return
-        if not messagebox.askyesno("Delete CtrlSpeak",
-                                   "This will remove CtrlSpeak and all local data. Continue?",
-                                   parent=self.window):
-            return
-        self.window.after(100, lambda: initiate_self_uninstall(self._icon))
-
-    def close(self) -> None:
-        global management_window
-        coordinator = getattr(self, "_update_coordinator", None)
-        if coordinator is not None:
-            try:
-                coordinator.remove_listener(self._on_update_event)
-            except Exception:
-                logger.exception("Failed to detach management update listener")
-        if self.is_open():
-            self._unbind_mousewheel(None)
-            self.window.destroy()
-        management_window = None
-
-
-# The v0.7 shell retains the mature controllers above behind a hidden rollback
-# window and replaces every user-visible surface with Midnight Signal.
 from utils.midnight_signal_ui import MidnightSignalManagementMixin
 
 
-class ManagementWindow(MidnightSignalManagementMixin, _LegacyManagementWindow):
+class ManagementWindow(MidnightSignalManagementMixin, _ManagementController):
     pass

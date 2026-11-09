@@ -17,10 +17,10 @@ desktop executable; the release workflow coordinates server-side selectors.
 | Text delivery | [dictation_text.py](../utils/dictation_text.py) prepares safe insertion text; [winio.py](../utils/winio.py) lazily selects the [Windows](../utils/windows_input.py) or [X11](../utils/linux_input.py) adapter. [feedback_capture.py](../utils/feedback_capture.py) observes user edits; [transcript_audit.py](../utils/transcript_audit.py) is private and may contain text. |
 | Signed updates | [update_manager.py](../utils/update_manager.py) verifies manifests/downloads; [binary_delta.py](../utils/binary_delta.py) reconstructs exact targets; [update_helper.py](../utils/update_helper.py) owns restart, health and rollback. |
 
-Do not remove the hidden legacy management controller as dead UI: the visible
-Midnight Signal mixin still reuses its variables, callbacks and lifecycle.
-Likewise, embedded LAN discovery and the local model path are distinct from
-the Remote API gateway. Keep both until their removal is an explicit decision.
+Midnight Signal is the only control-centre widget tree. Its settings and
+update controllers bind to those visible controls directly. Embedded LAN
+discovery and the local model path are separate from the Remote API gateway;
+removing the old UI did not remove those runtime modes.
 Tk changes must run on the owner thread; preserve the management queue and
 generation checks when touching lifecycle code.
 

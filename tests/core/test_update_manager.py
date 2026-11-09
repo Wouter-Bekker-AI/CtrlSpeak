@@ -127,6 +127,20 @@ def test_signed_manifest_selects_exact_target():
     assert release.asset.size == len(artifact)
 
 
+@pytest.mark.parametrize("source_version", ["0.5.1", "0.8.6"])
+def test_signed_release_cannot_stage_same_or_older_version(tmp_path, source_version):
+    release, _ = _signed_release(b"valid but not newer")
+    updates = tmp_path / "updates"
+    updates.mkdir()
+    with pytest.raises(update_manager.UpdateError, match="downgrade_not_allowed"):
+        update_manager.create_transaction(release, root=updates, source_version=source_version)
+    assert not list(updates.iterdir())
+    coordinator = update_manager.UpdateCoordinator(source_version)
+    coordinator._release = release
+    with pytest.raises(update_manager.UpdateError, match="downgrade_not_allowed"):
+        coordinator.download_async()
+
+
 def test_signed_manifest_rejects_tampering_wrong_product_and_duplicates():
     artifact = b"artifact"
     private_key, public_key = _key_pair()

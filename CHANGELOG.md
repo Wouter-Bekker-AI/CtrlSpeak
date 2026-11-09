@@ -4,6 +4,18 @@ CtrlSpeak follows semantic versioning. Published binaries are immutable; a
 consumed release is corrected by a newer patch rather than by moving its tag or
 replacing its assets.
 
+## 0.8.6 — 2026-11-09
+
+- Open Midnight Signal directly with a single window. Remove the previous
+  layout and bind the existing settings and update controllers to the live UI.
+- Make stable updates forward-only. Keep signed verification and automatic
+  recovery if the newly installed executable fails to start.
+- Make Updates easier to scan in a smaller window, clear stale update actions,
+  and keep Home/End/Page navigation with the focused editor or list.
+- Show microphone, model and device status beside the relevant System controls.
+
+See [the release record](docs/V0.8.6_RELEASE.md).
+
 ## 0.8.5 — 2026-11-09
 
 - Remove shadowed legacy waveform functions, their unreachable looping

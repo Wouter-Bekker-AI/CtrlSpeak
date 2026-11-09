@@ -2,7 +2,7 @@ name: CtrlSpeak tests
 
 on:
   push:
-    branches: [stable, v0.7, 'codex/lossless-transport-*', 'codex/safe-dictation-*', 'codex/reliability-*', 'codex/dictation-modes-*', 'codex/differential-updates-*', 'codex/keyboard-guide-*', 'codex/mic-level-*', 'codex/cleanup-*']
+    branches: [stable, v0.7, 'codex/lossless-transport-*', 'codex/safe-dictation-*', 'codex/reliability-*', 'codex/dictation-modes-*', 'codex/differential-updates-*', 'codex/keyboard-guide-*', 'codex/mic-level-*', 'codex/cleanup-*', 'codex/control-centre-*']
   pull_request:
     branches: [stable, v0.7]
 
@@ -46,18 +46,22 @@ jobs:
       - name: Compile Python sources
         run: python -m compileall main.py utils scripts tests
 
-      - name: Native Windows keyboard guide smoke check
+      - name: Native Windows UI smoke checks
         if: runner.os == 'Windows'
         run: |
           python scripts/preview_keyboard_guide.py --verify
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/verify_microphone_meter.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/verify_control_centre.py
         timeout-minutes: 2
 
-      - name: Native Linux keyboard guide smoke check
+      - name: Native Linux UI smoke checks
         if: runner.os == 'Linux'
         run: |
           xvfb-run -a python scripts/preview_keyboard_guide.py --verify
           xvfb-run -a python scripts/verify_microphone_meter.py
+          xvfb-run -a python scripts/verify_control_centre.py
         timeout-minutes: 2
 
       - name: Check diff whitespace

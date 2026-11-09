@@ -1,10 +1,10 @@
-# CtrlSpeak API v0.8.5
+# CtrlSpeak API v0.8.6
 
-0.8.5 is a maintenance release. Service, desktop and helper report the same
+0.8.6 is a desktop UI maintenance release. Service, desktop and helper report the same
 release version; endpoints, authentication, language rules, corrections,
 transport, response schema and S1 selection are unchanged. Existing 0.7.7
 and 0.8.x clients remain compatible. The mic-meter setting, animated guide,
-and signed updater are desktop-only. See [the cleanup record](V0.8.5_RELEASE.md).
+and signed updater are desktop-only. See [the release record](V0.8.6_RELEASE.md).
 
 ## Desktop dictation modes and compatibility (0.8.0)
 
@@ -39,8 +39,7 @@ complete voice note. It should keep selecting one validated cleaned transcript
 when applied, otherwise ordinary `text`; no new mode parameters or transcript
 echo logic are needed. The coordinated release updates gateway, Ubuntu worker
 and the external helper at the same signed revision without patching or
-restarting Hermes. Existing 0.7.7 clients remain API-compatible, including a
-desktop deliberately rolled back to 0.7.7. See the
+restarting Hermes. Existing 0.7.7 clients remain API-compatible. See the
 [0.8.0 release and operations guide](V0.8.0_RELEASE.md).
 
 ## Admission, deadlines and diagnostics (0.7.7)

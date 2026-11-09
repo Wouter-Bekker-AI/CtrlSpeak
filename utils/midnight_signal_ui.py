@@ -1,4 +1,4 @@
-"""Midnight Signal control centre and custom tray flyout for CtrlSpeak 0.7."""
+"""Midnight Signal control centre and custom tray flyout for CtrlSpeak."""
 from __future__ import annotations
 
 import hashlib
@@ -31,7 +31,6 @@ from utils.ui_state import (
     dictation_presentation,
 )
 from utils.audio_cues import CueKind
-from utils.update_manager import SemanticVersion
 from utils.ui_preferences import microphone_level_label
 
 
@@ -360,7 +359,7 @@ def apply_midnight_signal_theme(window: tk.Misc) -> None:
     style.map("MS.TCheckbutton", background=[("active", CARD)], foreground=[("disabled", MUTED)])
     style.configure("MS.TRadiobutton", background=CARD, foreground=TEXT, font=("Segoe UI", 9))
     style.configure("MS.TNotebook", background=INK, bordercolor=OUTLINE, lightcolor=OUTLINE, darkcolor=OUTLINE, borderwidth=1, tabmargins=(0, 8, 0, 0))
-    style.configure("MS.TNotebook.Tab", background=INK, foreground=MUTED, bordercolor=OUTLINE, lightcolor=OUTLINE, darkcolor=OUTLINE, focuscolor=OUTLINE, borderwidth=1, padding=(17, 10), font=("Segoe UI Semibold", 9))
+    style.configure("MS.TNotebook.Tab", background=INK, foreground=MUTED, bordercolor=OUTLINE, lightcolor=OUTLINE, darkcolor=OUTLINE, focuscolor=OUTLINE, borderwidth=1, padding=(12, 10), font=("Segoe UI Semibold", 9))
     style.map("MS.TNotebook.Tab", background=[("selected", SURFACE), ("active", CARD)], foreground=[("selected", CYAN), ("active", TEXT)], bordercolor=[("selected", OUTLINE), ("active", OUTLINE)], lightcolor=[("selected", OUTLINE), ("active", OUTLINE)], darkcolor=[("selected", OUTLINE), ("active", OUTLINE)])
     style.configure("MS.Treeview", background=CARD, fieldbackground=CARD, foreground=TEXT, rowheight=32, bordercolor=OUTLINE, font=("Segoe UI", 9))
     style.configure("MS.Treeview.Heading", background=CARD_ALT, foreground=MUTED, relief="flat", font=("Segoe UI Semibold", 9))
@@ -380,13 +379,11 @@ def _label(parent: tk.Misc, text: str, *, muted: bool = False, **kwargs) -> ttk.
 
 
 class MidnightSignalManagementMixin:
-    """Replace the visible legacy window while reusing its proven controllers."""
+    """Build the only visible control centre over the shared controllers."""
 
     def __init__(self, icon) -> None:
         super().__init__(icon)
-        self._legacy_window = self.window
-        self._legacy_window.withdraw()
-        self.window = tk.Toplevel(self._legacy_window.master, class_="CtrlSpeak")
+        self.window.configure(background=INK)
         self.window.title(f"CtrlSpeak {sysmod.APP_VERSION} · Midnight Signal")
         scale = display_scale(self.window)
         bounds = active_monitor_bounds(self.window)
@@ -395,7 +392,7 @@ class MidnightSignalManagementMixin:
         x = bounds.left + (bounds.width - width) // 2
         y = bounds.top + (bounds.height - height) // 2
         self.window.geometry(f"{width}x{height}+{x}+{y}")
-        self.window.minsize(min(int(960 * scale), width), min(int(650 * scale), height))
+        self.window.minsize(min(int(760 * scale), width), min(int(520 * scale), height))
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.window.bind("<Escape>", lambda _event: self.close())
         apply_midnight_signal_theme(self.window)
@@ -415,9 +412,15 @@ class MidnightSignalManagementMixin:
         self._correction_refresh_notice: str | None = None
         self._shell_poll_job: str | None = None
         self._build_shell()
-        self.window.after(100, self._poll_midnight_state)
-        self.window.after(180, self._refresh_gateway_capabilities)
-        self.window.after(240, self._refresh_corrections)
+        self._refresh_audio_devices(initial=True)
+        self.refresh_status()
+        self._update_coordinator.add_listener(self._on_update_event)
+        self._apply_update_event(self._update_coordinator.snapshot())
+        self._shell_poll_job = self.window.after(100, self._poll_midnight_state)
+        self._startup_jobs = (
+            self.window.after(180, self._refresh_gateway_capabilities),
+            self.window.after(240, self._refresh_corrections),
+        )
         self.bring_to_front()
 
     def _build_shell(self) -> None:
@@ -502,10 +505,8 @@ class MidnightSignalManagementMixin:
         self.window.bind("<Shift-MouseWheel>", self._scroll_management_horizontal, add="+")
         self.window.bind("<Button-4>", lambda _event: self._scroll_active_management_page(-3), add="+")
         self.window.bind("<Button-5>", lambda _event: self._scroll_active_management_page(3), add="+")
-        self.window.bind("<Prior>", lambda _event: self._scroll_active_management_page(-1, pages=True), add="+")
-        self.window.bind("<Next>", lambda _event: self._scroll_active_management_page(1, pages=True), add="+")
-        self.window.bind("<Home>", lambda _event: self._move_active_management_page(0.0), add="+")
-        self.window.bind("<End>", lambda _event: self._move_active_management_page(1.0), add="+")
+        for key in ("Prior", "Next", "Home", "End"):
+            self.window.bind(f"<{key}>", self._scroll_management_key, add="+")
 
     def _active_management_canvas(self) -> tk.Canvas | None:
         selected = self.ms_notebook.select()
@@ -527,6 +528,19 @@ class MidnightSignalManagementMixin:
             return None
         canvas.yview_moveto(max(0.0, min(1.0, float(fraction))))
         return "break"
+
+    def _scroll_management_key(self, event) -> str | None:
+        # Leave caret movement and list/tree navigation to the focused widget.
+        if event.widget.winfo_class() in {
+            "Entry", "TEntry", "TCombobox", "Text", "Listbox", "Treeview",
+            "Spinbox", "TSpinbox", "Scale", "TScale", "Scrollbar", "TScrollbar",
+        }:
+            return None
+        if event.keysym == "Home":
+            return self._move_active_management_page(0.0)
+        if event.keysym == "End":
+            return self._move_active_management_page(1.0)
+        return self._scroll_active_management_page(-1 if event.keysym == "Prior" else 1, pages=True)
 
     def _scroll_management_wheel(self, event) -> str | None:
         interactive_types = (tk.Listbox, ttk.Combobox, ttk.Treeview, ttk.Scale)
@@ -796,15 +810,15 @@ class MidnightSignalManagementMixin:
         _label(languages, "Choose none for automatic detection, one to force it, or up to five allowed languages.", muted=True, wraplength=410, justify=tk.LEFT).pack(anchor=tk.W, pady=(5, 12))
         choices = language_choices()
         self._output_language_codes = tuple(code for code, _name in choices)
-        self.ms_output_language_list = tk.Listbox(
+        self.output_language_list = tk.Listbox(
             languages, selectmode=tk.MULTIPLE, exportselection=False, height=12,
             background=CARD_ALT, foreground=TEXT, selectbackground="#244752",
             selectforeground=TEXT, highlightbackground=OUTLINE, highlightcolor=CYAN,
             borderwidth=1, relief=tk.FLAT, font=("Segoe UI", 10),
         )
         for code, name in choices:
-            self.ms_output_language_list.insert(tk.END, f"{name} ({code})")
-        self.ms_output_language_list.pack(fill=tk.BOTH, expand=True)
+            self.output_language_list.insert(tk.END, f"{name} ({code})")
+        self.output_language_list.pack(fill=tk.BOTH, expand=True)
         self._set_output_language_selection(get_backend_config().allowed_output_languages)
         quick = ttk.Frame(languages, style="MS.Card.TFrame")
         quick.pack(fill=tk.X, pady=(12, 0))
@@ -1035,55 +1049,32 @@ class MidnightSignalManagementMixin:
 
     def _build_updates_page(self, page: ttk.Frame) -> None:
         card = _card(page, padding=(26, 24))
-        card.pack(fill=tk.BOTH, expand=True)
+        card.pack(fill=tk.X)
         ttk.Label(card, text="Application updates", style="MS.Section.TLabel").pack(anchor=tk.W)
-        ttk.Label(card, text=f"CtrlSpeak {sysmod.APP_VERSION} · stable channel", style="MS.CardMuted.TLabel").pack(anchor=tk.W, pady=(5, 22))
-        ttk.Label(card, textvariable=self.update_status_var, style="MS.Metric.TLabel", wraplength=920, justify=tk.LEFT).pack(anchor=tk.W)
-        ttk.Label(card, textvariable=self.update_last_checked_var, style="MS.CardMuted.TLabel").pack(anchor=tk.W, pady=(10, 0))
-        ttk.Label(card, textvariable=self.update_last_transfer_var, style="MS.CardMuted.TLabel", wraplength=920).pack(anchor=tk.W, pady=(8, 0))
-        ttk.Progressbar(card, variable=self.update_progress_var, maximum=100, style="MS.Horizontal.TProgressbar").pack(fill=tk.X, pady=(24, 4))
+        ttk.Label(card, text=f"CtrlSpeak {sysmod.APP_VERSION} · stable channel", style="MS.CardMuted.TLabel").pack(anchor=tk.W, pady=(5, 16))
+        ttk.Label(card, textvariable=self.update_status_var, style="MS.Metric.TLabel", wraplength=600, justify=tk.LEFT).pack(anchor=tk.W)
+        ttk.Label(card, textvariable=self.update_last_checked_var, style="MS.CardMuted.TLabel").pack(anchor=tk.W, pady=(8, 0))
+        ttk.Label(card, textvariable=self.update_last_transfer_var, style="MS.CardMuted.TLabel", wraplength=600, justify=tk.LEFT).pack(anchor=tk.W, pady=(5, 0))
+        ttk.Progressbar(card, variable=self.update_progress_var, maximum=100, style="MS.Horizontal.TProgressbar").pack(fill=tk.X, pady=(16, 4))
         ttk.Label(card, textvariable=self.update_progress_text_var, style="MS.CardMuted.TLabel").pack(anchor=tk.W)
-        buttons = ttk.Frame(card, style="MS.Card.TFrame")
-        buttons.pack(fill=tk.X, pady=(24, 0))
-        self.ms_check_update_btn = ttk.Button(buttons, text="Check for updates", style="MS.Primary.TButton", command=self.check_for_updates)
-        self.ms_check_update_btn.pack(side=tk.LEFT)
-        self.ms_install_update_btn = ttk.Button(buttons, text="Download and install", style="MS.TButton", command=self._download_or_install_update)
-        self.ms_install_update_btn.pack(side=tk.LEFT, padx=(10, 0))
-        self.ms_cancel_update_btn = ttk.Button(buttons, text="Cancel", style="MS.TButton", command=self._cancel_update)
-        self.ms_cancel_update_btn.pack(side=tk.LEFT, padx=(10, 0))
-        ttk.Button(buttons, text="View release", style="MS.TButton", command=self._view_update_release).pack(side=tk.RIGHT)
-        ttk.Button(buttons, text="Copy diagnostics", style="MS.TButton", command=self._copy_update_diagnostics).pack(side=tk.RIGHT, padx=(0, 10))
-        rollback = ttk.Frame(card, style="MS.Card.TFrame")
-        rollback.pack(fill=tk.X, pady=(24, 0))
-        self.ms_rollback_btn = ttk.Button(rollback, text="Roll back to 0.7.7…", style="MS.TButton", command=self._rollback_to_077)
-        self.ms_rollback_btn.pack(side=tk.LEFT)
-        self._set_button_enabled(self.ms_rollback_btn, self._update_runtime == "packaged_user_writable"
-                                 and SemanticVersion.parse(sysmod.APP_VERSION) > SemanticVersion.parse("0.7.7"))
-        _label(card, "Prefer the previous behaviour? Rollback selects the signed 0.7.7 release, then uses the same verified download/restart flow. Settings and credentials are retained; new dictation modes are unavailable on 0.7.7.",
-               muted=True, wraplength=920, justify=tk.LEFT).pack(anchor=tk.W, pady=(12, 0))
-        _label(card, "Downloads are signed, SHA-256 verified, installed by a separate helper, and automatically rolled back if startup health fails.", muted=True, wraplength=920, justify=tk.LEFT).pack(anchor=tk.W, side=tk.BOTTOM)
 
-    def _rollback_to_077(self) -> None:
-        if self._update_runtime != "packaged_user_writable":
-            messagebox.showinfo("Packaged installation required", "Source checkouts are changed through Git. This rollback button applies to the installed CtrlSpeak executable.", parent=self.window)
-            return
-        if SemanticVersion.parse(sysmod.APP_VERSION) <= SemanticVersion.parse("0.7.7"):
-            self.update_status_var.set("CtrlSpeak is already on 0.7.7 or older.")
-            return
-        if sysmod.is_transcription_busy():
-            messagebox.showwarning("CtrlSpeak is busy", "Finish or cancel dictation before preparing a rollback.", parent=self.window)
-            return
-        if not messagebox.askyesno(
-            "Return to CtrlSpeak 0.7.7?",
-            "This will look up and verify the signed 0.7.7 release. You will still confirm its download and installation. "
-            "Your settings and saved credentials remain; hands-free/live modes will no longer be available. Continue?",
-            parent=self.window, default=messagebox.NO, icon=messagebox.QUESTION,
-        ):
-            return
-        try:
-            self._update_coordinator.rollback_to_077()
-        except Exception:
-            self.update_status_var.set("Rollback lookup could not start. Check the CtrlSpeak log; nothing was installed.")
+        actions = ttk.Frame(card, style="MS.Card.TFrame")
+        actions.pack(fill=tk.X, pady=(16, 0))
+        # The shared controller drives these visible buttons directly.
+        self.check_update_btn = ttk.Button(actions, text="Check for updates", style="MS.Primary.TButton", command=self.check_for_updates)
+        self.install_update_btn = ttk.Button(actions, text="Download and install", style="MS.TButton", command=self._download_or_install_update)
+        self.cancel_update_btn = ttk.Button(actions, text="Cancel", style="MS.TButton", command=self._cancel_update)
+        for button in (self.check_update_btn, self.install_update_btn, self.cancel_update_btn):
+            button.pack(side=tk.LEFT, padx=(0, 8))
+
+        links = ttk.Frame(card, style="MS.Card.TFrame")
+        links.pack(fill=tk.X, pady=(10, 0))
+        self.view_release_btn = ttk.Button(links, text="View release", style="MS.TButton", command=self._view_update_release)
+        self.view_release_btn.pack(side=tk.LEFT)
+        ttk.Button(links, text="Copy diagnostics", style="MS.TButton",
+                   command=self._copy_update_diagnostics).pack(side=tk.LEFT, padx=(8, 0))
+        _label(card, "Updates are signed and verified. If a new version cannot start, CtrlSpeak restores the previous working executable.",
+               muted=True, wraplength=600, justify=tk.LEFT).pack(anchor=tk.W, pady=(16, 0))
 
     def _build_system_page(self, page: ttk.Frame) -> None:
         columns = ttk.Frame(page, style="MS.Surface.TFrame")
@@ -1094,20 +1085,34 @@ class MidnightSignalManagementMixin:
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
         ttk.Label(left, text="Audio and local engine", style="MS.Section.TLabel").pack(anchor=tk.W)
         _label(left, "Input microphone", muted=True).pack(anchor=tk.W, pady=(16, 5))
-        ttk.Combobox(left, textvariable=self.audio_device_var, values=self.audio_device_combo.cget("values"), state="readonly", style="MS.TCombobox").pack(fill=tk.X)
-        ttk.Button(left, text="Apply input device", style="MS.TButton", command=self._apply_audio_device).pack(anchor=tk.W, pady=(10, 0))
+        self.audio_device_combo = ttk.Combobox(left, textvariable=self.audio_device_var, state="readonly", style="MS.TCombobox")
+        self.audio_device_combo.pack(fill=tk.X)
+        audio_actions = ttk.Frame(left, style="MS.Card.TFrame")
+        audio_actions.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(audio_actions, text="Apply input device", style="MS.TButton", command=self._apply_audio_device).pack(side=tk.LEFT)
+        ttk.Button(audio_actions, text="Refresh list", style="MS.Compact.TButton", command=self._refresh_audio_devices).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(left, textvariable=self.audio_device_status, style="MS.CardMuted.TLabel", wraplength=350).pack(anchor=tk.W, pady=(5, 0))
         _label(left, "Embedded device", muted=True).pack(anchor=tk.W, pady=(20, 5))
         device_row = ttk.Frame(left, style="MS.Card.TFrame")
         device_row.pack(fill=tk.X)
         ttk.Radiobutton(device_row, text="CPU", variable=self.device_var, value="cpu", style="MS.TRadiobutton").pack(side=tk.LEFT)
-        ttk.Radiobutton(device_row, text="CUDA GPU", variable=self.device_var, value="cuda", style="MS.TRadiobutton").pack(side=tk.LEFT, padx=(18, 0))
-        ttk.Button(left, text="Apply device", style="MS.TButton", command=self._apply_device).pack(anchor=tk.W, pady=(10, 0))
+        gpu = ttk.Radiobutton(device_row, text="CUDA GPU", variable=self.device_var, value="cuda", style="MS.TRadiobutton")
+        gpu.pack(side=tk.LEFT, padx=(18, 0))
+        self._set_button_enabled(gpu, self.cuda_supported)
+        device_actions = ttk.Frame(left, style="MS.Card.TFrame")
+        device_actions.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(device_actions, text="Apply device", style="MS.TButton", command=self._apply_device).pack(side=tk.LEFT)
+        if self.cuda_supported:
+            ttk.Button(device_actions, text="Prepare CUDA" if self.cuda_auto_install_supported else "Recheck CUDA",
+                       style="MS.Compact.TButton", command=self._install_cuda).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(left, textvariable=self.cuda_status, style="MS.CardMuted.TLabel", wraplength=350).pack(anchor=tk.W, pady=(5, 0))
         _label(left, "Embedded model", muted=True).pack(anchor=tk.W, pady=(20, 5))
         ttk.Combobox(left, textvariable=self.model_var, values=("small", "large-v3"), state="readonly", style="MS.TCombobox").pack(fill=tk.X)
         model_buttons = ttk.Frame(left, style="MS.Card.TFrame")
         model_buttons.pack(fill=tk.X, pady=(10, 0))
         ttk.Button(model_buttons, text="Activate", style="MS.TButton", command=self._apply_model).pack(side=tk.LEFT)
         ttk.Button(model_buttons, text="Download", style="MS.TButton", command=self._download_model).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(left, textvariable=self.model_status, style="MS.CardMuted.TLabel", wraplength=350).pack(anchor=tk.W)
 
         ttk.Label(right, text="Connection and credentials", style="MS.Section.TLabel").pack(anchor=tk.W)
         _label(right, "Gateway URL", muted=True).pack(anchor=tk.W, pady=(16, 4))
@@ -1116,7 +1121,9 @@ class MidnightSignalManagementMixin:
         ttk.Entry(right, textvariable=self.api_token_var, show="•", style="MS.TEntry").pack(fill=tk.X)
         _label(right, "OpenAI API key", muted=True).pack(anchor=tk.W, pady=(12, 4))
         ttk.Entry(right, textvariable=self.openai_api_key_var, show="•", style="MS.TEntry").pack(fill=tk.X)
-        ttk.Checkbutton(right, text="Remember securely on this computer", variable=self.remember_openai_key_var, style="MS.TCheckbutton").pack(anchor=tk.W, pady=(8, 0))
+        remember = ttk.Checkbutton(right, text="Remember securely on this computer", variable=self.remember_openai_key_var, style="MS.TCheckbutton")
+        remember.pack(anchor=tk.W, pady=(8, 0))
+        self._set_button_enabled(remember, self._secure_key_storage_available)
         connection_buttons = ttk.Frame(right, style="MS.Card.TFrame")
         connection_buttons.pack(fill=tk.X, pady=(16, 0))
         ttk.Button(connection_buttons, text="Save connection", style="MS.Primary.TButton", command=self._save_backend_midnight).pack(side=tk.LEFT)
@@ -1125,9 +1132,12 @@ class MidnightSignalManagementMixin:
         ttk.Label(right, text="Runtime controls", style="MS.Section.TLabel").pack(anchor=tk.W)
         runtime = ttk.Frame(right, style="MS.Card.TFrame")
         runtime.pack(fill=tk.X, pady=(12, 0))
-        ttk.Button(runtime, text="Start client", style="MS.TButton", command=self.start_client).pack(side=tk.LEFT)
-        ttk.Button(runtime, text="Stop client", style="MS.TButton", command=self.stop_client).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(runtime, text="Refresh servers", style="MS.TButton", command=self.refresh_servers).pack(side=tk.LEFT, padx=(8, 0))
+        self.start_button = ttk.Button(runtime, text="Start client", style="MS.TButton", command=self.start_client)
+        self.stop_button = ttk.Button(runtime, text="Stop client", style="MS.TButton", command=self.stop_client)
+        self.refresh_button = ttk.Button(runtime, text="Refresh servers", style="MS.TButton", command=self.refresh_servers)
+        for button in (self.start_button, self.stop_button, self.refresh_button):
+            button.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(right, textvariable=self.server_status_var, style="MS.CardMuted.TLabel", wraplength=350).pack(anchor=tk.W, pady=(6, 0))
         footer = ttk.Frame(right, style="MS.Card.TFrame")
         footer.pack(fill=tk.X, side=tk.BOTTOM)
         ttk.Button(footer, text="Hide to tray", style="MS.TButton", command=self.close).pack(side=tk.RIGHT)
@@ -1156,22 +1166,6 @@ class MidnightSignalManagementMixin:
             enabled = bool(self.ms_cues_enabled_var.get())
             volume = max(0, min(100, int(round(self.ms_cue_volume_var.get()))))
             self.ms_route_cue_var.set(f"{volume}%" if enabled else "Muted")
-
-    def _selected_output_languages(self) -> tuple[str, ...]:
-        widget = getattr(self, "ms_output_language_list", None)
-        if widget is None:
-            return super()._selected_output_languages()
-        return tuple(self._output_language_codes[int(index)] for index in widget.curselection())
-
-    def _set_output_language_selection(self, codes: tuple[str, ...]) -> None:
-        widget = getattr(self, "ms_output_language_list", None)
-        if widget is None:
-            return super()._set_output_language_selection(codes)
-        selected = set(codes)
-        widget.selection_clear(0, tk.END)
-        for index, code in enumerate(self._output_language_codes):
-            if code in selected:
-                widget.selection_set(index)
 
     def _save_backend_midnight(self) -> None:
         self.provider_strategy_var.set(STRATEGY_IDS.get(self.ms_strategy_display_var.get(), "server-default"))
@@ -1660,28 +1654,6 @@ class MidnightSignalManagementMixin:
         self.ms_backend_status_var.set(self.backend_status_var.get())
         self._shell_poll_job = self.window.after(200, self._poll_midnight_state)
 
-    def _apply_update_event(self, event) -> None:
-        super()._apply_update_event(event)
-        if not hasattr(self, "ms_check_update_btn"):
-            return
-        busy = event.state in {"checking", "downloading", "applying_patch", "falling_back", "verifying", "launching_updater"}
-        self._set_button_enabled(self.ms_check_update_btn, not busy)
-        self._set_button_enabled(self.ms_cancel_update_btn, event.state in {"downloading", "applying_patch", "falling_back"})
-        if hasattr(self, "ms_rollback_btn"):
-            self._set_button_enabled(self.ms_rollback_btn, not busy and self._update_runtime == "packaged_user_writable"
-                                     and SemanticVersion.parse(sysmod.APP_VERSION) > SemanticVersion.parse("0.7.7"))
-        install_eligible = self._update_runtime == "packaged_user_writable"
-        rollback = getattr(event.release, "operation", "update") == "rollback_077"
-        if event.state == "ready_to_install" and install_eligible:
-            self.ms_install_update_btn.configure(text="Restart on 0.7.7" if rollback else "Restart and install")
-            self._set_button_enabled(self.ms_install_update_btn, True)
-        elif event.state in {"available", "failed"} and install_eligible:
-            self.ms_install_update_btn.configure(text="Download 0.7.7" if rollback else "Retry download" if event.state == "failed" else "Download and install")
-            self._set_button_enabled(self.ms_install_update_btn, True)
-        else:
-            self.ms_install_update_btn.configure(text="Download and install")
-            self._set_button_enabled(self.ms_install_update_btn, False)
-
     def refresh_status(self) -> None:
         super().refresh_status()
         if hasattr(self, "ms_backend_status_var"):
@@ -1718,17 +1690,12 @@ class MidnightSignalManagementMixin:
                 coordinator.remove_listener(self._on_update_event)
             except Exception:
                 pass
-        if self._shell_poll_job and self.is_open():
-            try:
-                self.window.after_cancel(self._shell_poll_job)
-            except tk.TclError:
-                pass
-        for candidate in (getattr(self, "window", None), getattr(self, "_legacy_window", None)):
-            try:
-                if candidate is not None and candidate.winfo_exists():
-                    candidate.destroy()
-            except tk.TclError:
-                pass
+        if self.is_open():
+            for job in (self._shell_poll_job, *getattr(self, "_startup_jobs", ()),
+                        getattr(self, "_raise_job", None)):
+                if job:
+                    self.window.after_cancel(job)
+            self.window.destroy()
         gui_module.management_window = None
 
 
