@@ -187,8 +187,10 @@ UI verifiers `python scripts/preview_keyboard_guide.py --verify` and
 on headless Linux). These use isolated profiles and do not start a microphone
 or global hook. See [test coverage and physical checks](../docs/TESTING.md).
 
-From 0.8.2, the build helper fetches the hash-pinned Xdelta tool and its license
-using `scripts/fetch_patch_tool.py`. The packaged health command additionally
+The build helper stages the hash-pinned Xdelta tool and license from the
+[vendored upstream archives](vendor/xdelta3/README.md) using
+`scripts/fetch_patch_tool.py` (the filename is historical; staging is offline).
+The packaged health command additionally
 executes a bounded native encode/decode roundtrip and requires
 `differential_updates.ok` and `byte_identical`. No runtime network download of a
 decoder is permitted. CI generates patches from recent signed bases before

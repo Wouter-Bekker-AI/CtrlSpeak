@@ -1,0 +1,4 @@
+# These upstream build inputs are verified byte-for-byte on every platform.
+packaging/vendor/xdelta3/LICENSE -text
+packaging/vendor/xdelta3/*.zip binary
+packaging/vendor/xdelta3/*.tar.gz binary

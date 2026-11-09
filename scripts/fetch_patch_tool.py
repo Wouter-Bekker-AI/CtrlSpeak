@@ -1,4 +1,4 @@
-"""Build-time only: fetch a hash-pinned upstream tool and Apache-2.0 license."""
+"""Build-time only: stage the vendored, hash-pinned Xdelta tool and license."""
 from pathlib import Path
 import argparse
 import hashlib
@@ -10,21 +10,16 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from utils.delta_tools import TOOLS, TOOL_ROOT, LICENSE_URL, LICENSE_SHA256, tool_path
+from utils.delta_tools import TOOLS, LICENSE_SHA256, tool_path
 
 
-def fetch(url, expected, maximum=2*1024*1024):
-    import requests
-    with requests.get(url, timeout=(8, 30), stream=True) as response:
-        response.raise_for_status()
-        data = bytearray()
-        for chunk in response.iter_content(65536):
-            data.extend(chunk)
-            if len(data) > maximum:
-                raise RuntimeError("Patch tool download exceeds its build-time limit")
-    data = bytes(data)
+VENDOR = ROOT / "packaging" / "vendor" / "xdelta3"
+
+
+def _read_pinned_input(name, expected):
+    data = (VENDOR / name).read_bytes()
     if hashlib.sha256(data).hexdigest() != expected:
-        raise RuntimeError("Patch tool input failed pinned SHA-256 verification")
+        raise RuntimeError(f"Patch tool input failed pinned SHA-256 verification: {name}")
     return data
 
 
@@ -33,7 +28,7 @@ def ensure_tool(platform_name=None):
     spec, path = TOOLS[platform_name], tool_path(platform_name)
     license_path = path.parent / "LICENSE"
     if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != spec["binary_sha256"]:
-        data = fetch(TOOL_ROOT+spec["archive"], spec["archive_sha256"])
+        data = _read_pinned_input(spec["archive"], spec["archive_sha256"])
         member = spec["archive"].removesuffix(".zip").removesuffix(".tar.gz")+"/"+spec["binary"]
         if spec["archive"].endswith(".zip"):
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -50,7 +45,7 @@ def ensure_tool(platform_name=None):
         if platform_name == "linux":
             path.chmod(0o755)
     if not license_path.is_file() or hashlib.sha256(license_path.read_bytes()).hexdigest() != LICENSE_SHA256:
-        license_path.write_bytes(fetch(LICENSE_URL, LICENSE_SHA256))
+        license_path.write_bytes(_read_pinned_input("LICENSE", LICENSE_SHA256))
     return path
 
 

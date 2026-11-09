@@ -10,6 +10,8 @@ replacing its assets.
   PortAudio feedback path, and other unused helpers and imports.
 - Stop shipping the obsolete loop WAV in current builds. Drop unused OpenCV
   and separate contributor test/lint packages from desktop requirements.
+- Stage the existing hash-pinned Xdelta tool from checked-in upstream
+  archives; clean builds no longer depend on a separate Xdelta CDN download.
 - Clarify current desktop, API, build, and signed fleet release workflows.
   Keep historical documentation, artifacts, and compatibility contracts intact.
 - Correct a floating-point-sensitive timeout assertion without changing runtime

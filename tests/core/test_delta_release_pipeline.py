@@ -52,6 +52,37 @@ def test_native_tool_is_pinned_and_bundled_with_license():
     assert "'tools/xdelta3'" in spec and "'LICENSE'" in spec and "'utils.binary_delta'" in spec
 
 
+@pytest.mark.parametrize("platform_name", ("linux", "windows"))
+def test_pinned_upstream_archive_can_be_staged_from_an_empty_cache(
+    tmp_path, monkeypatch, platform_name,
+):
+    from scripts import fetch_patch_tool as stage
+
+    spec = stage.TOOLS[platform_name]
+    expected = tmp_path / platform_name / spec["binary"]
+    monkeypatch.setattr(stage, "tool_path", lambda _platform: expected)
+
+    assert stage.ensure_tool(platform_name) == expected
+    assert hashlib.sha256(expected.read_bytes()).hexdigest() == spec["binary_sha256"]
+    assert hashlib.sha256((expected.parent / "LICENSE").read_bytes()).hexdigest() == stage.LICENSE_SHA256
+
+
+def test_tampered_build_archive_is_rejected_before_staging(tmp_path, monkeypatch):
+    from scripts import fetch_patch_tool as stage
+
+    vendor = tmp_path / "vendor"
+    vendor.mkdir()
+    spec = stage.TOOLS["windows"]
+    (vendor / spec["archive"]).write_bytes(b"not the pinned archive")
+    target = tmp_path / "cache" / spec["binary"]
+    monkeypatch.setattr(stage, "VENDOR", vendor)
+    monkeypatch.setattr(stage, "tool_path", lambda _platform: target)
+
+    with pytest.raises(RuntimeError, match="pinned SHA-256"):
+        stage.ensure_tool("windows")
+    assert not target.exists()
+
+
 def test_future_patch_generation_chooses_recent_patch_aware_bases_only(monkeypatch):
     from scripts import generate_deltas as generator
     class Response:
