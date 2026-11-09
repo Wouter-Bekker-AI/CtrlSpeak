@@ -100,7 +100,7 @@ Whisper native libraries.
 
 ## v0.7.3 correction, overlay-brand, and clipboard gates
 
-Before v0.7.3 is tagged:
+When changing the correction dialog, overlay artwork or clipboard path:
 
 1. Run the correction-dialog UI contract, overlay-brand-artwork, and feedback
    capture suites. Confirm the correction form uses Midnight Signal styles,
@@ -130,7 +130,7 @@ Before v0.7.3 is tagged:
 
 ## v0.7.2 panel-dismissal regression gates
 
-Before v0.7.2 is tagged:
+When changing panel dismissal, focus or tray lifecycle:
 
 1. Run the deterministic tray and Midnight Signal visual-contract tests. They
    must verify the visible quick-panel and control-center hide actions, Escape,
@@ -160,7 +160,7 @@ PortAudio's process-global Windows host state is not safe across those competing
 lifecycles. The failure is a native access violation and therefore bypasses
 Python exception handling and application logs.
 
-Before v0.7.1 is tagged:
+When changing capture, native cues or PortAudio ownership:
 
 1. Run the deterministic audio-lifecycle tests. A guarded fake backend must
    reject any second PortAudio initialization or termination while capture is
@@ -204,7 +204,7 @@ Run these checks against both source and the exact packaged
 available:
 
 1. Open CtrlSpeak from the stable filename. Confirm the tray and control center
-   show 0.7.3, render the graphite Midnight Signal hierarchy cleanly, remain
+   show the exact candidate version, render Midnight Signal cleanly, remain
    readable at the supported scales, and expose visible keyboard focus.
 2. Left-click the tray icon and verify the branded quick surface; right-click
    and verify the dependable native fallback menu. Exercise Open control
@@ -212,7 +212,7 @@ available:
    updates, mute/volume, and Quit. Disabled actions must look and behave disabled.
 3. Hold right Ctrl on each connected monitor. Confirm the slim recording capsule
    appears on the active monitor without taking focus, its timer advances, the
-   waveform/dBFS meter reacts to the microphone, and silence settles at the
+   waveform and mic level react to the microphone, and silence settles at the
    documented floor rather than displaying fake activity. Recording-start
    feedback must not crash, stall, or race the input stream.
 4. Release right Ctrl. Confirm the capsule transitions to the elongated
@@ -237,11 +237,12 @@ available:
 8. Navigate the control center without a mouse. Confirm logical focus order,
    readable state text independent of colour, no clipped labels, Escape/close
    behaviour, and that reduced motion removes nonessential continuous motion.
-9. Confirm Copy diagnostics, logs, UI state snapshots, and tray detail contain
+9. Confirm Copy diagnostics, UI state snapshots, and tray detail contain
    no transcript text, audio, API key, bearer token, correction phrase, header,
    or clipboard data. A correction-dialog failure must show only its bounded,
    fixed-category guidance; its log records the exception category and outcome,
-   never raw gateway/validation detail or submitted phrases.
+   never raw gateway/validation detail or submitted phrases. The private
+   dictation audit is distinct and can contain transcript text.
 10. Quit during a deliberately blocked provider request. Shutdown must return
     after its bounded wait, attempt exact-path WAV cleanup, and remove any file
     that remained locked when CtrlSpeak next starts under its single-instance
@@ -252,13 +253,13 @@ available:
 This suite downloads/loads model assets and starts the legacy local server:
 
 ```bash
-CTRLSPEAK_RUN_FULL_TESTS=1 python -m pytest -m full_gui
+CTRLSPEAK_RUN_FULL_TESTS=1 python scripts/run_bounded_tests.py --timeout 180 -m full_gui
 ```
 
 Combined run:
 
 ```bash
-CTRLSPEAK_RUN_FULL_TESTS=1 python -m pytest
+CTRLSPEAK_RUN_FULL_TESTS=1 python scripts/run_bounded_tests.py --timeout 180
 ```
 
 Run it only in an environment intentionally provisioned for the model and
@@ -307,14 +308,16 @@ source environment and again against `dist/CtrlSpeak`:
 The updater cannot be proven end to end by source-mode unit tests. Against the
 exact signed artifacts on clean Windows and Ubuntu/X11 hosts:
 
-1. Install v0.7.2 as `CtrlSpeak.exe` or `CtrlSpeak` and confirm the tray/control
-   center show 0.7.2.
-2. Publish the controlled signed v0.7.3 release with both required platform
-   artifacts and the three metadata assets.
+1. Use an isolated copy of the prior signed release under the stable filename
+   and confirm the tray/control center show the prior version.
+2. Verify the signed target and exact public asset set, including all declared
+   patches. Use a controlled release fixture for negative-path tests.
 3. Check for the update from the GUI, inspect version/size, download, and confirm
    the UI remains responsive.
-4. Restart and verify the same stable path now reports 0.7.3 while API URL/token,
-   mode, input device, models, CUDA files, and corrections remain intact.
+4. For an exact patch base, check that the patch is selected and the locally
+   reconstructed target is bit-identical. Also exercise verified full fallback.
+   Restart the isolated copy and verify the same path reports the candidate
+   version while settings, models, CUDA files and corrections remain intact.
 5. Interrupt and resume a download; confirm the final artifact hash matches the
    signed manifest.
 6. Test offline, GitHub rate-limit, corrupt signature, wrong hash, and unwritable
@@ -353,13 +356,13 @@ acceptance test. Do not use its host-level guidance on an Ubuntu system.
 
 ## Companion API tests
 
-The maintained v0.7.3 role-aware service is in `server/whisper_transcription`. Its
+The maintained role-aware service is in `server/whisper_transcription`. Its
 headless suite uses a fake model and does not download CUDA/model assets, bind a
 network port, restart systemd, or change a firewall:
 
 ```bash
 cd server/whisper_transcription
-python -m pytest -q
+python ../../scripts/run_bounded_tests.py --timeout 180 --cwd . -q
 python -m compileall app tests
 ```
 
@@ -380,12 +383,12 @@ missing measurements.
 
 ## Production gateway and worker acceptance
 
-After taking timestamped source/configuration/database rollback copies and
-deploying one role at a time:
+Check the [signed fleet workflow](UPDATING.md#maintainer-release-workflow)
+receipt and verify production independently:
 
-1. Confirm the dedicated `CtrlSpeak` gateway reports version 0.7.3 and role
-   `gateway`. Record the unchanged Ubuntu worker version, confirm role `worker`,
-   and verify protocol compatibility. Nova must not gain a CtrlSpeak listener.
+1. Confirm the gateway, Ubuntu worker and external Nova STT helper report the
+   candidate version and run the signed revision. Verify gateway/worker roles
+   and protocol compatibility. Nova must not gain a CtrlSpeak listener.
 2. Confirm the gateway retains all correction/audit rows, uses the existing
    authenticated identities, stores no OpenAI key, and listens only on its
    intended private WireGuard address.
@@ -395,9 +398,9 @@ deploying one role at a time:
    Assert non-empty corrected text, the requested language policy, the actual
    GPU provider, non-negative attempt/routing/inference timings, and no
    degradation.
-5. With the worker deliberately unavailable, confirm the first health probe is
-   bounded and the circuit makes later requests fail over quickly. Restore the
-   worker and confirm the circuit closes after a successful bounded re-probe.
-6. Confirm the Nova Hermes service remains active and can transcribe through
-   the unchanged `/v1/transcribe` contract. Do not replace its host-specific
-   command adapter during this deployment.
+5. Verify OpenAI/Tiny fallback routes and GPU S1 canaries. Exercise the
+   worker-offline circuit in a controlled test; don't take a healthy production
+   worker down just to prove the timeout.
+6. Verify the isolated helper's codec self-test and live gateway canary.
+   Confirm Nova Hermes stays active without modifying its configuration or
+   restarting its process.

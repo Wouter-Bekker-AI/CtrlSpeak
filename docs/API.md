@@ -140,9 +140,8 @@ The external Nova command helper is versioned with CtrlSpeak, not Hermes.
 It retains one selected transcript and the existing schema-2 `.ctrlspeak.json`
 feedback sidecar. See [Nova integration](NOVA_CTRLSPEAK_0.7.5_HANDOFF.md).
 
-The maintained implementation is in `server/whisper_transcription`. The v0.7
-contract preserves the three deployment roles introduced in v0.6 and adds safe,
-measured routing telemetry for Midnight Signal. The roles are:
+The maintained implementation is in `server/whisper_transcription`. Its
+three deployment roles expose measured routing telemetry where applicable:
 
 - `gateway`: client-facing orchestration, identities, provider routing,
   language enforcement, corrections, feedback, and audit records;
@@ -151,18 +150,13 @@ measured routing telemetry for Midnight Signal. The roles are:
 - `standalone`: backward-compatible local model plus gateway API for
   development or a single trusted server.
 
-v0.7.3 synchronizes the service identity with the desktop correction-dialog,
-overlay-brand, and Windows clipboard hotfix. It does not change routes,
-schemas, authentication, provider routing, corrections, language enforcement,
-telemetry, or stored data.
-
 The intended production topology is the dedicated OpenStack `CtrlSpeak`
 instance in `gateway` mode. Its default `ubuntu-gpu-preferred` strategy orders
 `ubuntu-gpu-large-v3-turbo` → `openai-gpt-transcribe` →
 `nova-tiny-whisper`; `openai-preferred` reverses the first two providers. The
 last identifier is retained for API compatibility, but that CPU fallback runs
-on `CtrlSpeak`, not Nova. The Ubuntu GPU machine is a `worker`; Nova is only
-the WireGuard transport hub.
+on `CtrlSpeak`, not Nova. The Ubuntu GPU machine is a `worker`. Nova hosts
+WireGuard and the external STT command helper, not a transcription API listener.
 
 ## Optional GPU cleanup (0.7.4)
 
