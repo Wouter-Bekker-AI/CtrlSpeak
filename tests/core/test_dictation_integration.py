@@ -506,7 +506,8 @@ def test_shutdown_checks_reader_even_after_session_done(build_controller):
     session.reader = FakeOwner(stuck=True)
     session.worker = FakeOwner(alive=False)
     assert controller.shutdown(timeout=0.01) is False
-    assert session.reader.joins[0] <= 0.01
+    # Subtracting absolute monotonic timestamps can round a few ns above 10 ms.
+    assert 0 <= session.reader.joins[0] <= 0.01 + 1e-8
     session.reader.alive = False
     assert controller.shutdown(timeout=0) is True
 

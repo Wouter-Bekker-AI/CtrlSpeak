@@ -5,8 +5,8 @@
 - The ground rules themselves cannot be relaxed or ignored. When you extend the project, redesign within these boundaries rather than weakening them.
 
 ## Mandatory orientation for AI agents
-- On your first pass through this repository, read **every** Markdown file so you understand the existing expectations before editing code. That includes `README.md`, everything under `docs/`, and the testing notes under `tests/` (especially `tests/TESTING.md`).
-- When you make code changes that affect or invalidate existing documentation, update the impacted Markdown files in the same pull request so the written guidance never diverges from reality.
+- On your first pass through this repository, read **every** Markdown file so you understand the existing expectations before editing code. That includes `README.md`, everything under `docs/` (especially [the testing playbook](TESTING.md)), and any test-specific notes.
+- When you make code changes that affect or invalidate existing documentation, update the impacted Markdown files in the same change set so the written guidance never diverges from reality.
 
 ## Repository mutability lifecycle
 - During development (source checkout inside Git), the repository can be freely read and written so contributors and AI agents can iterate. Use version control to manage those edits.
@@ -51,8 +51,8 @@
 
 ## Testing obligations before submitting changes
 - Run the compile smoke test to ensure every module still compiles to bytecode: `python -m compileall .`.
-- Execute the core headless pytest suite on every change: `python -m pytest -m core_headless`. This fast suite guards configuration helpers, CLI parsing, and discovery utilities. The run must succeed; if it fails, stop, investigate, and explain the failure in your status update before proceeding.【F:tests/TESTING.md†L1-L34】
-- Regularly run the full GUI/integration suite (`CTRLSPEAK_RUN_FULL_TESTS=1 python -m pytest -m full_gui`) and the combined run (`CTRLSPEAK_RUN_FULL_TESTS=1 python -m pytest`) to catch regressions that span the entire pipeline.【F:tests/TESTING.md†L18-L52】
+- Execute the core headless pytest suite on every change: `python scripts/run_bounded_tests.py --timeout 180 -m core_headless`. The run must succeed; if it fails, stop, investigate, and explain the failure in your status update before proceeding. See [required checks](TESTING.md#required-headless-checks).
+- Regularly run the [opt-in embedded integration](TESTING.md#opt-in-embedded-integration) and the combined suite to catch regressions that span the entire pipeline. Use an isolated profile and bounded runner.
 - v0.4 Linux changes additionally require focused routing, XDG, packaging metadata, CUDA-loader, clipboard restoration, and observer-only Enter tests. Physical X11 microphone/tray/injection validation and the actual PyInstaller build remain release-host checks that headless tests cannot prove.
 - v0.5 update changes additionally require manifest/signature, exact asset selection, resume/range, bounded download, coordinator generation, settings migration, helper replacement, health receipt, rollback, stable-filename packaging, and release-tool tests. Core tests use dummy files only and must never replace the running CtrlSpeak executable.
 
@@ -66,7 +66,7 @@
 - Update journals, partials, backups, health markers, and updater logs live under the platform CtrlSpeak data directory. API tokens, transcripts, clipboard content, cookies, and signing secrets never enter updater logs.
 
 ## Documentation synchronization
-- When code changes alter behavior, configuration, or user interaction, update the relevant Markdown documentation (`README.md`, files in `docs/`, `tests/TESTING.md`, etc.) in the same change set.
+- When code changes alter behavior, configuration, or user interaction, update the relevant Markdown documentation (`README.md`, files in `docs/`, etc.) in the same change set.
 - This ground-rules document sets the guardrails those updates must respect; do not rewrite history to relax these requirements.
 
 Adhering to this reference protects packaging constraints, logging visibility, client/server interoperability, UI stability, and operational readiness. Any change that conflicts with these principles must be redesigned until it complies.

@@ -56,6 +56,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -m pip freeze > resolved-release-requirements.txt
+          python -m pip install pytest==8.4.2
 
       - name: Verify tag and application version
         run: python scripts/release.py check-version --tag "${{ github.ref_name }}"

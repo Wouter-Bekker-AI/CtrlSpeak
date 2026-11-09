@@ -6,13 +6,10 @@ from dataclasses import replace
 
 import atexit
 import argparse
-from array import array
 from contextlib import contextmanager
-import http.client
 import json
 import os
 import shutil
-import socket
 import sys
 import tempfile
 import threading
@@ -35,8 +32,8 @@ from collections import deque
 from utils.config_paths import (
     settings, settings_lock, load_settings, save_settings,
     get_config_dir, get_config_file_path, get_temp_dir,
-    create_recording_file_path, cleanup_recording_file, cleanup_stale_recordings, resource_path,
-    asset_path, app_icon_path, get_logger, get_logs_dir,
+    create_recording_file_path, cleanup_recording_file, resource_path,
+    app_icon_path, get_logger, get_logs_dir,
 )
 from utils.hotkeys import (
     DesktopSessionError,
@@ -119,30 +116,10 @@ def _bootstrap_runtime_environment() -> None:
 
 _bootstrap_runtime_environment()
 
-# recent mono samples of loading.wav for GUI wiggle
-_proc_vis_lock = threading.Lock()
-_proc_vis_buffers = deque()
-_proc_vis_samples = 0
-_PROC_VIS_MAX_SAMPLES = 4096  # ~0.1–0.25s depending on rate
-
-
-def get_processing_waveform(n: int = 512) -> np.ndarray:
-    """Return the most recent mono samples of loading.wav in [-1,1]."""
-    with _proc_vis_lock:
-        if not _proc_vis_buffers:
-            return np.zeros(n, dtype=np.float32)
-        data = np.concatenate(list(_proc_vis_buffers)) if len(_proc_vis_buffers) > 1 else _proc_vis_buffers[0]
-    if data.size <= n:
-        out = np.zeros(n, dtype=np.float32); out[-data.size:] = data; return out
-    return data[-n:]
-
-
 # ---------------- Public constants ----------------
 SPLASH_DURATION_MS = 1000
 ERROR_LOG_FILENAME = "CtrlSpeak-error.log"
 LOCK_FILENAME = "CtrlSpeak.lock"
-PROCESSING_SAMPLE_RATE = 44100
-PROCESSING_SOUND_MAX_PEAK = 0.5  # -6.02 dBFS; keeps the processing loop headphone-safe
 
 INSTANCE_PORT = int(os.environ.get("CTRLSPEAK_SINGLE_INSTANCE_PORT", "54329"))
 
@@ -174,10 +151,6 @@ _dictation_controller = None
 _hold_gesture_tentative = False
 
 instance_lock_handle: Optional[object] = None
-processing_sound_thread: Optional[threading.Thread] = None
-processing_sound_stop_event = threading.Event()
-processing_sound_data: Optional[bytes] = None
-processing_sound_settings: Optional[Dict[str, int]] = None
 _ready_sound_lock = threading.Lock()
 _ready_sound_played = False
 # PyAudio calls PortAudio's process-global initialize/terminate functions for
@@ -210,12 +183,10 @@ _failed_recording = RecordingRecovery()
 RETRY_FOCUS_DELAY_SECONDS = 3.0
 atexit.register(_failed_recording.discard)
 
-recording_temp_dir_name = "temp"
 AUTO_MODE = False
 AUTO_MODE_PROFILE: Optional[str] = None
 
 # Tk management thread (GUI owns windows; system just queues tasks)
-management_ui_thread: Optional[threading.Thread] = None
 management_ui_queue: "Queue[tuple[Callable[..., None], tuple, dict]]" = Queue()
 tk_root: Optional[tk.Tk] = None
 management_window: Optional["ManagementWindow"] = None  # created in utils.gui
@@ -235,9 +206,7 @@ from utils.winio import (
 # LAN discovery (single source of truth for ServerInfo)
 from utils.net_discovery import (
     ServerInfo, DiscoveryListener,
-    get_preferred_server_settings, set_preferred_server, clear_preferred_server,
-    parse_server_target, probe_server, register_manual_server,
-    ensure_preferred_server_registered, send_discovery_query, get_discovery_port,
+    get_discovery_port,
     manual_discovery_refresh as _nd_manual_discovery_refresh,  # we'll wrap this
     get_best_server as _nd_get_best_server,
     get_advertised_host_ip,
@@ -650,7 +619,7 @@ def pump_management_events_once() -> None:
 
 def schedule_management_refresh(delay_ms: int = 0) -> None:
     # utils.gui sets tk_root and management_window; import FRESH on each call
-    from utils.gui import tk_root, management_window
+    from utils.gui import tk_root
     if tk_root is None:
         return
 
@@ -677,22 +646,11 @@ CHANNELS = 1
 RATE = 44100
 
 # --- Live waveform ring buffer (for overlay) ---
-from collections import deque
 _waveform_lock = threading.Lock()
 _waveform_buffers = deque()
 _waveform_samples = 0
 _WAVEFORM_MAX_SECONDS = 2.0  # keep ~2 seconds of recent audio
 _WAVEFORM_MAX_SAMPLES = int(RATE * _WAVEFORM_MAX_SECONDS)
-
-# live level of the loading.wav while processing
-_processing_level = 0.0
-_processing_level_lock = threading.Lock()
-
-def get_processing_level() -> float:
-    """Smoothed RMS in [0, ~1], read by GUI for pulsing."""
-    with _processing_level_lock:
-        return float(_processing_level)
-
 
 def _push_waveform_bytes(chunk: bytes) -> None:
     try:
@@ -728,66 +686,6 @@ def get_recent_waveform(ms: int = 500) -> np.ndarray:
         return out
     return data[-need:]
 
-def generate_fallback_sound():
-    duration = 0.5
-    t = np.linspace(0.0, duration, int(PROCESSING_SAMPLE_RATE * duration), endpoint=False)
-    envelope = np.exp(-3 * t)
-    wave_data = 0.2 * np.sin(2 * np.pi * 440 * t) * envelope
-    int_data = np.clip(wave_data * 32767, -32767, 32767).astype(np.int16)
-    settings_audio = {"channels": 1, "rate": PROCESSING_SAMPLE_RATE, "width": 2}
-    return int_data.tobytes(), settings_audio
-
-
-def limit_processing_sound_peak(
-    frames: bytes,
-    settings_audio: Dict[str, int],
-    *,
-    max_peak: float = PROCESSING_SOUND_MAX_PEAK,
-) -> bytes:
-    """Apply transparent whole-clip attenuation when 16-bit audio exceeds the peak ceiling."""
-    if settings_audio.get("width") != 2 or not frames:
-        return frames
-    samples = array("h")
-    samples.frombytes(frames)
-    if sys.byteorder == "big":
-        samples.byteswap()
-    if not samples:
-        return frames
-    peak = max(abs(sample) for sample in samples)
-    target = max(1, min(32767, int(round(32767 * max_peak))))
-    if peak <= target:
-        return frames
-    gain = target / peak
-    softened = array(
-        "h",
-        (
-            max(-32768, min(32767, int(round(sample * gain))))
-            for sample in samples
-        ),
-    )
-    if sys.byteorder == "big":
-        softened.byteswap()
-    return softened.tobytes()
-
-
-def load_processing_sound():
-    global processing_sound_data, processing_sound_settings
-    if processing_sound_data is not None and processing_sound_settings is not None:
-        return processing_sound_data, processing_sound_settings
-    try:
-        sound_path = asset_path("loading.wav")
-        with wave.open(str(sound_path), "rb") as wav_file:
-            frames = wav_file.readframes(wav_file.getnframes())
-            settings_audio = {"channels": wav_file.getnchannels(), "rate": wav_file.getframerate(), "width": wav_file.getsampwidth()}
-    except Exception:
-        logger.exception("Failed to load processing sound from %s; using fallback tone", asset_path("loading.wav"))
-        frames, settings_audio = generate_fallback_sound()
-    frames = limit_processing_sound_peak(frames, settings_audio)
-    processing_sound_data = frames
-    processing_sound_settings = settings_audio
-    return processing_sound_data, processing_sound_settings
-
-
 def _set_pyaudio_capture_pending(pending: bool) -> None:
     with _pyaudio_priority_lock:
         if pending:
@@ -800,9 +698,8 @@ def _set_pyaudio_capture_pending(pending: bool) -> None:
 def _managed_pyaudio(*, blocking: bool):
     """Yield one exclusively owned PyAudio instance, or ``None`` if busy.
 
-    Capture is the primary operation and waits for ownership.  Optional legacy
-    feedback and device enumeration request non-blocking ownership so they
-    cannot freeze the UI or delay dictation.
+    Capture waits for ownership. Device enumeration uses non-blocking ownership
+    so it cannot freeze the UI or delay dictation.
     """
 
     pa_instance = None
@@ -837,71 +734,6 @@ def _managed_pyaudio(*, blocking: bool):
             except Exception:
                 logger.debug("Failed to terminate the exclusive PyAudio session", exc_info=True)
         _pyaudio_session_lock.release()
-
-def _processing_sound_loop():
-    data, settings_audio = load_processing_sound()
-    with _managed_pyaudio(blocking=False) as pa_instance:
-        if pa_instance is None:
-            logger.debug("Skipping legacy processing audio while PortAudio is busy")
-            return
-        stream = None
-        try:
-            stream = pa_instance.open(
-                format=pyaudio.get_format_from_width(settings_audio["width"]),
-                channels=settings_audio["channels"],
-                rate=settings_audio["rate"],
-                output=True,
-            )
-
-            # choose a short hop for snappy visuals (~10 ms)
-            bytes_per_sample = settings_audio["width"]
-            channels = settings_audio["channels"]
-            hop_samples = int(settings_audio["rate"] * 0.010)  # 10 ms
-            chunk_bytes = hop_samples * bytes_per_sample * channels
-
-            offset = 0
-            nbytes = len(data)
-
-            alpha = 0.35  # smoothing (higher = more responsive)
-
-            while not processing_sound_stop_event.is_set():
-                if offset + chunk_bytes > nbytes:
-                    offset = 0  # loop the sound
-
-                chunk = data[offset:offset + chunk_bytes]
-                offset += chunk_bytes
-
-                stream.write(chunk)
-
-                try:
-                    if bytes_per_sample == 2:
-                        arr = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
-                        if channels > 1:
-                            arr = arr.reshape(-1, channels).mean(axis=1)
-                        rms = float(np.sqrt(np.mean(arr * arr)))
-                        # update smoothed level
-                        global _processing_level, _proc_vis_samples
-                        with _processing_level_lock:
-                            _processing_level = (1.0 - alpha) * _processing_level + alpha * rms
-                        # keep recent mono samples for GUI wiggle
-                        with _proc_vis_lock:
-                            _proc_vis_buffers.append(arr.copy())
-                            _proc_vis_samples += arr.size
-                            while _proc_vis_samples > _PROC_VIS_MAX_SAMPLES and _proc_vis_buffers:
-                                popped = _proc_vis_buffers.popleft()
-                                _proc_vis_samples -= popped.size
-                except Exception:
-                    logger.exception("Failed to update processing waveform metrics")
-
-        except Exception:
-            logger.exception("Processing feedback loop crashed")
-        finally:
-            try:
-                if stream is not None:
-                    stream.stop_stream(); stream.close()
-            except Exception:
-                logger.exception("Failed to close processing audio stream cleanly")
-
 
 def _play_native_non_windows_cue(cue: Pcm16Cue) -> bool:
     """Use an OS audio helper for every non-Windows cue without PortAudio.
@@ -1013,15 +845,9 @@ def play_ui_cue(kind: CueKind, *, background: bool = True) -> bool:
 
 
 def start_processing_feedback():
-    """Compatibility entry point: play once; v0.7 deliberately has no loop."""
+    """Play the finite processing cue for embedded transcription callers."""
 
     play_ui_cue(CueKind.PROCESSING_STARTED)
-
-
-def stop_processing_feedback():
-    """The v0.7 processing cue is finite, so there is nothing to stop."""
-
-    processing_sound_stop_event.set()
 
 
 def play_model_ready_sound_once() -> None:

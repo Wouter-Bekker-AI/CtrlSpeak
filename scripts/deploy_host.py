@@ -45,7 +45,7 @@ def run(command, timeout=30, *, cwd=None, env=None):
     process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        stdout, _stderr = process.communicate(timeout=timeout)
         if process.returncode:
             # Subprocess output may contain protected configuration. Do not echo it.
             raise RuntimeError(f'{Path(command[0]).name} exited {process.returncode}')

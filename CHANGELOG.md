@@ -4,6 +4,19 @@ CtrlSpeak follows semantic versioning. Published binaries are immutable; a
 consumed release is corrected by a newer patch rather than by moving its tag or
 replacing its assets.
 
+## 0.8.5 — 2026-11-09
+
+- Remove shadowed legacy waveform functions, their unreachable looping
+  PortAudio feedback path, and other unused helpers and imports.
+- Stop shipping the obsolete loop WAV in current builds. Drop unused OpenCV
+  and separate contributor test/lint packages from desktop requirements.
+- Clarify current desktop, API, build, and signed fleet release workflows.
+  Keep historical documentation, artifacts, and compatibility contracts intact.
+- Correct a floating-point-sensitive timeout assertion without changing runtime
+  timing. No new UI, dictation, routing, cleanup, or updater behavior.
+
+See [the cleanup and release record](docs/V0.8.5_RELEASE.md).
+
 ## 0.8.4 — 2026-11-02
 
 - Default numeric microphone readouts to 0–100, with a saved Capture checkbox

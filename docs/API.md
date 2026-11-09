@@ -1,26 +1,10 @@
-# CtrlSpeak API v0.8.4
+# CtrlSpeak API v0.8.5
 
-0.8.4 changes desktop microphone-level presentation and Windows shortcut tracking.
-The saved `microphone_level_dbfs` preference is desktop-only and is not sent to
-the gateway. All transcription/correction/cleanup/authentication and external
-helper contracts are unchanged; fleet version metadata reports 0.8.4. See
-[0.8.4 release details](V0.8.4_RELEASE.md).
-
-0.8.3 adds a simulation-only desktop keyboard guide. Gateway, worker and external
-helper report 0.8.3; no transcription endpoint, authentication, correction,
-cleanup or Hermes integration contract changed. The guide does not call the API.
-See [0.8.3 guide and patch-update acceptance](V0.8.3_RELEASE.md).
-
-0.8.2 introduces desktop differential updates, not a transcription API change.
-Gateway, worker and external-helper version metadata is aligned; requests,
-authentication, language constraints, correction rules, cleanup and response
-contracts are unchanged. Older clients remain compatible. See
-[0.8.2 updater/release details](V0.8.2_RELEASE.md).
-
-Previous patch 0.8.1 changed desktop Ctrl-key recognition and Live overlay placement.
-The batch transcription, correction, language, cleanup and helper contracts are
-unchanged. Its fleet version was aligned at 0.8.1; 0.7.7/0.8.0 clients remain
-compatible. See [0.8.1 release details](V0.8.1_RELEASE.md).
+0.8.5 is a maintenance release. Service, desktop and helper report the same
+release version; endpoints, authentication, language rules, corrections,
+transport, response schema and S1 selection are unchanged. Existing 0.7.7
+and 0.8.x clients remain compatible. The mic-meter setting, animated guide,
+and signed updater are desktop-only. See [the cleanup record](V0.8.5_RELEASE.md).
 
 ## Desktop dictation modes and compatibility (0.8.0)
 

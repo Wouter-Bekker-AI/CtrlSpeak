@@ -2,9 +2,9 @@ name: CtrlSpeak tests
 
 on:
   push:
-    branches: [v0.7, 'codex/lossless-transport-*', 'codex/safe-dictation-*', 'codex/reliability-*', 'codex/dictation-modes-*', 'codex/differential-updates-*', 'codex/keyboard-guide-*', 'codex/mic-level-*']
+    branches: [stable, v0.7, 'codex/lossless-transport-*', 'codex/safe-dictation-*', 'codex/reliability-*', 'codex/dictation-modes-*', 'codex/differential-updates-*', 'codex/keyboard-guide-*', 'codex/mic-level-*', 'codex/cleanup-*']
   pull_request:
-    branches: [v0.7]
+    branches: [stable, v0.7]
 
 permissions:
   contents: read
@@ -33,7 +33,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements.txt pytest==8.4.2
 
       - name: Run core headless tests
         # Native roundtrips are offline tests; fetch only the pinned build tool here.

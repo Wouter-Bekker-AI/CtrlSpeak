@@ -104,10 +104,6 @@ def get_session_openai_api_key() -> str | None:
     return _session_openai_api_key
 
 
-def has_session_openai_api_key() -> bool:
-    return bool(_session_openai_api_key)
-
-
 def initialize_openai_api_key_from_secure_storage() -> bool:
     """Load the user-scoped native credential once during application startup."""
     value = load_openai_api_key()

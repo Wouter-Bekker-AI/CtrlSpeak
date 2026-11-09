@@ -21,7 +21,6 @@ watcher_spec_path = project_root / "packaging" / "CtrlSpeak_Watcher.spec"
 
 
 COMMON_REQUIRED_ASSETS = {
-    "processing chime": assets_dir / "loading.wav",
     "automation clip": assets_dir / "test.wav",
     "fun facts list": assets_dir / "fun_facts.txt",
 }

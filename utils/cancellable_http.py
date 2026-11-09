@@ -146,8 +146,9 @@ def request_transport_self_test() -> dict:
     """Package health check for binary dependencies; never connects to a host."""
     async def check():
         import aiohttp
-        import aiodns
-        import pycares
+        # Check both DNS dependencies explicitly in the frozen runtime.
+        import aiodns  # pylint: disable=unused-import
+        import pycares  # pylint: disable=unused-import
         resolver = aiohttp.AsyncResolver()
         connector = aiohttp.TCPConnector(resolver=resolver)
         try:

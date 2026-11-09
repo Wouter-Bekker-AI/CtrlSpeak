@@ -5,7 +5,6 @@ import os
 import sys
 import time
 import threading
-import subprocess
 import shutil
 import json
 import zipfile
@@ -19,13 +18,13 @@ import wave
 from datetime import datetime
 from pathlib import Path
 from queue import Empty
-from typing import Optional, List, Set, Callable, Tuple, Dict, Any, TYPE_CHECKING
+from typing import Optional, List, Set, Tuple, Dict, Any, TYPE_CHECKING
 
 from multiprocessing import Process, Queue as MPQueue
 
 import ctypes
 try:  # pragma: no cover - optional dependency rarely installed
-    import hf_xet  # type: ignore  # noqa: F401
+    import hf_xet  # type: ignore  # pylint: disable=unused-import
 except ImportError:
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
@@ -51,7 +50,7 @@ from utils.system import (
     settings, settings_lock,
     notify, notify_error, format_exception_details,
     get_config_dir, save_settings,
-    start_processing_feedback, stop_processing_feedback,
+    start_processing_feedback,
     ui_show_lockout_window, ui_update_lockout_message, ui_close_lockout_window,
     pump_management_events_once,
     play_model_ready_sound_once,
@@ -121,13 +120,6 @@ def _iter_cuda_roots() -> list[Path]:
     if legacy not in roots:
         roots.append(legacy)
     return roots
-
-
-def _active_cuda_root() -> Path:
-    for root in _iter_cuda_roots():
-        if root.exists():
-            return root
-    return _preferred_cuda_root()
 
 
 logger = get_logger(__name__)
@@ -688,15 +680,6 @@ def _sync_cuda_bins(dest_root: Path) -> None:
                 shutil.copy2(file, bin_root / file.name)
 
 
-def cuda_device_available() -> bool:
-    try:
-        ct2 = _import_ctranslate2()
-        return ct2.get_cuda_device_count() > 0
-    except Exception:
-        logger.debug("CUDA availability probe failed", exc_info=True)
-        return False
-
-
 def _hash_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -1021,26 +1004,6 @@ def download_cuda_runtime_with_gui() -> bool:
     return False
 
 
-def _run_cmd_stream(cmd: List[str], timeout: int | None = None) -> int:
-    """Run a command, stream output, return returncode."""
-    try:
-        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) as p:
-            start = time.time()
-            while True:
-                if timeout and (time.time() - start) > timeout:
-                    p.kill()
-                    return 124
-                line = p.stdout.readline() if p.stdout else ""
-                if not line and p.poll() is not None:
-                    break
-            return p.returncode or 0
-    except FileNotFoundError:
-        return 127
-    except Exception:
-        logger.exception("Command execution failed: %s", " ".join(cmd))
-        return 1
-
-
 def install_cuda_runtime_with_progress(parent=None) -> bool:
     """Download or reuse CUDA runtime assets, optionally showing the GUI."""
 
@@ -1058,18 +1021,6 @@ def install_cuda_runtime_with_progress(parent=None) -> bool:
         return download_cuda_runtime_headless()
 
     return download_cuda_runtime_with_gui()
-
-
-def format_bytes(value: float) -> str:
-    step = 1024.0
-    units = ["B", "KB", "MB", "GB", "TB"]
-    amount = float(value)
-    for u in units:
-        if amount < step:
-            return f"{amount:.1f} {u}"
-        amount /= step
-    return f"{amount:.1f} PB"
-
 
 
 _FUN_FACT_ROTATION_MS = 6000
@@ -1680,7 +1631,7 @@ def _model_download_worker(model_name: str, queue: MPQueue) -> None:
         session.headers.setdefault("User-Agent", f"CtrlSpeak/{APP_VERSION}")
         CHUNK_SIZE = 1 << 18  # 256 KiB
         try:
-            for index, (rel_path, size_hint) in enumerate(file_entries, start=1):
+            for index, (rel_path, _size_hint) in enumerate(file_entries, start=1):
                 if not rel_path:
                     continue
                 trace_model_download_step(
@@ -2179,7 +2130,7 @@ def initialize_transcriber(
                 device=device,
                 compute_type=compute_type,
             )
-        except Exception as exc:
+        except Exception:
             logger.exception("Failed to load Whisper model on %s", device)
             trace_model_download_step(
                 "initialize_transcriber: WhisperModel raised exception",
@@ -2244,18 +2195,6 @@ def collect_text_from_segments(segments) -> str:
             continue
         break
     return " ".join(pieces)
-
-
-def _wav_duration_seconds(path: Path) -> Optional[float]:
-    try:
-        with wave.open(str(path), "rb") as wf:
-            frames = wf.getnframes()
-            rate = wf.getframerate()
-        if rate <= 0:
-            return None
-        return frames / float(rate)
-    except Exception:
-        return None
 
 
 def _detect_spoken_language(model: Any, audio_path: Path) -> str | None:
@@ -2397,8 +2336,6 @@ def transcribe_local(file_path: str, play_feedback: bool = True, allow_client: b
                         chunk_path.unlink(missing_ok=True)
                     except Exception:
                         logger.exception("Failed to remove temp chunk %s", chunk_path)
-        if play_feedback:
-            stop_processing_feedback()
 
 
 def handle_missing_server(file_path: str, play_feedback: bool) -> Optional[str]:
@@ -2437,7 +2374,7 @@ def transcribe_remote(file_path: str, play_feedback: bool = True) -> Optional[st
     if play_feedback:
         start_processing_feedback()
     conn = None
-    import http.client, json
+    import http.client
     try:
         with open(file_path, "rb") as handle:
             data = handle.read()
@@ -2460,8 +2397,6 @@ def transcribe_remote(file_path: str, play_feedback: bool = True) -> Optional[st
         notify_error("Remote transcription failed", format_exception_details(exc))
         return None
     finally:
-        if play_feedback:
-            stop_processing_feedback()
         if conn is not None:
             try:
                 conn.close()

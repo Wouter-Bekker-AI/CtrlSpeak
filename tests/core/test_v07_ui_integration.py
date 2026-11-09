@@ -103,7 +103,7 @@ def _waveform_is_empty(system) -> bool:
         return not system._waveform_buffers and system._waveform_samples == 0
 
 
-def test_processing_feedback_is_one_finite_cue_and_never_starts_loop_thread(
+def test_embedded_processing_feedback_dispatches_one_finite_cue(
     monkeypatch,
 ) -> None:
     from utils import system
@@ -114,16 +114,9 @@ def test_processing_feedback_is_one_finite_cue_and_never_starts_loop_thread(
         "play_ui_cue",
         lambda kind, *, background=True: played.append((kind, background)) or True,
     )
-    system.processing_sound_thread = None
-    system.processing_sound_stop_event.clear()
-
     system.start_processing_feedback()
 
     assert played == [(CueKind.PROCESSING_STARTED, True)]
-    assert system.processing_sound_thread is None
-    system.stop_processing_feedback()
-    assert system.processing_sound_stop_event.is_set()
-    assert system.processing_sound_thread is None
 
 
 def test_windows_cue_sink_uses_valid_memory_wav_without_pyaudio(monkeypatch) -> None:

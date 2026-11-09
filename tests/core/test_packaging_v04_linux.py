@@ -27,6 +27,7 @@ def test_v07_pyinstaller_spec_uses_stable_artifact_and_platform_adapters() -> No
     assert "utils.update_manager" in spec
     assert "utils.ui_state" in spec
     assert "utils.audio_cues" in spec
+    assert "loading.wav" not in spec  # the active cues are synthesized
     assert "utils.midnight_overlay" in spec
     assert "utils.ui_theme" in spec
     assert "'winsound'" in spec

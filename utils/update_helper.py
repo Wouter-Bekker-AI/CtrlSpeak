@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import time
@@ -24,7 +23,6 @@ from utils.update_manager import (
     UpdateAsset,
     UpdateError,
     UpdateTransaction,
-    _atomic_write_bytes,
     _atomic_write_json,
     classify_runtime,
     get_updates_dir,

@@ -9,7 +9,7 @@
   <description>
     <p>
       CtrlSpeak records while the right Control key is held, transcribes with a
-      bundled Whisper model or a configured HTTP API, and inserts the result in
+      locally downloaded Whisper model or a configured HTTP API, and inserts the result in
       the active field.
     </p>
   </description>
@@ -22,6 +22,9 @@
     <category>Accessibility</category>
   </categories>
   <releases>
+    <release version="0.8.5" date="2026-11-09">
+      <description><p>Removes inactive overlay and audio-loop code, trims build dependencies, and refreshes current documentation without adding features.</p></description>
+    </release>
     <release version="0.8.4" date="2026-11-02">
       <description><p>Defaults microphone readouts to 0–100 with a saved optional RMS dBFS setting. Fixes Windows gesture key identities after modifier shortcuts and reports blocked recording holds.</p></description>
     </release>

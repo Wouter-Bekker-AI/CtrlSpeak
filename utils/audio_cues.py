@@ -16,7 +16,7 @@ from pathlib import Path
 import sys
 import threading
 import wave
-from typing import Callable, Protocol
+from typing import Protocol
 
 
 LOGGER = logging.getLogger(__name__)

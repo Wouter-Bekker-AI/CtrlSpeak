@@ -1,10 +1,11 @@
-# CtrlSpeak v0.7.4 Midnight Signal testing playbook
+# CtrlSpeak testing playbook
 
-Run commands from the v0.7 repository root in a project-compatible Python
-environment. The required fast suite is GUI-free and performs no model
+Run commands from the repository root using Python 3.11 or 3.12 in a virtual
+environment with `requirements-dev.txt` installed. The required core suite
+is headless and performs no model
 download, desktop installation, service operation, or firewall change.
 
-## 0.7.4 cleanup acceptance
+## GPU S1 cleanup acceptance
 
 Run `tests/core/test_gpu_cleanup.py` and service `tests/test_gpu_cleanup.py`,
 plus the complete core and Linux service suites. On Windows, use a fresh
@@ -22,11 +23,17 @@ clipboard and dismissal regression obligations below.
 ## Required headless checks
 
 ```bash
-python -m pytest -m core_headless
-python -m pytest -q tests/core
-python -m compileall .
+python scripts/fetch_patch_tool.py
+python scripts/run_bounded_tests.py --timeout 180 -m core_headless
+python -m compileall main.py utils scripts tests server/whisper_transcription
 git diff --check
 ```
+
+The runner isolates configuration and temporary state, enforces a hard
+deadline and reaps the process tree. Run one local test-suite process at a
+time. A native Tk verifier must use an isolated profile, never the installed
+app. CI also verifies the native Guide and meter widgets on Windows and Xvfb
+on Linux. These are not physical hotkey/microphone tests.
 
 The core marker covers:
 
@@ -43,6 +50,8 @@ The core marker covers:
   arbitrary server error text.
 - audio-cue volume/mute persistence and bounded gain application without
   changing pitch or retaining recording content.
+- the simulated keyboard guide, 0–100/dBFS readout persistence, Windows key
+  identity and dictation lifecycle/delivery guards.
 - both provider-preference cascades, single-provider routes, quota fallthrough,
   and cached/circuit-broken fast failure for an offline Ubuntu GPU worker.
 - ordered output-language validation, settings migration, API propagation, and

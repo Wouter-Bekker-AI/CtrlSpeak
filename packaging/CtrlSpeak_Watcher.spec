@@ -46,7 +46,6 @@ for pkg in ('faster_whisper', 'ctranslate2', 'huggingface_hub', 'ffpyplayer', 'p
 
 asset_datas = [
     (str(PROJECT_ROOT / 'assets' / 'icon.ico'), 'assets'),
-    (str(PROJECT_ROOT / 'assets' / 'loading.wav'), 'assets'),
     (str(PROJECT_ROOT / 'assets' / 'test.wav'), 'assets'),
     (str(PROJECT_ROOT / 'assets' / 'fun_facts.txt'), 'assets'),
     (str(PROJECT_ROOT / 'assets' / 'Watcher_Intro_Video.mp4'), 'assets'),

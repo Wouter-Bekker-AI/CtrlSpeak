@@ -1,4 +1,4 @@
-# CtrlSpeak v0.7.4 Midnight Signal user flow
+# CtrlSpeak desktop workflow
 
 ## 1. Launch and platform readiness
 
@@ -15,8 +15,10 @@
    management window so the user is not left with an unreachable background
    process.
 
-All persistent data is below `$XDG_CONFIG_HOME/CtrlSpeak` or
-`~/.config/CtrlSpeak`. Packaged assets are read-only.
+Persistent app files are below `%APPDATA%\CtrlSpeak` on Windows or
+`$XDG_CONFIG_HOME/CtrlSpeak` (default `~/.config/CtrlSpeak`) on Linux. The
+Windows OpenAI key can live in the native credential vault. Packaged assets
+are read-only.
 
 ## 2. Backend startup branches
 
@@ -24,7 +26,7 @@ All persistent data is below `$XDG_CONFIG_HOME/CtrlSpeak` or
 
 1. CtrlSpeak prompts once for the legacy **Client + Server** or **Client Only**
    role if no mode is stored.
-2. The selected Whisper model is stored below the XDG model directory. CPU and
+2. The selected Whisper model is stored below the per-user model directory. CPU and
    `small` remain the safe defaults.
 3. Client + Server loads the local model and starts the legacy HTTP/discovery
    threads. Client Only records locally and sends to the discovered or manually
@@ -46,23 +48,46 @@ All persistent data is below `$XDG_CONFIG_HOME/CtrlSpeak` or
    by the gateway, or sent to the Ubuntu worker. Unsupported platforms remain
    session-only.
 
+For source or unattended desktop startup, supported environment overrides
+include `CTRLSPEAK_BACKEND`, `CTRLSPEAK_API_URL`, `CTRLSPEAK_API_TOKEN`,
+`CTRLSPEAK_OUTPUT_LANGUAGES` (ordered comma-separated codes, e.g. `en,af`),
+and `CTRLSPEAK_PROVIDER_STRATEGY`. Set secret-bearing variables through a
+protected launcher, not a committed file or shell history. See
+`python main.py --help` for non-secret CLI options; `--backend-status` prints
+redacted configuration. Environment overrides are read at startup.
+
 ## 3. Recording
 
+**Hold to Talk** is the default flow below. **Hands-free** starts with a
+double-tap of Right Ctrl and ends with a single tap. Opt-in **Live** on
+Windows starts by pressing both Ctrl keys and releasing both, and ends with
+a Right Ctrl tap. In either continuous mode, tap Left Ctrl alone to mute or
+resume; audio while muted is not sent. Esc cancels without undoing inserted
+text. **Capture** shows/remaps the keys; **Guide** demonstrates them without
+recording or injecting anything.
+
+Hands-free sends the completed recording. Live sends bounded phrases after
+about 650 ms of silence or eight seconds of continuous speech. Its top-centred
+capsule leaves terminal input visible. Editing or focus changes hold uncertain
+results for explicit copy/discard; CtrlSpeak cannot infer all remote caret or
+field changes inside AnyDesk. Live does not rewrite committed text, replay
+held results, or synthesize Enter.
+
 1. A non-suppressing global `pynput` listener observes the right Ctrl press.
-2. CtrlSpeak creates a unique WAV below the XDG `temp/` directory and opens the
+2. CtrlSpeak creates a unique WAV below the app-data `temp/` directory and opens the
    selected/default PortAudio input device.
 3. Midnight Signal opens a compact, non-focus-stealing recording capsule on the
    active monitor. It shows a live waveform, elapsed time, microphone name, and
-   an RMS input meter labelled in dBFS. The packaged CtrlSpeak microphone mark,
+   an RMS-derived level shown as 0–100 by default. **Capture → Capture feedback
+   → Show technical mic level (RMS dBFS)** changes only the readout. The packaged CtrlSpeak microphone mark,
    not a generic microphone glyph, identifies the recording phase. The meter is
    smoothed for readability; it is never presented as an acoustic SPL measurement.
 4. Releasing right Ctrl stops recording and transitions the same capsule into a
    calm elongated/elliptical transcribing animation that retains the CtrlSpeak
    brand mark. Providers are not arranged around the microphone and the UI does
    not predict which route will win.
-5. The generated processing cue begins at the saved volume. Its PCM signal is
-   peak-limited to the documented product ceiling without changing pitch;
-   mute and reduced-feedback preferences are honoured immediately.
+5. A finite generated processing cue plays at the saved volume if enabled.
+   The cue is peak-bounded; it does not loop while the animation is active.
 6. Audio/open-device errors are logged and reported; they do not leave a
    recording beside the executable.
 
@@ -90,14 +115,16 @@ the ordinary corrected transcription is used. OpenAI and gateway-tiny never
 receive S1 cleanup. The completion status says whether cleanup was applied,
 off, unchanged, unavailable, or skipped after a bounded failure.
 
-CtrlSpeak uploads multipart WAV audio to `<base-url>/v1/transcribe`. The result
+CtrlSpeak uploads multipart lossless FLAC to `<base-url>/v1/transcribe` when
+advertised; older gateways can still receive WAV. The result
 retains `id`, `raw_text`, corrected `text`, and all response metadata. HTTP,
 authentication, network, or schema errors are shown and never trigger embedded
 fallback.
 
 The gateway may use its selected published cascade. `provider_used`, `attempts`,
-`degraded`, and measured duration fields make that routing visible. The default `ubuntu-gpu-preferred`
-route is Ubuntu GPU, then OpenAI with the caller's key, then gateway tiny.
+`degraded`, and measured duration fields make that routing visible.
+`ubuntu-gpu-preferred` tries Ubuntu GPU, then OpenAI with the caller's key,
+then gateway tiny. `server-default` defers to the gateway configuration.
 `openai-preferred` reverses the first two; Ubuntu-only, OpenAI-only, and
 gateway-tiny-only routes are also available. Cascades continue after quota/key
 failures and record them; single-provider routes return them. An offline Ubuntu
@@ -154,7 +181,7 @@ quits CtrlSpeak, so recording and transcription remain available and the panel
 can be reopened from the same tray icon.
 
 Status data is operational only: version, route/provider identifiers, bounded
-health states, dBFS, and durations. It never displays or retains transcript
+health states, mic level, and durations. It never displays or retains transcript
 text, audio, API keys, bearer tokens, correction phrases, or arbitrary server
 exception strings.
 
@@ -162,8 +189,11 @@ exception strings.
 
 The tray's **Copy last transcript** item is disabled until transcription first
 succeeds. It copies the retained text even if active-field insertion failed and
-reports the clipboard outcome. CtrlSpeak retains exactly one result in memory;
-it does not persist transcript history, and the value disappears on exit.
+reports the clipboard outcome. The tray cache holds one result in memory and
+disappears on exit. The separate bounded private dictation audit can contain
+transcript text; keep its logs private. Failed remote audio can be retried
+manually from the short-lived recovery buffer; a partially inserted result is
+never automatically replayed or retranscribed.
 On Windows, this explicit recovery copy uses an owned, serialized Unicode
 clipboard transaction with bounded contention retries and read-back
 verification, so the tray reports success only when the staged value is
@@ -190,8 +220,8 @@ pretending to save a server correction locally.
 1. The latest eligible injection remains pending for up to ten minutes.
 2. Shift/Alt/Ctrl-modified Enter, releases, and unrelated keys do not consume it.
 3. On bare Enter press, before returning from the observer callback, CtrlSpeak
-   uses X11 Ctrl+A/C to snapshot the field through preferred `xclip` or the
-   tkinter fallback when a safely restorable text clipboard is available.
+   best-effort snapshots the field using the platform adapter. X11 uses Ctrl+A/C
+   with preferred `xclip` or the Tk fallback when the clipboard can be restored.
 4. The prior text clipboard is restored. CtrlSpeak never sends Enter itself;
    the target receives the user's original Enter exactly once.
 5. Unchanged, empty, expired, or unavailable snapshots are discarded.
@@ -202,7 +232,8 @@ pretending to save a server correction locally.
 
 The field selection/copy technique cannot guarantee support for every toolkit,
 terminal, remote surface, password field, or multiline editor. Disable edit
-feedback in the management window when the workflow is unsuitable.
+feedback in the management window when the workflow is unsuitable. Live
+phrases are not eligible for whole-field Enter feedback.
 
 ## 7. Midnight Signal control center
 
@@ -219,7 +250,8 @@ It contains:
   download progress, release link, and update controls;
 - embedded/API selection, output-language multi-select, complete base URL,
   masked client token, gateway capability check/strategy, session-only masked
-  OpenAI key, feedback method, and redacted active/saved status;
+  OpenAI key (optionally saved to the Windows vault), feedback method, and
+  redacted active/saved status;
 - legacy embedded role/network controls;
 - microphone selection;
 - model selection/download;
@@ -246,8 +278,10 @@ the user/operator removes their manually installed files.
 2. CtrlSpeak downloads and verifies the canonical manifest and Ed25519
    signature, then selects exactly one standard artifact for the current OS and
    x86-64 architecture.
-3. After the user confirms, the artifact streams into an AppData/XDG transaction
-   directory. Compatible partials resume only with a correct HTTP Range response.
+3. After the user confirms, a full artifact or signed exact-base differential
+   patch streams into an AppData/XDG transaction directory. The patch is
+   reconstructed there; full download is the fallback. Compatible partials
+   resume only with a correct HTTP Range response.
 4. Declared size and SHA-256 must match before the candidate becomes installable.
 5. A second confirmation starts a copied external helper. CtrlSpeak stops its
    hotkey, discovery/server, tray, UI, and instance lock, then exits normally.
@@ -260,14 +294,14 @@ the user/operator removes their manually installed files.
    A rollback reports restoration instead of claiming success.
 
 Source checkouts are discovery-only. They never run Git commands or overwrite
-working files from the GUI.
+working files from the GUI. See [Updating and releasing](UPDATING.md).
 
 ## 9. Shutdown
 
 Quit stops the hotkey/recording path, signals the generation-local cancellation
 and recorder-stop events, waits a bounded time for active workers, attempts
 exact-path temporary-audio cleanup, hides overlays, stops embedded
-discovery/server threads, stops the tray, exits Tk, and releases the XDG
+discovery/server threads, stops the tray, exits Tk, and releases the per-user
 instance lock. A later locked startup removes a file that an unresponsive
 provider kept open beyond the shutdown bound. No service, firewall, desktop
 launcher, or remote API deployment is modified.

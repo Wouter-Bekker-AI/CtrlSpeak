@@ -7,7 +7,7 @@ import queue
 import sys
 import threading
 import time
-from typing import Callable, Mapping, Optional, Sequence
+from typing import Callable, Mapping, Sequence
 
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -17,13 +17,10 @@ from utils.config_paths import settings, settings_lock, save_settings
 from utils.languages import language_choices
 from utils.midnight_overlay import active_monitor_bounds, display_scale, flyout_geometry
 from utils.transcription_backend import (
-    ApiBackendError,
     ApiTranscriptionClient,
-    backend_display_name,
     get_backend_config,
     get_runtime_backend_config,
     get_session_openai_api_key,
-    secure_storage_available,
 )
 from utils.ui_state import (
     ProviderTelemetry,
@@ -1904,7 +1901,7 @@ class MidnightTrayFlyout:
         self.provider_route_label_var = tk.StringVar(value="PROVIDER ROUTE · GATEWAY DEFAULT")
         ttk.Label(provider_header, textvariable=self.provider_route_label_var, style="MS.TLabel", foreground=MUTED, font=("Segoe UI Semibold", 8)).pack(side=tk.LEFT)
         ttk.Button(provider_header, text="Refresh", style="MS.Compact.TButton", command=self._refresh_capabilities).pack(side=tk.RIGHT)
-        for index, (provider_id, label, model, _location) in enumerate(PROVIDER_CARD_SPECS, start=1):
+        for provider_id, label, model, _location in PROVIDER_CARD_SPECS:
             provider = _card(frame, padding=(10, 7))
             provider.pack(fill=tk.X, pady=3)
             number = tk.Canvas(provider, width=24, height=24, background=CARD, highlightthickness=0, borderwidth=0)

@@ -6,7 +6,7 @@ import atexit
 import time
 from pathlib import Path
 
-from utils.config_paths import get_logger
+from utils.config_paths import cleanup_stale_recordings, get_logger
 from utils.system import (
     APP_VERSION,
     SPLASH_DURATION_MS,
@@ -19,11 +19,9 @@ from utils.system import (
     start_discovery_listener,
     parse_cli_args, transcribe_cli,
     apply_backend_cli_config,
-    CLIENT_ONLY_BUILD,
     start_server,
     run_tray,
     apply_auto_setup,
-    cleanup_stale_recordings,
 )
 
 from utils.gui import (

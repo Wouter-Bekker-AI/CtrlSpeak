@@ -7,7 +7,7 @@ import threading
 import time
 import wave
 
-from utils.dictation_modes import DictationGestures, DictationMode, GestureAction
+from utils.dictation_modes import DictationGestures, GestureAction
 from utils.dictation_runtime import DictationSession
 from utils.hotkeys import gesture_key_name
 from utils.request_control import request_control

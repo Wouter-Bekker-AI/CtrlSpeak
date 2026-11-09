@@ -61,7 +61,6 @@ for pkg in (
 icon_name = 'icon.ico' if IS_WINDOWS else 'icon.png'
 asset_datas = [
     (str(PROJECT_ROOT / 'assets' / icon_name), 'assets'),
-    (str(PROJECT_ROOT / 'assets' / 'loading.wav'), 'assets'),
     (str(PROJECT_ROOT / 'assets' / 'test.wav'), 'assets'),
     (str(PROJECT_ROOT / 'assets' / 'fun_facts.txt'), 'assets'),
     (str(PROJECT_ROOT / 'assets' / 'TrueAI_Intro_Video.mp4'), 'assets'),

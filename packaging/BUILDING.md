@@ -1,11 +1,4 @@
-# Building CtrlSpeak 0.8 for Windows and Linux
-
-0.8.3 includes `utils.keyboard_guide` and its native Tk widget in the standard
-package. `--health-check-file` must report `keyboard_guide.ok`, three modes and
-`simulation_only: true`. The source native UI verifier is
-`python scripts/preview_keyboard_guide.py --verify` (use `xvfb-run -a` on a
-headless Linux host); it creates an isolated temporary profile and no input or
-audio adapters. Real user GUI patch-install acceptance remains a separate step.
+# Building CtrlSpeak for Windows and Linux
 
 This is the maintained standard CtrlSpeak packaging path. It produces the
 stable filename `dist/CtrlSpeak.exe` on Windows or `dist/CtrlSpeak` on Linux;
@@ -45,6 +38,10 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
+Use `python -m pip install -r requirements-dev.txt` instead when running the
+tests or static analysis. OpenCV is not needed; active intro video playback
+uses `ffpyplayer`. Verify packaging in a clean environment.
+
 `xclip` is preferred for clipboard-preserving paste and automatic active-field
 edit capture, but is not a hard runtime prerequisite. When it is absent, the
 included tkinter runtime provides a withdrawn Tk/X11 clipboard fallback with
@@ -69,19 +66,21 @@ python -m utils.build_exe
 
 The helper selects `packaging/CtrlSpeak_v0.7.spec`. This maintained spec retains
 its historical filename; the app and artifact versions come from
-`utils/version.py`, not the spec filename. The equivalent direct command is:
+`utils/version.py`, not the spec filename. The equivalent direct commands are:
 
 ```bash
+python scripts/fetch_patch_tool.py
 pyinstaller --noconfirm --clean packaging/CtrlSpeak_v0.7.spec
 ```
 
 The one-file spec uses `console=False`, includes the native icon and shipped
-audio/video/text assets, collects the Whisper/CTranslate2/HTTP runtime data,
+test-audio/video/text assets, collects the Whisper/CTranslate2/HTTP runtime data,
 includes the Midnight Signal UI-state/audio-cue helpers, includes the X11
 `pynput` and Linux `pystray` backends, and explicitly excludes the irrelevant
 platform input adapter. Whisper weights and Linux system CUDA/cuDNN libraries
 are not bundled. Dictation gesture, segmentation, runtime, integration and pure
-health-check modules are explicitly included in the maintained spec.
+health-check modules are explicitly included in the maintained spec. Runtime
+feedback cues are synthesized; the historical `loading.wav` is not packaged.
 
 Expected artifact:
 
@@ -157,7 +156,7 @@ actionable message if the system runtime is not usable.
 
 On Windows the same maintained specification produces `CtrlSpeak.exe` with
 `console=False`; the executable does not have a console window. Windows version
-resources identify the current release's product/file version (0.8.2). The historical v0.2-v0.6
+resources identify the current release's product/file version. The historical v0.2-v0.6
 specs remain in the repository for reproducibility but are no longer selected
 by the standard build helper. The Watcher option remains Windows-only and does
 not use the standard CtrlSpeak updater identity.
@@ -180,6 +179,13 @@ is started. A failed self-test exits non-zero and cannot count as a healthy
 build. The Windows and Linux release jobs require this evidence before signing.
 This proves bundling and pure safety logic, not real microphone quality,
 AnyDesk delivery, global shortcut compatibility or live end-to-end latency.
+
+Current packaged health also checks the simulation-only keyboard guide, the
+0–100/dBFS meter formatter and stable Windows gesture identity. Run the native
+UI verifiers `python scripts/preview_keyboard_guide.py --verify` and
+`python scripts/verify_microphone_meter.py` (prefix each with `xvfb-run -a`
+on headless Linux). These use isolated profiles and do not start a microphone
+or global hook. See [test coverage and physical checks](../docs/TESTING.md).
 
 From 0.8.2, the build helper fetches the hash-pinned Xdelta tool and its license
 using `scripts/fetch_patch_tool.py`. The packaged health command additionally

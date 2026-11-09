@@ -1,46 +1,25 @@
-# CtrlSpeak transcription service v0.7.7
+# CtrlSpeak transcription service
 
-0.7.7 adds bounded worker/gateway admission, truthful busy/stalled state,
-request-response deadlines, fast busy fallback and correlated stage diagnostics.
-It preserves the external Nova helper, lossless compressed forwarding and the
-optional CUDA S1 cleanup contract. See the
-[0.7.7 release guide](../../docs/V0.7.7_RELEASE.md).
-
-0.7.6 adds nullable `s1_cleaned_text` and `normalized_text` gateway audit columns
-and the additive `s1_cleaned_text` diagnostic response field. Formatted API text,
-worker S1 behaviour and Nova/Telegram output are unchanged. Single-line versus
-paragraph insertion is a desktop-only safety choice. See
-[0.7.6 release notes](../../docs/V0.7.6_RELEASE.md).
-
-0.7.5 adds lossless FLAC transport, compressed-byte forwarding and bounded
-local inference decoding. Existing WAV callers, routing and optional CUDA S1
-cleanup are preserved. The external Hermes command adapter now uses the shared
-transport library in an isolated `.helper-venv`; it does not require changes or
-dependencies inside Hermes. Install it with `requirements-helper.txt` and test
-`scripts/hermes-stt-api --self-test` before selecting its release.
-
-The signed release pipeline coordinates immutable worker/gateway/helper Git
-checkouts, staged codec tests, rollback selectors and live canaries before the
-desktop update is published. See [release operations](../../docs/V0.7.5_RELEASE.md).
-
-This directory contains both CtrlSpeak server roles:
+This directory contains the maintained CtrlSpeak service and command helper:
 
 - The dedicated OpenStack `CtrlSpeak` instance runs
   `CTRLSPEAK_SERVICE_ROLE=gateway` and owns client authentication, routing,
   known words/corrections, feedback, and audit records.
 - The local Ubuntu GPU host runs `CTRLSPEAK_SERVICE_ROLE=worker` and exposes
   raw `large-v3-turbo` CUDA/float16 inference to the gateway over WireGuard.
-- Nova remains the WireGuard hub but does not run a CtrlSpeak server role.
+- Nova runs the external STT helper in an isolated environment. It calls the
+  gateway and is not a CtrlSpeak server. The deployment leaves Hermes itself
+  untouched.
 - `standalone` preserves the v0.5 combined local-model/API behavior.
 
-Runtime state, virtual environments, and credentials remain outside Git.
+Runtime state, virtual environments and credentials remain outside Git. The
+[signed release workflow](../../docs/UPDATING.md#maintainer-release-workflow)
+stages immutable Git checkouts and runs health checks and canaries before
+publication. The desktop installer does not deploy services. For the wire
+contract, including WAV compatibility, FLAC pass-through, bounded admission
+and S1 metadata, see the [API guide](../../docs/API.md).
 
-v0.7.3 synchronizes the service identity with the desktop correction-dialog,
-overlay-brand, and Windows clipboard hotfix. The server roles, API schema,
-provider cascade, authentication, correction store, language policy, and
-deployment configuration are unchanged.
-
-## 0.7.4 worker-side S1 cleanup
+## Worker-side S1 cleanup
 
 Only a CUDA worker can enable S1. Requests must send `cleanup=true`; omission
 and false skip it. The gateway validates the optional cleaned result and applies
@@ -92,8 +71,10 @@ python -m pip install -r requirements-worker.txt
 python -m pip install -e . --no-deps
 ```
 
-Run tests with `python -m pytest -q`. `scripts/runtime-config` validates and
-prints a redacted configuration summary.
+In a test environment install `pytest==8.4.2`, then run
+`python ../../scripts/run_bounded_tests.py --timeout 180 --cwd . -q` from
+this directory. The full suite includes Linux shell-runtime tests.
+`scripts/runtime-config` validates and prints a redacted configuration summary.
 
 ## Worker configuration
 
@@ -120,7 +101,7 @@ correction, or feedback routes.
 ```ini
 [Service]
 Environment=CTRLSPEAK_SERVICE_ROLE=gateway
-Environment=WHISPER_BIND_HOST=0.0.0.0
+Environment=WHISPER_BIND_HOST=<private-gateway-address>
 Environment=WHISPER_PORT=8765
 Environment=CTRLSPEAK_CLIENTS_JSON={"wouter":{"token":"replace-client-token","admin":true,"providers":["*"]}}
 Environment=CTRLSPEAK_WORKER_URL=http://10.83.233.2:8765
@@ -174,6 +155,9 @@ See the repository-level `docs/API.md` for the full request/response,
 authentication, capability, routing, correction, and error contracts. Swagger
 UI is available at `/docs`, ReDoc at `/redoc`, and OpenAPI at `/openapi.json`.
 
-The Hermes command adapter now targets the gateway. Set
-`CTRLSPEAK_GATEWAY_URL` and a dedicated `CTRLSPEAK_CLIENT_TOKEN`; do not point
-it at the Ubuntu worker route.
+The external Hermes command adapter targets the gateway. Install
+`requirements-helper.txt` in the isolated helper environment and run
+`scripts/hermes-stt-api --self-test` there before selecting a release.
+Set `CTRLSPEAK_GATEWAY_URL` and a dedicated `CTRLSPEAK_CLIENT_TOKEN` in its
+protected configuration; do not point it at the Ubuntu worker route or install
+its dependencies into Hermes.
